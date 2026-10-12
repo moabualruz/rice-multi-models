@@ -13,10 +13,12 @@ import { carryFor, remember, withCarry } from './carry'
 import type { Reasoning } from './carry'
 import { COMPACT_SYSTEM, compactRequest, summaryMessage, withUserText } from './compact'
 import { createMemory } from './memory'
+import { approvalQuestion, CONFIG_FILE, emptyLoaded, estimateTokens, loadText, providerLines, remoteOf, TRUST_PREFIX } from './providers'
+import type { Loaded, Remote } from './providers'
 import { definitionOf, rewriteMain, systemFor, withIdentity } from './prompts'
 import type { PromptsPort } from './prompts'
 import { splitTarget } from './protocol'
-import type { ApiMessage, Effort, Limits, RemoteTool, StepRequest, Transport } from './protocol'
+import type { ApiMessage, Effort, Limits, RemoteTool, StepRequest, StepWire, Transport } from './protocol'
 import { STAMP } from './schemas.gen'
 import { createAssembler } from './step'
 import { remoteTools } from './tools'
@@ -39,11 +41,55 @@ let bun: string | undefined
 let codexDefaults: { model?: string; effort?: Effort } = {}
 let limits: Limits | undefined
 let lastStep: { model: string; who: string; ms: number; transport: string } | undefined
+let loaded: Loaded = emptyLoaded(CONFIG_FILE)
 
+/** Whether a model name is answered here: a Codex id, or a declared provider's model or alias. */
 export function isRouted(model: string | undefined): model is string {
-  const target = model ? splitTarget(model) : null
+  if (!model) return false
+  const target = splitTarget(model)
 
-  return target !== null && Object.hasOwn(PROVIDERS, target.provider)
+  return (target !== null && Object.hasOwn(PROVIDERS, target.provider)) || remoteOf(loaded, model) !== undefined
+}
+
+/** The provider and model a routed name stands for, an alias resolved. */
+function targetOf(model: string): { provider: string; model: string; label: string; remote?: Remote } | null {
+  const remote = remoteOf(loaded, model)
+  if (remote) return { provider: remote.provider.id, model: remote.modelId, label: remote.provider.id, remote }
+  const target = splitTarget(model)
+
+  return target ? { ...target, label: PROVIDERS[target.provider] ?? target.provider } : null
+}
+
+async function loadProviders($: EngineInterface): Promise<void> {
+  const dir = (await $.env.get('CLAUDE_CONFIG_DIR')) || `${(await $.env.get('HOME')) ?? ''}/.claude`
+  const path = `${dir}/${CONFIG_FILE}`
+  loaded = (await $.fs.exists(path)) ? loadText(path, await $.fs.read(path)) : emptyLoaded(path)
+}
+
+async function approvedSet($: EngineInterface): Promise<Set<string>> {
+  return new Set((await $.store.keys()).filter(key => key.startsWith(TRUST_PREFIX)).map(key => key.slice(TRUST_PREFIX.length)))
+}
+
+/** Undefined once the provider is approved (asked here the first time), else why the step is not sent. */
+async function approval($: EngineInterface, remote: Remote): Promise<string | undefined> {
+  if ((await approvedSet($)).has(remote.fingerprint)) return undefined
+  try {
+    const answer = await $.ui.ask(approvalQuestion(remote.provider), { options: ['Allow', 'Keep it off'], header: 'rice-models' })
+    if (answer === 'Allow') {
+      await $.store.set(`${TRUST_PREFIX}${remote.fingerprint}`, true)
+
+      return undefined
+    }
+
+    return `${remote.provider.id} was not approved; nothing was sent`
+  } catch {
+    return `${remote.provider.id} is not approved yet; run /rice-models approve ${remote.provider.id}. Nothing was sent`
+  }
+}
+
+/** What the helper gets with a step: the config's text and the approved fingerprints. */
+async function wireFor($: EngineInterface, req: StepRequest): Promise<StepWire> {
+  return { configText: loaded.text, approved: [...(await approvedSet($))], req }
 }
 
 function limitsText(): string | undefined {
@@ -154,9 +200,9 @@ async function registerAgents($: EngineInterface): Promise<void> {
 /** The request for one routed step: the system prompt, the tools, the transcript with reasoning put back. */
 async function buildRequest($: EngineInterface, e: TurnStepInput, transcript: readonly ApiMessage[]): Promise<{ req: StepRequest; handback?: string }> {
   const who = e.agentId ?? 'main'
-  const target = splitTarget(e.model)
+  const target = targetOf(e.model)
   if (!target) throw new Error(`${e.model} names no provider`)
-  const provider = PROVIDERS[target.provider] ?? target.provider
+  const provider = target.label
   const infos = await $.tool.list()
   const names = infos.map(info => info.name)
   const io = promptsPort($)
@@ -185,14 +231,20 @@ async function buildRequest($: EngineInterface, e: TurnStepInput, transcript: re
     system = prompt.text
     messages = withTask(messages, agent?.description)
   }
+  const only = target.remote?.model.tools
+  if (Array.isArray(only)) {
+    const allowed = allow
+    allow = tool => allowed(tool) && only.includes(tool)
+  }
   messages = withCarry(withIdentity(messages, target.model, provider), carryFor(who))
   const tools: RemoteTool[] = remoteTools(infos, described, allow)
   if (handback) tools.push({ name: HANDBACK_TOOL.name, description: HANDBACK_TOOL.description, schema: { ...HANDBACK_TOOL.schema } })
   const prefs = await read($, prefsAtom)
-  const effort: Effort | number = e.effort ?? prefs.effort ?? codexDefaults.effort ?? 'medium'
+  const isCodex = target.provider === 'codex' && !target.remote
+  const effort: Effort | number | undefined = e.effort ?? prefs.effort ?? (isCodex ? (codexDefaults.effort ?? 'medium') : undefined)
 
   return {
-    req: { target: e.model, system, tools, transcript: messages, effort, who, session: await $.session.id(), transport: prefs.transport },
+    req: { target: e.model, system, tools, transcript: messages, ...(effort === undefined ? {} : { effort }), who, session: await $.session.id(), transport: prefs.transport },
     ...(handback ? { handback } : {}),
   }
 }
@@ -210,16 +262,24 @@ async function* routedStep($: EngineInterface, e: TurnStepInput): AsyncGenerator
     if (!Array.isArray(transcript)) throw new Error(`the transcript of ${who} is unreadable (${transcript.deny})`)
     const built = await buildRequest($, e, transcript as ApiMessage[])
     handback = built.handback
+    const remote = targetOf(e.model)?.remote
+    if (remote) {
+      const refused = await approval($, remote)
+      if (refused) throw new Error(refused)
+      const size = estimateTokens(built.req)
+      if (size > 0.95 * remote.budget) throw new Error(`the conversation is about ${Math.round(size / 1000)}k tokens, past ${remote.target}'s ${Math.round(remote.budget / 1000)}k input budget; run /compact`)
+    }
     const reasoning: Reasoning[] = []
     let firstTool: string | undefined
-    for await (const event of helperStep(helperPort($), { req: built.req })) {
+    for await (const event of helperStep(helperPort($), await wireFor($, built.req))) {
       if (event.type === 'signature') reasoning.push({ thinking: event.thinking, signature: event.signature })
       else if (event.type === 'limits') {
         limits = event.limits
         $.ui.status(limitsText())
       } else if (event.type === 'stats') {
-        lastStep = { model: e.model, who, ms: event.totalMs, transport: event.transport }
-        $.ui.log(`${PLUGIN}: step ${who} answered in ${event.totalMs} ms over ${event.transport}`, { to: 'debug' })
+        const via = event.transport ?? 'http'
+        lastStep = { model: e.model, who, ms: event.totalMs, transport: via }
+        $.ui.log(`${PLUGIN}: step ${who} answered in ${event.totalMs} ms over ${via}`, { to: 'debug' })
       }
       else {
         if (event.type === 'tool_use') firstTool ??= event.id
@@ -241,7 +301,9 @@ const NO_USAGE: ModelUsage = { input_tokens: 0, output_tokens: 0, cache_read_inp
 
 /** A one-shot completion on a routed model, for `model.complete` and `model.fork`. */
 async function complete($: EngineInterface, req: StepRequest): Promise<ModelCompleteResult> {
-  const answer = await collectText(helperPort($), { req })
+  const remote = targetOf(req.target)?.remote
+  if (remote && (await approval($, remote))) return { isAnswered: false, reason: 'api-error', status: null, error: 'unknown', usage: NO_USAGE }
+  const answer = await collectText(helperPort($), await wireFor($, req))
   if (answer.error !== undefined) return { isAnswered: false, reason: 'api-error', status: null, error: 'unknown', usage: answer.usage ?? NO_USAGE }
   if (answer.text.trim() === '') return { isAnswered: false, reason: 'empty-reply', usage: answer.usage ?? NO_USAGE }
 
@@ -281,6 +343,21 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
   const [first, value] = args.trim().split(/\s+/)
   if (!first || first === 'status') return statusText($)
   if (first === 'models') return modelsText($)
+  if (first === 'providers') return providerLines(loaded, await approvedSet($)).join('\n')
+  if (first === 'reload') {
+    await loadProviders($)
+
+    return loaded.errors.length > 0 ? `${loaded.path} does not validate; no declared provider routes:\n${loaded.errors.join('\n')}` : providerLines(loaded, await approvedSet($)).join('\n')
+  }
+  if (first === 'approve') {
+    const provider = value ? loaded.config?.providers[value] : undefined
+    if (!provider) return `Usage: /rice-models approve <provider>; declared: ${Object.keys(loaded.config?.providers ?? {}).join(', ') || 'none'}`
+    const remote = remoteOf(loaded, `${provider.id}/${Object.keys(provider.models)[0] ?? ''}`)
+    if (!remote) return `${provider.id} declares no model`
+    await $.store.set(`${TRUST_PREFIX}${remote.fingerprint}`, true)
+
+    return `Approved ${provider.id}: conversations for its models go to ${provider.origin}. A changed address or key command asks again.`
+  }
   if (first === 'effort') {
     if (value === 'default') {
       await update($, prefsAtom, prefs => ({ ...prefs, effort: null }))
@@ -307,7 +384,7 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
     return `Routed requests use ${value === 'auto' ? 'a WebSocket, falling back to server-sent events' : value === 'ws' ? 'a WebSocket only' : 'server-sent events only'}.`
   }
 
-  return 'Usage: /rice-models [status | models | effort <level> | transport auto|ws|sse | helper session|once]'
+  return 'Usage: /rice-models [status | models | providers | approve <provider> | reload | effort <level> | transport auto|ws|sse | helper session|once]'
 }
 
 export const register: Register = on => {
@@ -315,10 +392,11 @@ export const register: Register = on => {
     const started = await next(e)
     bun = await findBun($)
     codexDefaults = await readCodexDefaults($)
+    await loadProviders($)
     await $.command.register({
       name: 'rice-models',
-      description: 'Codex models in this session: status, model list, effort and transport',
-      argumentHint: '[status | models | effort <level> | transport auto|ws|sse | helper session|once]',
+      description: 'Non-Anthropic models in this session: status, models, providers, approvals, effort, transport',
+      argumentHint: '[status | models | providers | approve <provider> | reload | effort <level> | transport auto|ws|sse | helper session|once]',
     })
     await registerAgents($)
     preferSession((await read($, prefsAtom)).helper !== 'once')
@@ -346,10 +424,12 @@ export const register: Register = on => {
     if (e.trigger === 'precompute') return { skip: 'rice-multi-models compacts a routed conversation when it is due, not ahead' }
     const transcript = await $.session.messages(e.agentId === undefined ? { as: 'api' } : { as: 'api', agentId: e.agentId })
     if (!Array.isArray(transcript)) return { skip: `rice-multi-models: the transcript is unreadable (${transcript.deny})` }
-    const effort = (await read($, prefsAtom)).effort ?? 'medium'
-    const answer = await collectText(helperPort($), {
-      req: { target: model, system: COMPACT_SYSTEM, tools: [], transcript: compactRequest(transcript as ApiMessage[], e.instructions), effort, who: `${e.agentId ?? 'main'}:compact`, session: await $.session.id() },
-    })
+    const remote = targetOf(model)?.remote
+    const refused = remote ? await approval($, remote) : undefined
+    if (refused) return { skip: `rice-multi-models: ${refused}` }
+    const effort = (await read($, prefsAtom)).effort ?? (remote ? undefined : 'medium')
+    const req: StepRequest = { target: model, system: COMPACT_SYSTEM, tools: [], transcript: compactRequest(transcript as ApiMessage[], e.instructions), ...(effort ? { effort } : {}), who: `${e.agentId ?? 'main'}:compact`, session: await $.session.id() }
+    const answer = await collectText(helperPort($), await wireFor($, req))
     if (answer.error !== undefined || answer.text.trim() === '') return { skip: `rice-multi-models: ${model} could not summarize (${answer.error ?? 'empty reply'})` }
 
     return { messages: [{ role: 'user', text: summaryMessage(answer.text), toolUses: [] }] }
@@ -377,7 +457,7 @@ export const register: Register = on => {
     if (!Array.isArray(transcript)) return next(e)
     const req: StepRequest = {
       target: model,
-      system: rewriteMain((await $.prompt.compose({ model })).sections, identityLine(splitTarget(model)?.model ?? model, PROVIDERS.codex ?? 'codex')),
+      system: rewriteMain((await $.prompt.compose({ model })).sections, identityLine(targetOf(model)?.model ?? model, targetOf(model)?.label ?? 'codex')),
       tools: [],
       transcript: withUserText(transcript as ApiMessage[], e.prompt),
       effort: 'low',

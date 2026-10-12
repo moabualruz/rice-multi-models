@@ -54,15 +54,30 @@ export type StepEvent =
   | { type: 'limits'; limits: Limits }
   | { type: 'stop'; reason: StopReason }
   | { type: 'error'; kind: 'request' | 'response'; text: string }
-  | { type: 'stats'; ttfbMs: number | null; totalMs: number; transport: string }
+  | ({ type: 'stats' } & StepStats)
 
-/** What the mod sends the helper: the step, and (for the session helper) the session's token. */
-export type StepWire = { token?: string; req: StepRequest }
+/**
+ * How one step went: ms to the first response byte (null when none came) and in all, how it travelled, and,
+ * from the claude-styx provider kinds, the request body's bytes, the prompt and output tokens and the finish.
+ */
+export type StepStats = { ttfbMs: number | null; totalMs: number; transport?: string; reqBytes?: number; in?: number | null; out?: number | null; reasoning?: number; finish?: string }
+
+/** A configured provider's key as the helper holds it (claude-styx's). */
+export type ProviderStatus = { provider: string; key: 'cached' | 'not-run' | 'failed' | 'none'; failure?: string }
+
+/**
+ * What every call to the helper carries: the session helper's token, the validated provider config's text
+ * (empty when there is none), the providers approved so far (their fingerprints) and the User-Agent.
+ */
+export type Wire = { token?: string; configText: string; approved: readonly string[]; userAgent?: string }
+
+/** A step as the helper receives it. */
+export type StepWire = Wire & { req: StepRequest }
 
 /** A step that failed before it could be answered. */
 export const failedStep = (text: string, totalMs = 0, transport = 'none'): StepEvent[] => [
   { type: 'error', kind: 'request', text },
-  { type: 'stats', ttfbMs: null, totalMs, transport },
+  { type: 'stats', ttfbMs: null, totalMs, transport, finish: 'error' },
 ]
 
 /** The provider and model of a routed id: `codex/gpt-6.1-sol` gives `codex` and `gpt-6.1-sol`. */
@@ -74,4 +89,4 @@ export function splitTarget(target: string): { provider: string; model: string }
 }
 
 /** A tool-call id minted here (a SubagentHandback the mod answers with): Anthropic-shaped, under OpenAI's 40. */
-export const mintToolId = () => `toolu_mm_${crypto.randomUUID().replaceAll('-', '').slice(0, 24)}`
+export const mintToolId = () => `toolu_rice_${crypto.randomUUID().replaceAll('-', '').slice(0, 24)}`

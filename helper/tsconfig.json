@@ -1,8 +1,14 @@
 {
+  "//": "styx/codecs/openai.spec.ts also tests the mod-side assembler, which uses the engine's types; bun test runs it",
   "compilerOptions": {
     "target": "es2023",
-    "lib": ["es2023", "dom"],
-    "types": ["bun"],
+    "lib": [
+      "es2023",
+      "dom"
+    ],
+    "types": [
+      "bun"
+    ],
     "module": "esnext",
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
@@ -10,5 +16,11 @@
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["./**/*.ts", "../hooks/protocol.ts"]
+  "include": [
+    "./**/*.ts",
+    "../hooks/protocol.ts"
+  ],
+  "exclude": [
+    "./styx/codecs/openai.spec.ts"
+  ]
 }

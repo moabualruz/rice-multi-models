@@ -14,18 +14,7 @@ type Failure = { kind: 'request' | 'response'; text: string }
 // it failed.
 type StepEnd = { chunks: TurnStepChunk[]; answer: string; toolUses: TurnStepToolUse[]; stopReason: StopReason; usage: TurnUsage | null; failure?: string; delivered?: true }
 
-// Adjacent text deltas merged into one, and adjacent thinking deltas likewise, so what arrives together
-// reaches the engine as one chunk.
-export function coalesce(events: readonly StepEvent[]): StepEvent[] {
-  const out: StepEvent[] = []
-  for (const ev of events) {
-    const last = out.at(-1)
-    if ((ev.type === 'text' || ev.type === 'thinking') && (last?.type === 'text' || last?.type === 'thinking') && last.type === ev.type) {
-      out[out.length - 1] = { type: ev.type, text: last.text + ev.text }
-    } else out.push(ev)
-  }
-  return out
-}
+export { coalesce } from './coalesce'
 
 // One step's chunks, built as its events come. A text or thinking delta continues the open block of its
 // kind, else opens one at the next index; a tool call takes the next index and closes the open block. Usage

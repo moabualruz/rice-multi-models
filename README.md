@@ -6,8 +6,14 @@ compaction. No proxy: Claude Code keeps talking to Anthropic for Claude models,
 and requests for a routed model never leave the session except to the
 provider itself.
 
-Provider so far: **OpenAI Codex through a ChatGPT subscription** (the login of
-the Codex CLI in `~/.codex/auth.json`).
+Providers:
+
+- **OpenAI Codex through a ChatGPT subscription** (the Codex CLI login in
+  `~/.codex/auth.json`): model ids `codex/<slug>`.
+- **Any endpoint you declare** in `~/.claude/rice-multi-models.json`, OpenAI-style
+  (`/chat/completions`), Anthropic-style (`/v1/messages`) or Bedrock: Ollama,
+  llama.cpp, vLLM, LM Studio, OpenRouter, OpenAI, Anthropic API keys, other clouds.
+  Model ids `<provider>/<model>` or an alias. See `example.rice-multi-models.json`.
 
 ## Use
 
@@ -40,6 +46,22 @@ To list Codex models in the `/model` picker, add rows to `~/.claude/settings.jso
 
 `behavesAs` gives the row a known model's capabilities (no unknown-model
 warning). Claude Code keeps a 200k window for these models, under Codex's own.
+
+## Declared providers
+
+`~/.claude/rice-multi-models.json` (claude-styx's format, validated whole) names
+each provider's `kind` (`openai`, `anthropic`, `bedrock`), `baseUrl`, `auth` (a key
+command with an absolute path, such as `/usr/bin/security find-generic-password ... -w`,
+or `"none"` for a local server; plain http needs `"allowHttp": true`) and `models`
+(`contextWindow`, `maxOutputTokens`, optional `effort` maps and `params`). A model's
+`tools` can list the only tools it is sent, which keeps small local models inside
+their window: `["Read", "Edit", "Write", "Bash", "Glob", "Grep"]`.
+
+Each provider is approved once: the first step asks (or run
+`/rice-models approve <provider>`), and a changed address or key command asks again.
+Keys are read only by the helper, at request time, and never logged. A step past the
+model's input budget is not sent and says to `/compact`. `/rice-models providers` lists
+them; `/rice-models reload` re-reads the file.
 
 ## How it works
 

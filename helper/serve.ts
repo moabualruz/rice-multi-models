@@ -60,7 +60,7 @@ export function serve(): void {
             }
           }, 5_000)
           try {
-            for await (const event of runStep({ req: wire.req }, controller.signal, { pool })) sink.enqueue(line(event))
+            for await (const event of runStep({ ...wire, token: undefined }, controller.signal, { pool })) sink.enqueue(line(event))
           } catch (error) {
             for (const event of failedStep(`rice-multi-models: ${error instanceof Error ? error.message : String(error)}`)) sink.enqueue(line(event))
           } finally {
