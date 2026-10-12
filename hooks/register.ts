@@ -7,7 +7,7 @@ import type { EngineInterface, ModelCompleteResult, ModelUsage, Register, TurnSt
 
 import { GENERAL_PURPOSE_PROMPT, EXPLORE_PROMPT, HANDBACK_TOOL, identityLine, toolFilter } from './agents'
 import type { AgentDef } from './agents'
-import { collectText, helperStep } from './backend'
+import { collectText, helperStep, preferSession, readyLine, sessionHelper, setSessionHelper } from './backend'
 import type { HelperPort } from './backend'
 import { carryFor, remember, withCarry } from './carry'
 import type { Reasoning } from './carry'
@@ -24,9 +24,10 @@ import type { Described } from './tools'
 import { handbackState, withTask } from './transcript'
 
 const PLUGIN = 'rice-multi-models'
+const CURL = '/usr/bin/curl'
 const PROVIDERS: Readonly<Record<string, string>> = { codex: 'OpenAI Codex (ChatGPT subscription)' }
 const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
-const prefsAtom = atom({ plugin: 'rice-multi-models', key: 'prefs' } as const, { effort: null, transport: 'auto' })
+const prefsAtom = atom({ plugin: 'rice-multi-models', key: 'prefs' } as const, { effort: null, transport: 'auto', helper: 'session' })
 
 const memory = createMemory()
 const described = new Map<string, Described>()
@@ -73,7 +74,39 @@ function promptsPort($: EngineInterface): PromptsPort {
 
 function helperPort($: EngineInterface): HelperPort {
   return {
-    spawn: input => $.process.spawn({ argv: [bun ?? 'bun', `${$.plugin.root}/helper/main.ts`, 'once'], input }),
+    once: input => $.process.spawn({ argv: [bun ?? 'bun', `${$.plugin.root}/helper/main.ts`, 'once'], input }),
+    curl: (input, socketPath) => $.process.spawn({ argv: [CURL, '-q', '-sS', '-N', '--unix-socket', socketPath, '--data-binary', '@-', 'http://rice/step'], input }),
+  }
+}
+
+/**
+ * Keeps the session helper running for the session's life: started here, announced on its standard output,
+ * started again when it exits, and given up (one process per step from then on) after three exits within a
+ * minute. The loop ends with the module, which ends the helper.
+ */
+async function superviseHelper($: EngineInterface): Promise<void> {
+  let exits: number[] = []
+  while (bun) {
+    let buffer = ''
+    try {
+      for await (const piece of $.process.spawn({ argv: [bun, `${$.plugin.root}/helper/main.ts`, 'serve'] })) {
+        if (piece.stream !== 'stdout' || sessionHelper()) continue
+        buffer += piece.text
+        const ready = readyLine(buffer)
+        if (ready) setSessionHelper(ready)
+      }
+    } catch (error) {
+      $.ui.log(`${PLUGIN}: the session helper did not start: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
+    }
+    setSessionHelper(undefined)
+    const now = await $.clock.now()
+    exits = [...exits.filter(at => now - at < 60_000), now]
+    if (exits.length >= 3) {
+      $.ui.log(`${PLUGIN}: the session helper keeps exiting; each step starts its own helper now`, { to: 'debug' })
+
+      return
+    }
+    await $.clock.sleep(1_000)
   }
 }
 
@@ -184,7 +217,10 @@ async function* routedStep($: EngineInterface, e: TurnStepInput): AsyncGenerator
       else if (event.type === 'limits') {
         limits = event.limits
         $.ui.status(limitsText())
-      } else if (event.type === 'stats') lastStep = { model: e.model, who, ms: event.totalMs, transport: event.transport }
+      } else if (event.type === 'stats') {
+        lastStep = { model: e.model, who, ms: event.totalMs, transport: event.transport }
+        $.ui.log(`${PLUGIN}: step ${who} answered in ${event.totalMs} ms over ${event.transport}`, { to: 'debug' })
+      }
       else {
         if (event.type === 'tool_use') firstTool ??= event.id
         yield* assembler.feed(event)
@@ -216,7 +252,7 @@ async function statusText($: EngineInterface): Promise<string> {
   const prefs = await read($, prefsAtom)
   const version = await $.session.version()
   const lines = [
-    `helper: ${bun ? `bun at ${bun}` : 'bun not found (install Bun, then /reload-plugins)'}; one process per request, no listening socket`,
+    `helper: ${!bun ? 'bun not found (install Bun, then /reload-plugins)' : prefs.helper === 'once' ? 'one process per step (/rice-models helper session for the session helper)' : sessionHelper() ? 'session helper running (one connection per conversation, private socket)' : 'session helper not running; one process per step'}`,
     `transport: ${prefs.transport} (auto = WebSocket, falling back to server-sent events)`,
     `effort: ${prefs.effort ?? `${codexDefaults.effort ?? 'medium'} (Codex default)`}${prefs.effort ? ' (set here)' : ''}, unless the session sets one`,
     `Codex default model: codex/${codexDefaults.model ?? 'gpt-6.1-sol'}`,
@@ -256,6 +292,14 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
 
     return `Routed models think at ${value} effort in this session, unless a request sets its own.`
   }
+  if (first === 'helper') {
+    if (value !== 'session' && value !== 'once') return 'Usage: /rice-models helper session|once'
+    const helper: 'session' | 'once' = value
+    await update($, prefsAtom, prefs => ({ ...prefs, helper }))
+    preferSession(value === 'session')
+
+    return value === 'session' ? 'Steps go to the session helper (one connection per conversation).' : 'Each step starts its own helper (no local socket).'
+  }
   if (first === 'transport') {
     if (value !== 'auto' && value !== 'ws' && value !== 'sse') return 'Usage: /rice-models transport auto|ws|sse'
     await update($, prefsAtom, prefs => ({ ...prefs, transport: value as Transport }))
@@ -263,7 +307,7 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
     return `Routed requests use ${value === 'auto' ? 'a WebSocket, falling back to server-sent events' : value === 'ws' ? 'a WebSocket only' : 'server-sent events only'}.`
   }
 
-  return 'Usage: /rice-models [status | models | effort <level> | transport auto|ws|sse]'
+  return 'Usage: /rice-models [status | models | effort <level> | transport auto|ws|sse | helper session|once]'
 }
 
 export const register: Register = on => {
@@ -274,9 +318,11 @@ export const register: Register = on => {
     await $.command.register({
       name: 'rice-models',
       description: 'Codex models in this session: status, model list, effort and transport',
-      argumentHint: '[status | models | effort <level> | transport auto|ws|sse]',
+      argumentHint: '[status | models | effort <level> | transport auto|ws|sse | helper session|once]',
     })
     await registerAgents($)
+    preferSession((await read($, prefsAtom)).helper !== 'once')
+    void superviseHelper($)
 
     return started
   })

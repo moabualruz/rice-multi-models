@@ -1,20 +1,11 @@
-// The helper that answers routed steps. `once` reads one StepWire on stdin and writes its events, one JSON
-// object per line, on stdout: no socket, no listening port; the mod spawns it per step and killing it
-// cancels the request. Runs on Bun (TypeScript as is, Node built-ins, WebSocket with headers).
-import type { StepEvent, StepWire } from '../hooks/protocol.ts'
-import { failedStep, splitTarget } from '../hooks/protocol.ts'
-import { codexStep } from './codex.ts'
-
-/** The events of one step, whichever provider its target names. */
-export async function* runStep(wire: StepWire, signal: AbortSignal): AsyncGenerator<StepEvent> {
-  const target = splitTarget(wire.req.target)
-  if (target?.provider === 'codex') {
-    yield* codexStep(wire.req, target.model, signal)
-
-    return
-  }
-  yield* failedStep(`rice-multi-models: no provider answers ${wire.req.target}`)
-}
+// The helper that answers routed steps, on Bun (TypeScript as is, Node built-ins, WebSocket with headers).
+// `serve`: the session helper (helper/serve.ts), started once per session. `once`: one StepWire on stdin,
+// its events on stdout, one JSON object per line, for when the session helper is not running; killing the
+// process cancels the request.
+import type { StepWire } from '../hooks/protocol.ts'
+import { failedStep } from '../hooks/protocol.ts'
+import { runStep } from './run.ts'
+import { serve } from './serve.ts'
 
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = []
@@ -41,6 +32,7 @@ async function once(): Promise<void> {
 if (import.meta.main) {
   const mode = process.argv[2] ?? 'once'
   if (mode === 'once') await once()
+  else if (mode === 'serve') serve()
   else {
     process.stderr.write(`rice-multi-models helper: unknown mode ${mode}\n`)
     process.exitCode = 2

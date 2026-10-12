@@ -13,6 +13,7 @@ import { originalToolNames } from './core/tools.ts'
 import { CodexAuthError, codexRequest, readCodexAuth } from './openai/auth.ts'
 import type { CodexAuthHeaders } from './openai/auth.ts'
 import { openaiInstructions } from './openai/instructions.ts'
+import { CodexSocket, SocketPool } from './socket.ts'
 
 const HTTP_URL = 'https://chatgpt.com/backend-api/codex/responses'
 const WS_URL = 'wss://chatgpt.com/backend-api/codex/responses'
@@ -20,8 +21,6 @@ const WS_URL = 'wss://chatgpt.com/backend-api/codex/responses'
 export const ORIGINATOR = 'rice_multi_models'
 const WS_BETA = 'responses_websockets=2026-02-06'
 const SSE_BETA = 'responses=experimental'
-const WS_OPEN_MS = 15_000
-const ENDS = new Set(['response.completed', 'response.failed', 'response.incomplete', 'error'])
 
 export class UpstreamError extends Error {
   constructor(
@@ -100,96 +99,6 @@ async function failureText(response: Response): Promise<string> {
   }
 
   return text.replace(/\s+/g, ' ').trim().slice(0, 300)
-}
-
-const encoder = new TextEncoder()
-
-/** One response over a fresh WebSocket, its events re-framed as server-sent events for the decoder. */
-async function openSocket(url: string, request: ResponsesRequest, auth: CodexAuthHeaders, sessionId: string, signal: AbortSignal, onLimits: (limits: Limits) => void): Promise<AsyncIterable<Uint8Array>> {
-  const socket = new WebSocket(url, {
-    headers: { ...auth, originator: ORIGINATOR, session_id: sessionId, 'OpenAI-Beta': WS_BETA },
-  } as unknown as string[])
-  const frames: Uint8Array[] = []
-  let wake: (() => void) | undefined
-  let done = false
-  let failure: Error | undefined
-  const notify = () => {
-    wake?.()
-    wake = undefined
-  }
-  const finish = (error?: Error) => {
-    if (done) return
-    done = true
-    failure = error
-    notify()
-  }
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new UpstreamError('the Codex WebSocket did not open in time')), WS_OPEN_MS)
-    socket.addEventListener('open', () => {
-      clearTimeout(timer)
-      resolve()
-    })
-    socket.addEventListener('error', () => {
-      clearTimeout(timer)
-      reject(new UpstreamError('the Codex WebSocket was refused'))
-    })
-    socket.addEventListener('close', event => {
-      clearTimeout(timer)
-      reject(new UpstreamError(`the Codex WebSocket closed before it opened (${event.code})`))
-    })
-  })
-  socket.addEventListener('message', event => {
-    const text = typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data as ArrayBuffer)
-    let parsed: Record<string, unknown> | undefined
-    try {
-      parsed = JSON.parse(text) as Record<string, unknown>
-    } catch {
-      return
-    }
-    if (parsed.type === 'codex.rate_limits') {
-      const limits = limitsOf(parsed)
-      if (limits) onLimits(limits)
-
-      return
-    }
-    frames.push(encoder.encode(`data: ${text}\n\n`))
-    notify()
-    if (typeof parsed.type === 'string' && ENDS.has(parsed.type)) {
-      finish()
-      socket.close(1000)
-    }
-  })
-  socket.addEventListener('close', event => finish(done ? undefined : new UpstreamError(`the Codex WebSocket closed mid-response (${event.code})`)))
-  socket.addEventListener('error', () => finish(new UpstreamError('the Codex WebSocket failed mid-response')))
-  const abort = () => {
-    finish(new UpstreamError('aborted'))
-    socket.close(1000)
-  }
-  signal.addEventListener('abort', abort, { once: true })
-  const { stream: _stream, ...rest } = request
-  socket.send(JSON.stringify({ type: 'response.create', ...rest }))
-
-  return {
-    async *[Symbol.asyncIterator]() {
-      try {
-        while (true) {
-          const frame = frames.shift()
-          if (frame) {
-            yield frame
-            continue
-          }
-          if (done) break
-          await new Promise<void>(resolve => {
-            wake = resolve
-          })
-        }
-        if (failure) throw failure
-      } finally {
-        signal.removeEventListener('abort', abort)
-        if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) socket.close(1000)
-      }
-    },
-  }
 }
 
 /** One response over HTTP with server-sent events; a 401 renews the Codex login once. */
@@ -307,7 +216,16 @@ class Channel<T> {
   }
 }
 
-export type CodexOptions = { authFile?: string; env?: Record<string, string | undefined>; httpUrl?: string; wsUrl?: string }
+/** A one-response stream whose connection closes when it ends, for a socket nobody keeps. */
+async function* closeAfter(stream: AsyncIterable<Uint8Array>, socket: CodexSocket): AsyncGenerator<Uint8Array> {
+  try {
+    yield* stream
+  } finally {
+    socket.close()
+  }
+}
+
+export type CodexOptions = { authFile?: string; env?: Record<string, string | undefined>; httpUrl?: string; wsUrl?: string; pool?: SocketPool }
 
 /** Answers one step with a Codex model: streamed text, reasoning and tool calls, then usage and the stop. */
 export async function* codexStep(req: StepRequest, model: string, signal: AbortSignal, options: CodexOptions = {}): AsyncGenerator<StepEvent> {
@@ -332,14 +250,28 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
   })
   const sessionId = `${req.session}:${req.who}`
   const choice: Transport = req.transport ?? 'auto'
+  const onLimits = (limits: Limits) => queue.push({ type: 'limits', limits })
+  const openSocket = async (): Promise<AsyncIterable<Uint8Array>> => {
+    const auth = await readCodexAuth(authFile)
+    const headers = { ...auth, originator: ORIGINATOR, session_id: sessionId, 'OpenAI-Beta': WS_BETA }
+    const url = options.wsUrl ?? WS_URL
+    const { stream: _stream, ...body } = request
+    if (options.pool) {
+      const taken = await options.pool.take(sessionId, url, headers)
+      transport = taken.reused ? 'ws reused' : 'ws'
+      const stream = taken.socket.response(body, signal, limitsOf, onLimits)
+
+      return options.pool.holds(taken.socket) ? stream : closeAfter(stream, taken.socket)
+    }
+    const socket = await CodexSocket.open(url, headers)
+    transport = 'ws'
+
+    return closeAfter(socket.response(body, signal, limitsOf, onLimits), socket)
+  }
   const open = async (): Promise<AsyncIterable<Uint8Array>> => {
     if (choice !== 'sse') {
       try {
-        const auth = await readCodexAuth(authFile)
-        const stream = await openSocket(options.wsUrl ?? WS_URL, request, auth, sessionId, signal, limits => queue.push({ type: 'limits', limits }))
-        transport = 'ws'
-
-        return stream
+        return await openSocket()
       } catch (error) {
         if (choice === 'ws' || signal.aborted || error instanceof CodexAuthError) throw error
       }

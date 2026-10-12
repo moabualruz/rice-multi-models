@@ -8,6 +8,7 @@ import { join } from 'node:path'
 
 import type { StepEvent, StepRequest } from '../../hooks/protocol.ts'
 import { codexStep, eventMapper, limitsOf, messagesBody, ORIGINATOR, responsesRequest } from '../codex.ts'
+import { SocketPool } from '../socket.ts'
 
 const fixture = (name: string) =>
   readFileSync(join(import.meta.dir, 'fixtures', `${name}.jsonl`), 'utf8')
@@ -68,10 +69,11 @@ afterAll(() => {
   rmSync(dir, { recursive: true, force: true })
 })
 
-async function run(transport: 'ws' | 'sse' | 'auto', wsUrl?: string): Promise<StepEvent[]> {
+async function run(transport: 'ws' | 'sse' | 'auto', wsUrl?: string, pool?: SocketPool): Promise<StepEvent[]> {
   const events: StepEvent[] = []
   for await (const event of codexStep({ ...step, transport }, 'gpt-6.1-sol', new AbortController().signal, {
     authFile,
+    pool,
     httpUrl: `http://127.0.0.1:${server.port}/responses`,
     wsUrl: wsUrl ?? `ws://127.0.0.1:${server.port}/ws`,
   })) {
@@ -159,4 +161,18 @@ test('auto falls back to server-sent events when the WebSocket cannot open', asy
   const events = await run('auto', 'ws://127.0.0.1:9/ws')
   expect(events.at(-1)).toMatchObject({ type: 'stats', transport: 'sse' })
   expect(events.find(event => event.type === 'stop')).toEqual({ type: 'stop', reason: 'end_turn' })
+})
+
+test('a pooled connection answers the next step of the same conversation without a new handshake', async () => {
+  seen = []
+  replay = fixture('text')
+  const pool = new SocketPool()
+  const first = await run('ws', undefined, pool)
+  const second = await run('ws', undefined, pool)
+  expect(first.at(-1)).toMatchObject({ type: 'stats', transport: 'ws' })
+  expect(second.at(-1)).toMatchObject({ type: 'stats', transport: 'ws reused' })
+  expect(second.filter(event => event.type === 'text').map(event => (event as { text: string }).text).join('')).toBe('two words')
+  expect(pool.size).toBe(1)
+  pool.closeAll()
+  expect(pool.size).toBe(0)
 })

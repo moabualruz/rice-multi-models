@@ -1,6 +1,6 @@
 {
   "name": "rice-multi-models",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Codex (ChatGPT subscription) models as session and subagent models, streamed over WebSocket or SSE, with Claude Code's own tools and loop",
   "types": "./types/index.d.ts"
 }
