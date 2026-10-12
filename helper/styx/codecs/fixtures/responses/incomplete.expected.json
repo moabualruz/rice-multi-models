@@ -1,0 +1,18 @@
+[
+  {
+    "type": "text",
+    "text": "The list goes on and"
+  },
+  {
+    "type": "usage",
+    "in": 32,
+    "out": 16,
+    "cacheRead": 8,
+    "cacheWrite": 0,
+    "reasoning": 0
+  },
+  {
+    "type": "stop",
+    "reason": "max_tokens"
+  }
+]

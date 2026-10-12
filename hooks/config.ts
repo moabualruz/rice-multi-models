@@ -2,7 +2,9 @@
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
 // Modified by mkh: Effort comes from ./protocol. A model's `tools` may also be a list of tool names: the only
 // tools that model is sent (for small local models). A provider may name a `sessionHeader`, which the helper
-// sets to a hash of the conversation.
+// sets to a hash of the conversation. Two more kinds, `responses` (the OpenAI Responses API) and `gemini` (Google's
+// generateContent); a model may name its own kind, so one gateway (OpenCode Zen and Go) serves each model in its
+// own protocol; `authHeader` is any provider's, defaulting by the model's kind.
 // Styx's config (styx.json in Claude Code's config directory): parsing, all-or-nothing validation, model-name resolution, and the
 // pure texts and schemas derived from a config. No I/O.
 import type { Effort } from './protocol'
@@ -12,6 +14,8 @@ type Json = Record<string, unknown>
 
 export type ModelConfig = {
   id: string
+  // The protocol this model is spoken in: its own `kind`, else its provider's.
+  kind: Kind
   contextWindow: number
   maxInputTokens?: number
   maxOutputTokens: number
@@ -31,8 +35,11 @@ export type ModelConfig = {
 
 // A prompt-cache lifetime: five minutes or one hour.
 export type Cache = '5m' | '1h'
-// The provider protocols: Chat Completions, the Anthropic Messages API, and Amazon Bedrock Converse.
-export type Kind = 'openai' | 'anthropic' | 'bedrock'
+// The provider protocols: Chat Completions, the Anthropic Messages API, Amazon Bedrock Converse, the OpenAI
+// Responses API, and Google's generateContent.
+export type Kind = 'openai' | 'anthropic' | 'bedrock' | 'responses' | 'gemini'
+// How the key is sent: `Authorization: Bearer`, Anthropic's `x-api-key`, or Google's `x-goog-api-key`.
+export type AuthHeader = 'bearer' | 'x-api-key' | 'x-goog-api-key'
 // A provider's key source: a credential helper run with no shell, whose standard output is the key, kept
 // for ttlSeconds; or "none", for a server that checks no key (no authorization header is sent).
 export type Auth = { command: readonly string[]; ttlSeconds: number } | 'none'
@@ -44,8 +51,8 @@ export type ProviderConfig = {
   origin: string
   allowHttp: boolean
   auth: Auth
-  // How the key is sent: `Authorization: Bearer`, or Anthropic's `x-api-key`.
-  authHeader: 'bearer' | 'x-api-key'
+  // How the key is sent, when the provider names it; else by each model's kind (AUTH_HEADERS).
+  authHeader?: AuthHeader
   headers: Record<string, string>
   params: Json
   timeoutMs?: number
@@ -82,14 +89,26 @@ export const KINDS: Readonly<Record<Kind, KindSpec>> = {
     cache: false,
   },
   anthropic: {
-    providerKeys: ['authHeader'],
+    providerKeys: [],
     modelKeys: ['parallelToolCalls'],
     reservedParams: ['model', 'messages', 'system', 'tools', 'tool_choice', 'stream', 'max_tokens'],
     sendsMaxTokens: true,
     cache: true,
   },
   bedrock: { providerKeys: [], modelKeys: [], reservedParams: ['messages', 'system', 'toolConfig'], sendsMaxTokens: true, cache: true },
+  responses: {
+    providerKeys: [],
+    modelKeys: ['parallelToolCalls'],
+    reservedParams: ['model', 'input', 'instructions', 'tools', 'tool_choice', 'stream', 'previous_response_id'],
+    sendsMaxTokens: false,
+    cache: false,
+  },
+  gemini: { providerKeys: [], modelKeys: [], reservedParams: ['contents', 'systemInstruction', 'tools', 'toolConfig'], sendsMaxTokens: false, cache: false },
 }
+
+// The header each kind's own API takes its key in, used when the provider names none.
+export const AUTH_HEADERS: Readonly<Record<Kind, AuthHeader>> = { openai: 'bearer', anthropic: 'x-api-key', bedrock: 'bearer', responses: 'bearer', gemini: 'x-goog-api-key' }
+export const authHeaderOf = (p: Pick<ProviderConfig, 'authHeader'>, m: Pick<ModelConfig, 'kind'>): AuthHeader => p.authHeader ?? AUTH_HEADERS[m.kind]
 
 export const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 // The native Agent tool's `model` values.
@@ -105,10 +124,11 @@ const HEADER_VALUE_RE = /^[\x20-\x7e]*$/
 // a dash, and no trailing dot.
 const HOST_RE = /^(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+$/
 export const RESERVED_ALIASES = new Set(['fable', 'opus', 'sonnet', 'haiku', 'default', 'inherit', 'native'])
-const PROVIDER_KEYS = ['kind', 'baseUrl', 'allowHttp', 'auth', 'headers', 'params', 'timeoutMs', 'maxTools', 'models', 'sessionHeader']
+const PROVIDER_KEYS = ['kind', 'baseUrl', 'allowHttp', 'auth', 'authHeader', 'headers', 'params', 'timeoutMs', 'maxTools', 'models', 'sessionHeader']
 // The keys a model and an alias share: what a request is built from.
 const REQUEST_KEYS = ['params', 'effort', 'cache', 'headers']
-const MODEL_KEYS = ['contextWindow', 'maxInputTokens', 'maxOutputTokens', 'tools', 'vision', ...REQUEST_KEYS]
+const MODEL_KEYS = ['kind', 'contextWindow', 'maxInputTokens', 'maxOutputTokens', 'tools', 'vision', ...REQUEST_KEYS]
+const KIND_NAMES = '"openai", "responses", "anthropic", "gemini" or "bedrock"'
 const KEY_TTL_S = 300
 // The longest timer a runtime takes (2^31 - 1 ms); a longer one fires at once.
 export const MAX_TIMEOUT_MS = 2 ** 31 - 1
@@ -124,10 +144,11 @@ function allowKeys(obj: Json, keys: readonly string[], path: string, errors: str
   for (const k of Object.keys(obj)) if (!keys.includes(k)) errors.push(`${path}.${k}: unknown key`)
 }
 
-function params(v: unknown, kind: Kind, path: string, errors: string[]): Json {
+// Params checked against the keys every kind in `kinds` sets (a provider's are sent to each of its models' kinds).
+function params(v: unknown, kinds: Kind | readonly Kind[], path: string, errors: string[]): Json {
   if (v === undefined) return {}
   if (!isObject(v)) return errors.push(`${path}: must be an object`), {}
-  for (const k of KINDS[kind].reservedParams) if (k in v) errors.push(`${path}.${k}: reserved; styx sets it`)
+  for (const k of new Set((typeof kinds === 'string' ? [kinds] : kinds).flatMap(kind => KINDS[kind].reservedParams))) if (k in v) errors.push(`${path}.${k}: reserved; styx sets it`)
   return v
 }
 
@@ -228,8 +249,19 @@ function auth(id: string, v: Json, path: string, errors: string[]): Auth {
   return { command: argv ?? [], ttlSeconds: (ttlSeconds as number | undefined) ?? KEY_TTL_S }
 }
 
-function model(id: string, kind: Kind, v: unknown, path: string, errors: string[]): ModelConfig | undefined {
+// A model's own kind: any but bedrock, on a provider that is not bedrock. Undefined when it names none.
+function modelKind(v: Json, providerKind: Kind, path: string, errors: string[]): Kind | undefined {
+  const k = v['kind']
+  if (k === undefined) return undefined
+  if (!isKind(k) || k === 'bedrock') errors.push(`${path}.kind: must be "openai", "responses", "anthropic" or "gemini"`)
+  else if (providerKind === 'bedrock') errors.push(`${path}.kind: a bedrock provider's models are all bedrock`)
+  else return k
+  return undefined
+}
+
+function model(id: string, providerKind: Kind, v: unknown, path: string, errors: string[]): ModelConfig | undefined {
   if (!isObject(v)) return errors.push(`${path}: must be an object`), undefined
+  const kind = modelKind(v, providerKind, path, errors) ?? providerKind
   const spec = KINDS[kind]
   allowKeys(v, [...MODEL_KEYS, ...spec.modelKeys], path, errors)
   // A key of another kind is reported above and read as absent.
@@ -250,6 +282,7 @@ function model(id: string, kind: Kind, v: unknown, path: string, errors: string[
   }
   const out: ModelConfig = {
     id,
+    kind,
     contextWindow: contextWindow as number,
     ...(maxInputTokens === undefined ? {} : { maxInputTokens: maxInputTokens as number }),
     maxOutputTokens: maxOutputTokens as number,
@@ -260,7 +293,7 @@ function model(id: string, kind: Kind, v: unknown, path: string, errors: string[
     vision: bool(v['vision'], true, `${path}.vision`, errors),
     ...requests(v, kind, path, errors, isCount(maxOutputTokens) ? maxOutputTokens : Infinity),
   }
-  if (isCount(contextWindow) && isCount(maxOutputTokens) && inputBudget(out, kind) <= 0) {
+  if (isCount(contextWindow) && isCount(maxOutputTokens) && inputBudget(out) <= 0) {
     errors.push(`${path}: maxOutputTokens leaves no input budget inside contextWindow`)
   }
   return out
@@ -270,12 +303,15 @@ function provider(id: string, v: unknown, path: string, errors: string[]): Provi
   if (!ID_RE.test(id) || id === 'native') errors.push(`${path}: provider ids are lowercase letters, digits and dashes (not "native")`)
   if (!isObject(v)) return errors.push(`${path}: must be an object`), undefined
   const { kind: rawKind, baseUrl, timeoutMs, maxTools, models } = v
-  if (!isKind(rawKind)) errors.push(`${path}.kind: must be "openai", "anthropic" or "bedrock"`)
+  if (!isKind(rawKind)) errors.push(`${path}.kind: must be ${KIND_NAMES}`)
   // An unknown kind's keys are checked as openai's.
   const kind = isKind(rawKind) ? rawKind : 'openai'
-  const spec = KINDS[kind]
+  // Every kind the provider's requests are spoken in: its own and its models' (a model's bad kind is reported with the model).
+  const raw = isObject(models) ? Object.values(models) : []
+  const kinds = [...new Set<Kind>([kind, ...raw.flatMap(m => (isObject(m) && isKind(m['kind']) && m['kind'] !== 'bedrock' && kind !== 'bedrock' ? [m['kind']] : []))])]
+  const providerKeys = kinds.flatMap(k => KINDS[k].providerKeys)
   // A retired apiKeyEnv is reported by auth(), with what replaced it.
-  allowKeys(v, [...PROVIDER_KEYS, ...spec.providerKeys, 'apiKeyEnv'], path, errors)
+  allowKeys(v, [...PROVIDER_KEYS, ...providerKeys, 'apiKeyEnv'], path, errors)
   const allowHttp = bool(v['allowHttp'], false, `${path}.allowHttp`, errors)
   let origin = ''
   let base = ''
@@ -302,10 +338,11 @@ function provider(id: string, v: unknown, path: string, errors: string[]): Provi
   }
   const key = auth(id, v, path, errors)
   if (key === 'none' && kind === 'bedrock') errors.push(`${path}.auth: "none" is not allowed on a bedrock provider; Bedrock needs a key`)
-  // An anthropic provider sends `x-api-key` unless it names bearer (a gateway, bedrock-mantle); the others
-  // send bearer.
-  const authHeader = spec.providerKeys.includes('authHeader') ? v['authHeader'] : undefined
-  if (authHeader !== undefined && authHeader !== 'bearer' && authHeader !== 'x-api-key') errors.push(`${path}.authHeader: must be "bearer" or "x-api-key"`)
+  // A model sends its key the way its kind's API takes it (AUTH_HEADERS) unless the provider names one header
+  // for all (a gateway, bedrock-mantle).
+  const authHeader = v['authHeader']
+  const authHeaderOk = authHeader === 'bearer' || authHeader === 'x-api-key' || authHeader === 'x-goog-api-key'
+  if (authHeader !== undefined && !authHeaderOk) errors.push(`${path}.authHeader: must be "bearer", "x-api-key" or "x-goog-api-key"`)
   if (timeoutMs !== undefined && !(isCount(timeoutMs) && timeoutMs <= MAX_TIMEOUT_MS)) errors.push(`${path}.timeoutMs: must be a positive integer of at most ${MAX_TIMEOUT_MS}`)
   if (maxTools !== undefined && !isCount(maxTools)) errors.push(`${path}.maxTools: must be a positive integer`)
   const sessionHeader = v['sessionHeader']
@@ -321,7 +358,7 @@ function provider(id: string, v: unknown, path: string, errors: string[]): Provi
       if (parsed !== undefined) out[mid] = parsed
     }
   }
-  const shared = params(v['params'], kind, `${path}.params`, errors)
+  const shared = params(v['params'], kinds, `${path}.params`, errors)
   thinkingBudget(shared, Math.min(...Object.values(out).map(m => m.maxOutputTokens)), `${path}.params`, errors)
   return {
     id,
@@ -330,11 +367,11 @@ function provider(id: string, v: unknown, path: string, errors: string[]): Provi
     origin,
     allowHttp,
     auth: key,
-    authHeader: (authHeader as ProviderConfig['authHeader'] | undefined) ?? (kind === 'anthropic' ? 'x-api-key' : 'bearer'),
+    ...(authHeaderOk ? { authHeader: authHeader as AuthHeader } : {}),
     headers: headers(v['headers'], `${path}.headers`, errors),
     params: shared,
     ...(timeoutMs === undefined ? {} : { timeoutMs: timeoutMs as number }),
-    streamUsage: bool(spec.providerKeys.includes('streamUsage') ? v['streamUsage'] : undefined, true, `${path}.streamUsage`, errors),
+    streamUsage: bool(providerKeys.includes('streamUsage') ? v['streamUsage'] : undefined, true, `${path}.streamUsage`, errors),
     maxTools: (maxTools as number | undefined) ?? 128,
     ...(sessionHeaderOk ? { sessionHeader: (sessionHeader as string).toLowerCase() } : {}),
     models: out,
@@ -387,8 +424,9 @@ export function parseConfig(text: string): { config?: Config; errors: string[] }
     const host = why === undefined ? own(providers, target.slice(0, slash)) : undefined
     const set = REQUEST_KEYS.some(k => k in alias)
     if (set && why === undefined && host === undefined) errors.push(`${path}: ${REQUEST_KEYS.join(', ')} need a provider/model target, not a native one`)
-    const max = host === undefined ? Infinity : (own(host.models, target.slice(slash + 1))?.maxOutputTokens ?? Infinity)
-    aliases[name] = { target, ...(typeof note === 'string' ? { note } : {}), ...(set && host !== undefined ? requests(alias as Json, host.kind, path, errors, max, true) : {}) }
+    const aimed = host === undefined ? undefined : own(host.models, target.slice(slash + 1))
+    const max = aimed?.maxOutputTokens ?? Infinity
+    aliases[name] = { target, ...(typeof note === 'string' ? { note } : {}), ...(set && host !== undefined ? requests(alias as Json, aimed?.kind ?? host.kind, path, errors, max, true) : {}) }
   }
   return errors.length > 0 ? { errors } : { config: { providers, aliases }, errors }
 }
@@ -412,6 +450,6 @@ export const fingerprint = (p: ProviderConfig) => `${p.kind}|${p.origin}|${p.aut
 
 // The tokens a request may carry: the input cap, and no more than the window leaves after a sent max-tokens
 // value (always sent by the anthropic and bedrock kinds; by openai when maxTokensParam names its key).
-export function inputBudget(m: Pick<ModelConfig, 'contextWindow' | 'maxInputTokens' | 'maxOutputTokens' | 'maxTokensParam'>, kind: Kind): number {
-  return Math.min(m.maxInputTokens ?? Infinity, m.contextWindow - (KINDS[kind].sendsMaxTokens || m.maxTokensParam ? m.maxOutputTokens : 0))
+export function inputBudget(m: Pick<ModelConfig, 'kind' | 'contextWindow' | 'maxInputTokens' | 'maxOutputTokens' | 'maxTokensParam'>): number {
+  return Math.min(m.maxInputTokens ?? Infinity, m.contextWindow - (KINDS[m.kind].sendsMaxTokens || m.maxTokensParam ? m.maxOutputTokens : 0))
 }

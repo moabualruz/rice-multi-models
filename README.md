@@ -10,10 +10,12 @@ Providers:
 
 - **OpenAI Codex through a ChatGPT subscription** (the Codex CLI login in
   `~/.codex/auth.json`): model ids `codex/<slug>`.
-- **Any endpoint you declare** in `~/.claude/rice-multi-models.json`, OpenAI-style
-  (`/chat/completions`), Anthropic-style (`/v1/messages`) or Bedrock: Ollama,
-  llama.cpp, vLLM, LM Studio, OpenRouter, OpenAI, Anthropic API keys, other clouds.
+- **Any endpoint you declare** in `~/.claude/rice-multi-models.json`: Chat Completions,
+  the OpenAI Responses API, Anthropic Messages, Google Gemini or Bedrock, chosen per model:
+  Ollama, llama.cpp, vLLM, LM Studio, OpenRouter, OpenAI, Anthropic API keys, other clouds.
   Model ids `<provider>/<model>` or an alias. See `example.rice-multi-models.json`.
+- **OpenCode Zen and OpenCode Go**: `/rice-models opencode write` declares every model
+  each one serves, in its own protocol, with the key from OpenCode's login.
 - **Agent CLIs as workers**: Antigravity (`agy`, Gemini) and Grok (`grok`) run their own loop and
   tools. Model ids `agy/<model>` and `grok/<model>`; agent types `rice-multi-models:agy`,
   `agy-write`, `grok`, `grok-write` (registered when the CLI is installed).
@@ -65,14 +67,40 @@ is refused in headless mode. As the main session model (`/model agy/gemini-3.8-f
 ## Declared providers
 
 `~/.claude/rice-multi-models.json` (claude-styx's format, validated whole) names
-each provider's `kind` (`openai`, `anthropic`, `bedrock`), `baseUrl`, `auth` (a key
-command with an absolute path, such as `/usr/bin/security find-generic-password ... -w`,
-or `"none"` for a local server; plain http needs `"allowHttp": true`) and `models`
-(`contextWindow`, `maxOutputTokens`, optional `effort` maps and `params`). A model's
-`tools` can list the only tools it is sent, which keeps small local models inside
-their window: `["Read", "Edit", "Write", "Bash", "Glob", "Grep"]`.
-A provider's `sessionHeader` (for OpenCode Go and Zen: `"x-opencode-session"`) carries a
-stable hash of the conversation, which those services route and cache by.
+each provider's `kind`, `baseUrl`, `auth` (a key command with an absolute path, such as
+`/usr/bin/security find-generic-password ... -w`, or `"none"` for a local server; plain
+http needs `"allowHttp": true`) and `models` (`contextWindow`, `maxOutputTokens`,
+optional `effort` maps and `params`). A model's `tools` can list the only tools it is
+sent, which keeps small local models inside their window:
+`["Read", "Edit", "Write", "Bash", "Glob", "Grep"]`.
+
+| `kind` | Protocol | Path under `baseUrl` | Key header |
+| --- | --- | --- | --- |
+| `openai` | Chat Completions | `/chat/completions` | `Authorization: Bearer` |
+| `responses` | OpenAI Responses (`store: false`, reasoning carried back encrypted) | `/responses` | `Authorization: Bearer` |
+| `anthropic` | Anthropic Messages | `/v1/messages` (`/messages` when the base ends in `/v1`) | `x-api-key` |
+| `gemini` | Google generateContent (thought signatures carried back) | `/models/<id>:streamGenerateContent?alt=sse` | `x-goog-api-key` |
+| `bedrock` | Amazon Bedrock Converse | `/model/<id>/converse-stream` | `Authorization: Bearer` |
+
+A model may set its own `kind`, so one gateway that serves each model in its maker's
+protocol is one provider. A provider's `authHeader` (`bearer`, `x-api-key` or
+`x-goog-api-key`) sends every model's key one way. A `responses` model that does not
+reason takes `"params": { "include": null }`. A provider's `sessionHeader` carries a
+stable hash of the conversation, which some services route and cache by.
+
+### OpenCode Zen and Go
+
+`/rice-models opencode` builds both providers from each gateway's model list
+(`/inference/v1/models`, `/inference/go/v1/models`) and the models.dev catalog OpenCode
+itself reads: each model's protocol (Chat Completions, Responses, Anthropic Messages or
+Gemini), limits, vision and effort levels. `/rice-models opencode write` saves them as
+`opencode` (Zen, pay as you go) and `opencode-go` (the Go subscription) and keeps your
+other providers; `zen` or `go` limits it to one. The key comes from OpenCode's own
+`~/.local/share/opencode/auth.json` (`opencode auth login`): one console key serves both,
+so each reads its own entry and falls back to the other's. Requests carry
+`x-opencode-session` and name this mod as the client. Zen needs account credit and Go an
+active subscription; the gateway's refusal says which. OpenCode's free Zen models answer
+only OpenCode itself.
 
 Each provider is approved once: the first step asks (or run
 `/rice-models approve <provider>`), and a changed address or key command asks again.

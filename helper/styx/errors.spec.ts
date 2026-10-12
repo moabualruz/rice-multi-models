@@ -141,3 +141,17 @@ test('logJson is JSON.stringify with U+2028, U+2029 and the bidirectional contro
   expect(JSON.parse(out)).toBe(bad.join('|'))
   expect(logJson('plain "quoted" text\n')).toBe(JSON.stringify('plain "quoted" text\n'))
 })
+
+test('a billing refusal says to add credit or a plan; a key read by another command than the keychain names that command', () => {
+  const JQ = { ...P, auth: { command: ['/usr/bin/jq', '-r', '.x.key', '/h/auth.json'], ttlSeconds: 300 } } as ProviderConfig
+  expect(httpErrorText(JQ, 402, '{"error":{"type":"server_error","message":"Upstream request failed: Insufficient account funds"}}', 'kimi-k3')).toBe(
+    'rice-multi-models: acme HTTP 402: Upstream request failed: Insufficient account funds; the account needs credit or an active plan for kimi-k3: add it, then retry',
+  )
+  expect(httpErrorText(JQ, 403, '{"error":{"message":"An active OpenCode Go subscription is required to use Go models."}}', 'glm-5.3')).toBe(
+    'rice-multi-models: acme HTTP 403: An active OpenCode Go subscription is required to use Go models.; the account needs credit or an active plan for glm-5.3: add it, then retry',
+  )
+  expect(httpErrorText(JQ, 401, '{"error":{"message":"Invalid credential"}}', 'm')).toBe('rice-multi-models: acme rejected its key (HTTP 401); check the key /usr/bin/jq -r .x.key /h/auth.json prints, then retry')
+  expect(httpErrorText(JQ, 403, '{"error":{"message":"Model access is disabled"}}', 'm')).toBe(
+    'rice-multi-models: acme HTTP 403: Model access is disabled; ask the acme admin for access, or check the key /usr/bin/jq -r .x.key /h/auth.json prints',
+  )
+})

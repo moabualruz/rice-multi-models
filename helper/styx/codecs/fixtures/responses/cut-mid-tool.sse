@@ -1,0 +1,6 @@
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"Read","arguments":""}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_1","delta":"{\"file_path\":\"/tmp/a"}
+

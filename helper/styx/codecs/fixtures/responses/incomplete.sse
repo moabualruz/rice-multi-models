@@ -1,0 +1,9 @@
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[]}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","output_index":0,"item_id":"msg_1","content_index":0,"delta":"The list goes on and"}
+
+event: response.incomplete
+data: {"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":40,"input_tokens_details":{"cached_tokens":8},"output_tokens":16,"output_tokens_details":{"reasoning_tokens":0}}}}
+

@@ -30,7 +30,7 @@ export function providerRows(config: Config | undefined): PickerRow[] {
     Object.entries(provider.models).map(([id, model]) => ({
       model: `${provider.id}/${id}`,
       label: `${id} (${provider.id})`,
-      description: `${provider.kind} endpoint ${provider.origin} via rice-multi-models${window(model.contextWindow)}`,
+      description: `${model.kind} endpoint ${provider.origin} via rice-multi-models${window(model.contextWindow)}`,
       behavesAs: BEHAVES_AS,
     })),
   )

@@ -1,0 +1,6 @@
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"**Planning** I should read the file first.","thought":true}]},"index":0}],"usageMetadata":{"promptTokenCount":900,"totalTokenCount":900}}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"Reading it now."}]},"index":0}]}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"Read","args":{"file_path":"/a.txt"}},"thoughtSignature":"CiQBsig1"},{"functionCall":{"name":"Grep","args":{"pattern":"x"}}}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":900,"cachedContentTokenCount":512,"candidatesTokenCount":40,"thoughtsTokenCount":120,"totalTokenCount":1060}}
+

@@ -1,0 +1,7 @@
+[
+  {
+    "type": "error",
+    "kind": "response",
+    "text": "rice-multi-models: p response failed: Gemini ended the response with MALFORMED_FUNCTION_CALL; retry, or see the debug log"
+  }
+]

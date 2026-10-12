@@ -1,6 +1,8 @@
 // Copied from Trosfy/claude-styx styxd/errors.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: import paths for this layout; Effort comes from hooks/protocol.
+// Modified by mkh: import paths for this layout; Effort comes from hooks/protocol. A billing refusal (HTTP 402,
+// or a 403 that names a subscription or funds) says to add credit or a plan; a key read by another command than
+// the keychain's is named in place of the keychain fix.
 // The one-line texts of failed provider requests: what failed, why, and what to do. Every provider text in
 // them is redacted and cut short. Pure.
 import type { ProviderConfig } from '../../hooks/config'
@@ -66,11 +68,16 @@ export function httpErrorText(p: ProviderConfig, status: number, body: string, m
     const shown = allowed.length > 12 ? `${allowed.slice(0, 12).join(', ')} (+${allowed.length - 12} more)` : allowed.join(', ')
     return `rice-multi-models: your key for ${p.id} can't use ${model}${shown ? `; allowed: ${shown}` : ''}. Pick an allowed model, or ask the gateway's admin for access`
   }
+  const keyFix = p.auth !== 'none' && p.auth.command[0] !== '/usr/bin/security' ? `check the key ${p.auth.command.join(' ')} prints` : `store a valid one with security add-generic-password -U -s rice-multi-models -a ${p.id} -w`
+  if (status === 402 || ((status === 401 || status === 403) && /subscription|insufficient (account )?funds|out of credit|billing|payment required/i.test(message))) {
+    return `rice-multi-models: ${p.id} HTTP ${status}: ${said}; the account needs credit or an active plan for ${model}: add it, then retry`
+  }
+  if (status === 401 && p.auth !== 'none' && p.auth.command[0] !== '/usr/bin/security') return `rice-multi-models: ${p.id} rejected its key (HTTP 401); ${keyFix}, then retry`
   if (status === 401) return p.auth === 'none' ? `rice-multi-models: ${p.id} wants a key (HTTP 401) but auth is "none"; store the key in the keychain (security add-generic-password -U -s rice-multi-models -a ${p.id} -w) and set auth.command, then retry` : `rice-multi-models: ${p.id} rejected its key (HTTP 401); store a valid one with security add-generic-password -U -s rice-multi-models -a ${p.id} -w, then retry`
   if (/policy|guardrail|content_filter|moderation/i.test(`${type} ${message}`)) return `rice-multi-models: ${p.id} refused the request under its content policy (HTTP ${status}): ${said}. Rephrase it, or use another model`
   const fixes: Record<number, string> = {
     429: 'rate limited: wait, then retry',
-    403: p.auth === 'none' ? `ask the ${p.id} admin for access; if it wants a key, store the key in the keychain (security add-generic-password -U -s rice-multi-models -a ${p.id} -w) and set auth.command (auth is "none")` : `ask the ${p.id} admin for access, or store another key with security add-generic-password -U -s rice-multi-models -a ${p.id} -w`,
+    403: p.auth === 'none' ? `ask the ${p.id} admin for access; if it wants a key, store the key in the keychain (security add-generic-password -U -s rice-multi-models -a ${p.id} -w) and set auth.command (auth is "none")` : `ask the ${p.id} admin for access, or ${keyFix.replace('store a valid one', 'store another key')}`,
     404: `check providers.${p.id}.baseUrl and the model id ${model}`,
   }
   const fix = status >= 500 ? 'the provider failed: retry, or pick another model' : (fixes[status] ?? `check the params of ${model} in rice-multi-models.json`)

@@ -13,6 +13,8 @@ import { carryFor, remember, withCarry } from './carry'
 import type { Reasoning } from './carry'
 import { COMPACT_SYSTEM, compactRequest, summaryMessage, withUserText } from './compact'
 import { createMemory } from './memory'
+import { CATALOG_URL, kindCounts, liveIds, opencodeProvider, TIERS } from './opencode'
+import type { Tier } from './opencode'
 import { agyModelIds, codexRows, mergeRows, providerRows, workerRows } from './picker'
 import type { PickerRow } from './picker'
 import { approvalQuestion, CONFIG_FILE, emptyLoaded, estimateTokens, loadText, providerLines, remoteOf, TRUST_PREFIX } from './providers'
@@ -28,6 +30,8 @@ import type { Described } from './tools'
 import { handbackState, withTask } from './transcript'
 
 const PLUGIN = 'rice-multi-models'
+/** Who the requests to declared providers say they come from (OpenCode Go asks each client to name itself). */
+const USER_AGENT = 'rice-multi-models/0.5.0 (claude-code)'
 const CURL = '/usr/bin/curl'
 const PROVIDERS: Readonly<Record<string, string>> = { codex: 'OpenAI Codex (ChatGPT subscription)', agy: 'Antigravity (agy CLI)', grok: 'Grok (grok CLI)' }
 /** Agent CLIs that run their own loop and tools: their label, default model, and what a user asks for to use them. */
@@ -100,7 +104,7 @@ async function approval($: EngineInterface, remote: Remote): Promise<string | un
 
 /** What the helper gets with a step: the config's text and the approved fingerprints. */
 async function wireFor($: EngineInterface, req: StepRequest): Promise<StepWire> {
-  return { configText: loaded.text, approved: [...(await approvedSet($))], req }
+  return { configText: loaded.text, approved: [...(await approvedSet($))], req, userAgent: USER_AGENT }
 }
 
 function limitsText(): string | undefined {
@@ -436,8 +440,62 @@ async function writePicker($: EngineInterface): Promise<string> {
   return `Wrote ${rows.length} routed rows into ${path} (modelPicker); rows you wrote yourself were kept. /model lists them in new sessions.`
 }
 
+/** An installed CLI's absolute path, found on PATH by a shell, or undefined. */
+async function which($: EngineInterface, name: string): Promise<string | undefined> {
+  const found = await $.process.run(['/bin/sh', '-c', 'command -v "$0"', name], { timeoutMs: 10_000 }).catch(() => undefined)
+  const path = found?.exitCode === 0 ? found.stdout.trim().split('\n')[0] : undefined
+
+  return path?.startsWith('/') ? path : undefined
+}
+
+/**
+ * OpenCode Zen and Go as providers, from each gateway's model list and the models.dev catalog: a summary, or
+ * with `write` the providers saved into rice-multi-models.json (other providers kept) and reloaded.
+ */
+async function opencodeCommand($: EngineInterface, words: readonly string[]): Promise<string> {
+  const tiers: Tier[] = words.includes('zen') ? ['zen'] : words.includes('go') ? ['go'] : ['zen', 'go']
+  const write = words.includes('write')
+  const jq = await which($, 'jq')
+  if (!jq) return 'rice-models opencode reads the key from OpenCode\'s auth file with jq; install jq first.'
+  const home = (await $.env.get('HOME')) ?? ''
+  const authFile = `${(await $.env.get('XDG_DATA_HOME')) || `${home}/.local/share`}/opencode/auth.json`
+  // The auth file's entry names only, never a value.
+  const listed = (await $.fs.exists(authFile)) ? await $.process.run([jq, '-r', 'keys[]', authFile], { timeoutMs: 10_000 }).catch(() => undefined) : undefined
+  const entries = new Set(listed?.exitCode === 0 ? listed.stdout.split('\n').map(line => line.trim()) : [])
+  const catalog = await $.http.fetch(CATALOG_URL)
+  if (!catalog.ok) return `rice-models opencode: ${CATALOG_URL} answered HTTP ${catalog.status}; retry later.`
+  const parsed: unknown = JSON.parse(catalog.text)
+  const built: { tier: Tier; provider: Record<string, unknown>; skipped: string[] }[] = []
+  for (const tier of tiers) {
+    const live = await $.http.fetch(`${TIERS[tier].base}/models`)
+    if (!live.ok) return `rice-models opencode: ${TIERS[tier].base}/models answered HTTP ${live.status}; retry later.`
+    built.push({ tier, ...opencodeProvider(tier, parsed, liveIds(live.text), jq, authFile) })
+  }
+  const lines = built.map(({ tier, provider, skipped }) => {
+    const t = TIERS[tier]
+    const key = entries.has(t.keys[0]) ? `key: the ${t.keys[0]} entry` : entries.has(t.keys[1]) ? `key: the ${t.keys[1]} entry (one console key serves Zen and Go)` : `key: none yet; run opencode auth login and pick ${t.label}`
+    const models = Object.keys(provider.models as object)
+
+    return `${t.id} (${t.label}, ${t.base}): ${models.length} models (${kindCounts(provider)}); ${key}${skipped.length > 0 ? `\n  left out: ${skipped.join(', ')}` : ''}`
+  })
+  if (!write) return `${lines.join('\n')}\n\n/rice-models opencode ${tiers.length === 1 ? `${tiers[0]} ` : ''}write saves ${tiers.length === 1 ? 'it' : 'them'} into rice-multi-models.json.`
+  const dir = (await $.env.get('CLAUDE_CONFIG_DIR')) || `${home}/.claude`
+  const path = `${dir}/${CONFIG_FILE}`
+  const current = (await $.fs.exists(path)) ? (JSON.parse(await $.fs.read(path)) as Record<string, unknown>) : {}
+  const providers = { ...((current.providers as Record<string, unknown> | undefined) ?? {}) }
+  for (const { tier, provider } of built) providers[TIERS[tier].id] = provider
+  const next = `${JSON.stringify({ ...current, providers }, null, 2)}\n`
+  const checked = loadText(path, next)
+  if (checked.errors.length > 0) return `rice-models opencode: the result does not validate, so nothing was written:\n${checked.errors.join('\n')}`
+  await $.fs.write(path, next)
+  await loadProviders($)
+
+  return `${lines.join('\n')}\n\nWrote ${built.map(b => TIERS[b.tier].id).join(' and ')} into ${path}; other providers were kept. The first request asks to approve each one (or /rice-models approve <id>). /rice-models picker write lists the models in /model.`
+}
+
 async function runCommand($: EngineInterface, args: string): Promise<string> {
   const [first, value] = args.trim().split(/\s+/)
+  if (first === 'opencode') return opencodeCommand($, args.trim().split(/\s+/).slice(1))
   if (!first || first === 'status') return statusText($)
   if (first === 'models') return modelsText($)
   if (first === 'picker') return value === 'write' ? writePicker($) : `${JSON.stringify({ modelPicker: { options: await routedRows($) } }, null, 2)}\n\n/rice-models picker write puts these rows in your user settings.`
@@ -489,7 +547,7 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
     return `Routed requests use ${value === 'auto' ? 'a WebSocket, falling back to server-sent events' : value === 'ws' ? 'a WebSocket only' : 'server-sent events only'}.`
   }
 
-  return 'Usage: /rice-models [status | models | picker [write] | providers | approve <provider> | reload | effort <level> | transport auto|ws|sse | helper session|once | workers read|write]'
+  return 'Usage: /rice-models [status | models | picker [write] | providers | approve <provider> | reload | opencode [zen|go] [write] | effort <level> | transport auto|ws|sse | helper session|once | workers read|write]'
 }
 
 export const register: Register = on => {
@@ -501,7 +559,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'rice-models',
       description: 'Non-Anthropic models in this session: status, models, providers, approvals, effort, transport',
-      argumentHint: '[status | models | picker [write] | providers | approve <provider> | reload | effort <level> | transport auto|ws|sse | helper session|once | workers read|write]',
+      argumentHint: '[status | models | picker [write] | providers | approve <provider> | reload | opencode [zen|go] [write] | effort <level> | transport auto|ws|sse | helper session|once | workers read|write]',
     })
     await registerAgents($)
     preferSession((await read($, prefsAtom)).helper !== 'once')

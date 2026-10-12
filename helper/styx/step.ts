@@ -1,11 +1,12 @@
 // Copied from Trosfy/claude-styx styxd/step.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
 // Modified by mkh: import paths for this layout; Effort comes from hooks/protocol. A provider's sessionHeader
-// carries a hash of the conversation.
+// carries a hash of the conversation, which the codec also gets as a cache key. The codec and the key's header
+// follow the model's kind; the path joins its base with joinUrl.
 // One routed step inside styxd: the target resolved from the config the request carries, the key (whose
 // approval check this is), the request encoded by its kind's codec, the answer decoded into StepEvents (a
 // tool call only whole and parsed), and one debug line. Pure over a port: main.ts owns the transport.
-import { isObject, own, parseConfig } from '../../hooks/config'
+import { authHeaderOf, isObject, own, parseConfig } from '../../hooks/config'
 import type { Config, ProviderConfig } from '../../hooks/config'
 import { resolve } from '../../hooks/names'
 import { mintToolId } from '../../hooks/protocol'
@@ -14,7 +15,7 @@ import { coalesce } from '../../hooks/coalesce'
 import { createKeys } from './auth'
 import { createHash } from 'node:crypto'
 import type { Runner } from './auth'
-import { parseJson } from './codec'
+import { joinUrl, parseJson } from './codec'
 import type { Codec, Decoded } from './codec'
 import { CODECS } from './codecs'
 import { cutText, ERROR_TEXT_MAX, errorDetail, httpErrorText, logJson, oneLine } from './errors'
@@ -136,7 +137,7 @@ export function createStepper(env: Env) {
       }
       const error = events.find(e => e.type === 'error')
       env.log(
-        `styx step ${req.who} → ${t?.kind === 'remote' ? t.target : req.target} kind=${t?.kind === 'remote' ? t.provider.kind : '-'} http=${http} effort=${effort} msgs=${req.transcript.length} tools=${req.tools.length} bytes=${reqBytes} ttfb=${ttfbMs ?? '-'} total=${st.totalMs} in=${st.in ?? '-'} out=${st.out ?? '-'} cache=${u?.cacheRead ?? '-'} wrote=${u?.cacheWrite ?? '-'} reasoning=${u?.reasoning ?? '-'} finish=${finish}${notes}${extra}${error?.type === 'error' ? ` error=${logJson(error.text)}` : ''}`,
+        `styx step ${req.who} → ${t?.kind === 'remote' ? t.target : req.target} kind=${t?.kind === 'remote' ? t.model.kind : '-'} http=${http} effort=${effort} msgs=${req.transcript.length} tools=${req.tools.length} bytes=${reqBytes} ttfb=${ttfbMs ?? '-'} total=${st.totalMs} in=${st.in ?? '-'} out=${st.out ?? '-'} cache=${u?.cacheRead ?? '-'} wrote=${u?.cacheWrite ?? '-'} reasoning=${u?.reasoning ?? '-'} finish=${finish}${notes}${extra}${error?.type === 'error' ? ` error=${logJson(error.text)}` : ''}`,
       )
       return [...events, st]
     }
@@ -146,20 +147,23 @@ export function createStepper(env: Env) {
     const owner = `${p.id}/${m.id}`
     const approved = new Set(w.approved)
     keys.prune(approved)
-    const codec = CODECS[p.kind]
+    const codec = CODECS[m.kind]
     let key = await keys.get(p, approved)
     if ('error' in key) return yield* refuse(key.error)
-    const enc = codec.encode({ system: req.system, messages: normalize(req.transcript, m.vision, ids.of(p.id), thinking.sealed(owner)), tools: req.tools, ...(req.effort === undefined ? {} : { effort: req.effort }) }, p, m)
+    const conversationKey = createHash('sha256').update(`${req.session}:${req.who}`).digest('hex')
+    const enc = codec.encode({ system: req.system, messages: normalize(req.transcript, m.vision, ids.of(p.id), thinking.sealed(owner)), tools: req.tools, ...(req.effort === undefined ? {} : { effort: req.effort }), cacheKey: conversationKey }, p, m)
     // The applied level, after the one asked for when the model declares another nearest it.
     effort = typeof req.effort === 'string' && enc.effort !== req.effort && enc.effort !== 'none' ? `${req.effort}→${enc.effort}` : enc.effort
     reqBytes = new TextEncoder().encode(enc.body).length
     if (enc.lost) notes = ' note="thinking param left out: the signed blocks of this tool turn are not held"'
     const configured = Object.fromEntries(Object.entries({ ...p.headers, ...m.headers }).map(([k, v]) => [k.toLowerCase(), v]))
-    const conversation = p.sessionHeader ? { [p.sessionHeader]: createHash('sha256').update(`${req.session}:${req.who}`).digest('hex') } : {}
+    const conversation = p.sessionHeader ? { [p.sessionHeader]: conversationKey } : {}
+    const keyHeader = authHeaderOf(p, m)
+    const keyed = (k: string): Record<string, string> => (keyHeader === 'bearer' ? { authorization: `Bearer ${k}` } : { [keyHeader]: k })
     const headers = { 'content-type': 'application/json', ...enc.headers, ...configured, ...conversation, 'user-agent': w.userAgent ?? 'claude-code' }
     const stallS = Math.max(1, Math.floor(Math.min(600, (p.timeoutMs ?? 600_000) / 1000)))
     const totalS = p.timeoutMs === undefined ? DEFAULT_TOTAL_S : Math.ceil(p.timeoutMs / 1000)
-    const post = (k: string | null) => env.post({ url: `${p.baseUrl}${enc.path}`, allowHttp: p.allowHttp, headers: { ...headers, ...(k === null ? {} : p.authHeader === 'x-api-key' ? { 'x-api-key': k } : { authorization: `Bearer ${k}` }) }, body: enc.body, stallS, totalS }, signal)
+    const post = (k: string | null) => env.post({ url: joinUrl(p.baseUrl, enc.path), allowHttp: p.allowHttp, headers: { ...headers, ...(k === null ? {} : keyed(k)) }, body: enc.body, stallS, totalS }, signal)
     let answer = await post(key.key)
     // A rejected key is fetched again; a cached one is retried once at once, before any event.
     for (let retried = false; 'status' in answer && (answer.status === 401 || answer.status === 403); retried = true) {

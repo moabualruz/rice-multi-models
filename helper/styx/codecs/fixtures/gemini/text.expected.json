@@ -1,0 +1,17 @@
+[
+  {
+    "type": "text",
+    "text": "Two words."
+  },
+  {
+    "type": "usage",
+    "in": 12,
+    "out": 3,
+    "cacheRead": 0,
+    "cacheWrite": 0
+  },
+  {
+    "type": "stop",
+    "reason": "end_turn"
+  }
+]

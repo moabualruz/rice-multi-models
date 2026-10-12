@@ -36,7 +36,7 @@ export function remoteOf(loaded: Loaded, name: string): Remote | undefined {
     model: target.model,
     modelId: target.target.slice(target.provider.id.length + 1),
     target: target.target,
-    budget: inputBudget(target.model, target.provider.kind),
+    budget: inputBudget(target.model),
     fingerprint: fingerprint(target.provider),
   }
 }
@@ -54,13 +54,15 @@ export function estimateTokens(request: unknown): number {
   return Math.ceil(JSON.stringify(request).length / 3.5)
 }
 
-/** One line per declared provider: kind, address, models, and whether it is approved. */
+/** One line per declared provider: its models' kinds, address, models, and whether it is approved. */
 export function providerLines(loaded: Loaded, approved: ReadonlySet<string>): string[] {
   if (!loaded.config) return loaded.errors.length > 0 ? [`${loaded.path}: ${loaded.errors.join('; ')}`] : [`no ${CONFIG_FILE} (see example.rice-multi-models.json in the plugin)`]
 
   return Object.values(loaded.config.providers).map(provider => {
     const models = Object.keys(provider.models).map(model => `${provider.id}/${model}`)
 
-    return `${provider.id}: ${provider.kind} at ${provider.baseUrl}, ${approved.has(fingerprint(provider)) ? 'approved' : `not approved (/rice-models approve ${provider.id})`}; ${models.join(', ')}`
+    const kinds = [...new Set(Object.values(provider.models).map(model => model.kind))].join('+')
+
+    return `${provider.id}: ${kinds} at ${provider.baseUrl}, ${approved.has(fingerprint(provider)) ? 'approved' : `not approved (/rice-models approve ${provider.id})`}; ${models.join(', ')}`
   })
 }

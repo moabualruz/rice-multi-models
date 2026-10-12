@@ -1,0 +1,6 @@
+event: response.created
+data: {"type":"response.created","response":{"status":"in_progress"}}
+
+event: response.failed
+data: {"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"The model failed to answer."}}}
+

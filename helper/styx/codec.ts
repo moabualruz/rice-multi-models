@@ -1,6 +1,7 @@
 // Copied from Trosfy/claude-styx styxd/codec.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: import paths for this layout; Effort comes from hooks/protocol.
+// Modified by mkh: import paths for this layout; Effort comes from hooks/protocol. A request carries the
+// conversation's cache key; joinUrl.
 // What a codec is: one provider kind's request encoder and response decoder, and the pieces codecs share. Pure.
 import type { Effort } from '../../hooks/protocol'
 import { EFFORTS, isObject } from '../../hooks/config'
@@ -25,8 +26,13 @@ export const obj = (v: unknown): Json => (isObject(v) ? v : {})
 export const isIndex = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 0
 export const count = (v: unknown) => (isIndex(v) ? v : 0)
 
-// A step's request as a codec encodes it.
-export type Neutral = { system: string; messages: Message[]; tools: readonly RemoteTool[]; effort?: Effort | number }
+// A step's request as a codec encodes it. `cacheKey` is a stable hash of the conversation, for a kind that
+// routes its prompt cache by one.
+export type Neutral = { system: string; messages: Message[]; tools: readonly RemoteTool[]; effort?: Effort | number; cacheKey?: string }
+
+// A request path under a provider's base URL. A base that already ends in the path's leading `/v1` (an
+// OpenAI-style base such as https://gateway/v1 serving an Anthropic-style model) is not given it twice.
+export const joinUrl = (base: string, path: string) => (base.endsWith('/v1') && path.startsWith('/v1/') ? `${base}${path.slice(3)}` : `${base}${path}`)
 
 // What a decoder reads out of a response, in order. A tool call is read whole: the decoder holds its
 // fragments until its block ends, so a call cut short never appears. `args` is its arguments' JSON text, or

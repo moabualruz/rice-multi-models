@@ -1,0 +1,7 @@
+[
+  {
+    "type": "error",
+    "kind": "response",
+    "text": "rice-multi-models: p response failed: The model failed to answer.; retry, or see the debug log"
+  }
+]

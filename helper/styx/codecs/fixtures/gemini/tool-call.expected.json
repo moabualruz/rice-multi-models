@@ -1,0 +1,38 @@
+[
+  {
+    "type": "thinking",
+    "text": "**Planning** I should read the file first."
+  },
+  {
+    "type": "text",
+    "text": "Reading it now."
+  },
+  {
+    "type": "tool_use",
+    "id": "toolu_rice_000000000000000000000001",
+    "name": "Read",
+    "input": {
+      "file_path": "/a.txt"
+    }
+  },
+  {
+    "type": "tool_use",
+    "id": "toolu_rice_000000000000000000000002",
+    "name": "Grep",
+    "input": {
+      "pattern": "x"
+    }
+  },
+  {
+    "type": "usage",
+    "in": 388,
+    "out": 160,
+    "cacheRead": 512,
+    "cacheWrite": 0,
+    "reasoning": 120
+  },
+  {
+    "type": "stop",
+    "reason": "tool_use"
+  }
+]

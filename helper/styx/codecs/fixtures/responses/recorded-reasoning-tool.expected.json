@@ -1,0 +1,26 @@
+[
+  {
+    "type": "thinking",
+    "text": "Hat rhymes with cat."
+  },
+  {
+    "type": "tool_use",
+    "id": "toolu_rice_000000000000000000000001",
+    "name": "echo_tool",
+    "input": {
+      "text": "hi"
+    }
+  },
+  {
+    "type": "usage",
+    "in": 138,
+    "out": 18,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "reasoning": 0
+  },
+  {
+    "type": "stop",
+    "reason": "tool_use"
+  }
+]

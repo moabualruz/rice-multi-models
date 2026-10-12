@@ -1,0 +1,2 @@
+data: {"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"MALFORMED_FUNCTION_CALL","index":0}],"usageMetadata":{"promptTokenCount":30,"totalTokenCount":30}}
+

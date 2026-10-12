@@ -1,0 +1,7 @@
+[
+  {
+    "type": "error",
+    "kind": "response",
+    "text": "rice-multi-models: p response failed: the stream ended with no response.completed; retry, or see the debug log"
+  }
+]

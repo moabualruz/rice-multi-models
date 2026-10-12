@@ -1,0 +1,48 @@
+event: codex.rate_limits
+data: {"type":"codex.rate_limits","plan_type":"plus","rate_limits":{"allowed":true,"limit_reached":false,"primary":{"used_percent":42,"window_minutes":10080,"reset_after_seconds":3600,"reset_at":1800000000},"secondary":null},"code_review_rate_limits":null,"additional_rate_limits":null,"credits":{"has_credits":false,"unlimited":false,"balance":"0"},"promo":null}
+
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_02d97e8dc95cfce1016accf90bc20887d28a1a12d90e9e595e","object":"response","created_at":1791817995,"status":"in_progress","access_programs":{"cyber":"standard"},"background":false,"completed_at":null,"error":null,"frequency_penalty":0,"incomplete_details":null,"instructions":"You are a terse assistant.","max_output_tokens":null,"max_tool_calls":null,"model":"gpt-6.1-sol","moderation":null,"output":[],"parallel_tool_calls":false,"presence_penalty":0,"previous_response_id":null,"prompt_cache_key":"test-cache-key","prompt_cache_retention":"24h","reasoning":{"context":"all_turns","effort":"high","mode":"standard","summary":"detailed"},"safety_identifier":"test-safety-id","service_tier":"auto","store":false,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tool_usage":{"image_gen":{"input_tokens":0,"input_tokens_details":{"image_tokens":0,"text_tokens":0},"output_tokens":0,"output_tokens_details":{"image_tokens":0,"text_tokens":0},"total_tokens":0},"web_search":{"num_requests":0}},"tools":[{"type":"function","description":"Echo text","name":"echo_tool","output_schema":null,"parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]},"strict":false}],"top_logprobs":0,"top_p":0.98,"truncation":"disabled","usage":null,"user":null,"metadata":{}},"sequence_number":0,"safety_buffering":false}
+
+event: response.in_progress
+data: {"type":"response.in_progress","response":{"id":"resp_02d97e8dc95cfce1016accf90bc20887d28a1a12d90e9e595e","object":"response","created_at":1791817995,"status":"in_progress","access_programs":{"cyber":"standard"},"background":false,"completed_at":null,"error":null,"frequency_penalty":0,"incomplete_details":null,"instructions":"You are a terse assistant.","max_output_tokens":null,"max_tool_calls":null,"model":"gpt-6.1-sol","moderation":null,"output":[],"parallel_tool_calls":false,"presence_penalty":0,"previous_response_id":null,"prompt_cache_key":"test-cache-key","prompt_cache_retention":"24h","reasoning":{"context":"all_turns","effort":"high","mode":"standard","summary":"detailed"},"safety_identifier":"test-safety-id","service_tier":"auto","store":false,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tool_usage":{"image_gen":{"input_tokens":0,"input_tokens_details":{"image_tokens":0,"text_tokens":0},"output_tokens":0,"output_tokens_details":{"image_tokens":0,"text_tokens":0},"total_tokens":0},"web_search":{"num_requests":0}},"tools":[{"type":"function","description":"Echo text","name":"echo_tool","output_schema":null,"parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]},"strict":false}],"top_logprobs":0,"top_p":0.98,"truncation":"disabled","usage":null,"user":null,"metadata":{}},"sequence_number":1,"safety_buffering":false}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"rs_fixture","type":"reasoning","summary":[]}}
+
+event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","output_index":0,"item_id":"rs_fixture","summary_index":0,"delta":"Hat rhymes "}
+
+event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","output_index":0,"item_id":"rs_fixture","summary_index":0,"delta":"with cat."}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_fixture","type":"reasoning","summary":[{"type":"summary_text","text":"Hat rhymes with cat."}],"encrypted_content":"ENC"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"id":"fc_02d97e8dc95cfce1016accf910360887d29189f1ff01956f72","type":"function_call","status":"in_progress","arguments":"","call_id":"call_9tXZryf0l31D8KvzzJ83Hkkn","name":"echo_tool"},"output_index":1,"sequence_number":2}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"{\"","item_id":"fc_02d97e8dc95cfce1016accf910360887d29189f1ff01956f72","obfuscation":"p5ph4IWLc1qswP","output_index":1,"sequence_number":3}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"text","item_id":"fc_02d97e8dc95cfce1016accf910360887d29189f1ff01956f72","obfuscation":"PPuXVlV53DMq","output_index":1,"sequence_number":4}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"\":\"","item_id":"fc_02d97e8dc95cfce1016accf910360887d29189f1ff01956f72","obfuscation":"t4U9SkDymBuuk","output_index":1,"sequence_number":5}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"hi","item_id":"fc_02d97e8dc95cfce1016accf910360887d29189f1ff01956f72","obfuscation":"uTF8zpvILQN8OT","output_index":1,"sequence_number":6}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","delta":"\"}","item_id":"fc_02d97e8dc95cfce1016accf910360887d29189f1ff01956f72","obfuscation":"20FDTDw9d3ufA6","output_index":1,"sequence_number":7}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","arguments":"{\"text\":\"hi\"}","item_id":"fc_02d97e8dc95cfce1016accf910360887d29189f1ff01956f72","output_index":1,"sequence_number":8}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"id":"fc_02d97e8dc95cfce1016accf910360887d29189f1ff01956f72","type":"function_call","status":"completed","arguments":"{\"text\":\"hi\"}","call_id":"call_9tXZryf0l31D8KvzzJ83Hkkn","name":"echo_tool"},"output_index":1,"sequence_number":9}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_02d97e8dc95cfce1016accf90bc20887d28a1a12d90e9e595e","object":"response","created_at":1791817995,"status":"completed","access_programs":{"cyber":"standard"},"background":false,"completed_at":1791818000,"error":null,"frequency_penalty":0,"incomplete_details":null,"instructions":"You are a terse assistant.","max_output_tokens":null,"max_tool_calls":null,"model":"gpt-6.1-sol","moderation":null,"output":[],"parallel_tool_calls":false,"presence_penalty":0,"previous_response_id":null,"prompt_cache_key":"test-cache-key","prompt_cache_retention":"24h","reasoning":{"context":"all_turns","effort":"high","mode":"standard","summary":"detailed"},"safety_identifier":"test-safety-id","service_tier":"default","store":false,"temperature":1,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tool_usage":{"image_gen":{"input_tokens":0,"input_tokens_details":{"image_tokens":0,"text_tokens":0},"output_tokens":0,"output_tokens_details":{"image_tokens":0,"text_tokens":0},"total_tokens":0},"web_search":{"num_requests":0}},"tools":[{"type":"function","description":"Echo text","name":"echo_tool","output_schema":null,"parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]},"strict":false}],"top_logprobs":0,"top_p":0.98,"truncation":"disabled","usage":{"input_tokens":138,"input_tokens_details":{"cache_write_tokens":0,"cached_tokens":0},"output_tokens":18,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":156},"user":null,"metadata":{}},"sequence_number":10,"safety_buffering":false}
+

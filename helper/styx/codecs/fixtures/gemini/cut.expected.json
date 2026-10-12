@@ -1,0 +1,11 @@
+[
+  {
+    "type": "text",
+    "text": "Half an answer"
+  },
+  {
+    "type": "error",
+    "kind": "response",
+    "text": "rice-multi-models: p response failed: the stream ended with no finish reason; retry, or see the debug log"
+  }
+]
