@@ -1,6 +1,6 @@
 // Copied from Trosfy/claude-styx styxd/codecs/bedrock.spec.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: import paths for this layout.
+// Modified by mkh: import paths for this layout; messages name rice-multi-models.
 // The `bedrock` codec: the event-stream framing (CRC32, header types, frames split anywhere), the decoder's
 // events for each synthetic response in fixtures/bedrock (built here, checked in as bytes for the
 // conformance suite, and compared with what is built), how a response's end is read, and the ConverseStream
@@ -223,7 +223,7 @@ test('after a corrupt frame, the events before it stand and nothing after it is 
 // A response's step events, as the assembler gives them: the decoder fed `bytes` and ended, then the end.
 function steps(bytes: Uint8Array) {
   let n = 0
-  const asm = assembler(bedrock, 'p', remoteIds(), () => `toolu_styx_${String(++n).padStart(24, '0')}`)
+  const asm = assembler(bedrock, 'p', remoteIds(), () => `toolu_rice_${String(++n).padStart(24, '0')}`)
   const d = bedrock.decoder()
   const events = [...asm.feed(d.feed(bytes)), ...asm.feed(d.end())]
   const end = asm.end({ id: 'p' } as ProviderConfig)
@@ -234,15 +234,15 @@ test('an exception event is one error line naming its type and message, the even
   const { events } = steps(SCENARIOS['exception'] as Uint8Array)
   expect(events).toEqual([
     { type: 'text', text: 'part' },
-    { type: 'error', kind: 'response', text: 'styx: p response failed: throttlingException: Too many requests, please wait before trying again.; retry, or see the debug log' },
+    { type: 'error', kind: 'response', text: 'rice-multi-models: p response failed: throttlingException: Too many requests, please wait before trying again.; retry, or see the debug log' },
   ])
   const many = steps(concat(exception('validationException', 'first line\nsecond line'))).events
-  expect(many).toEqual([{ type: 'error', kind: 'response', text: 'styx: p response failed: validationException: first line; retry, or see the debug log' }])
+  expect(many).toEqual([{ type: 'error', kind: 'response', text: 'rice-multi-models: p response failed: validationException: first line; retry, or see the debug log' }])
 })
 
 test('an error message frame, or an exception with a payload that is not JSON, still gives one error line', () => {
   const err = frame({ ':message-type': 'error', ':error-code': 'InternalError', ':error-message': 'it broke' }, '')
-  expect(steps(err).events).toEqual([{ type: 'error', kind: 'response', text: 'styx: p response failed: InternalError: it broke; retry, or see the debug log' }])
+  expect(steps(err).events).toEqual([{ type: 'error', kind: 'response', text: 'rice-multi-models: p response failed: InternalError: it broke; retry, or see the debug log' }])
   const raw = frame({ ':message-type': 'exception', ':exception-type': 'internalServerException' }, 'plain text failure')
   expect(errorOf(decode(raw))).toBe('internalServerException: plain text failure')
 })
@@ -276,7 +276,7 @@ test('each stop reason reads as the engine\'s; a malformed one is an error, an u
   for (const [aws, engine] of table) expect(reason(aws).events.at(-1), aws).toEqual({ type: 'stop', reason: engine as never })
   for (const aws of ['malformed_model_output', 'malformed_tool_use']) {
     const events = reason(aws).events
-    expect(events.at(-1), aws).toEqual({ type: 'error', kind: 'response', text: `styx: p response failed: the model ended with stopReason "${aws}"; retry, or see the debug log` })
+    expect(events.at(-1), aws).toEqual({ type: 'error', kind: 'response', text: `rice-multi-models: p response failed: the model ended with stopReason "${aws}"; retry, or see the debug log` })
   }
   const unknown = reason('a_future_reason')
   expect([unknown.events.at(-1), unknown.note]).toEqual([{ type: 'stop', reason: 'end_turn' }, 'finish_reason "a_future_reason" read as end_turn'])
@@ -292,8 +292,8 @@ test('usage maps input, output and cache tokens; a response with no metadata sti
 test('a tool call becomes a tool_use with a minted id, its own id remembered; empty arguments are an empty object', () => {
   const { events } = steps(SCENARIOS['parallel-tools'] as Uint8Array)
   expect(events.filter(e => e.type === 'tool_use')).toEqual([
-    { type: 'tool_use', id: 'toolu_styx_000000000000000000000001', name: 'get_time', input: { tz: 'Europe/London' } },
-    { type: 'tool_use', id: 'toolu_styx_000000000000000000000002', name: 'get_time', input: { tz: 'UTC' } },
+    { type: 'tool_use', id: 'toolu_rice_000000000000000000000001', name: 'get_time', input: { tz: 'Europe/London' } },
+    { type: 'tool_use', id: 'toolu_rice_000000000000000000000002', name: 'get_time', input: { tz: 'UTC' } },
   ])
   expect(steps(SCENARIOS['empty-arguments'] as Uint8Array).events[0]).toMatchObject({ type: 'tool_use', name: 'list', input: {} })
 })
@@ -368,25 +368,25 @@ test('effort params and provider params merge into the body, inferenceConfig dee
 test('tool calls and results become toolUse and toolResult blocks; an error result carries its status, an empty one a note', () => {
   const messages: Message[] = [
     say('user', 'go'),
-    { role: 'assistant', content: [{ type: 'text', text: 'Reading.' }, { type: 'tool_use', id: 'toolu_styx_1', name: 'Read', input: { a: 'x' } }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'Reading.' }, { type: 'tool_use', id: 'toolu_rice_1', name: 'Read', input: { a: 'x' } }] },
     {
       role: 'user',
       content: [
-        { type: 'tool_result', tool_use_id: 'toolu_styx_1', content: [{ type: 'text', text: 'file body' }], is_error: false },
-        { type: 'tool_result', tool_use_id: 'toolu_styx_2', content: [{ type: 'text', text: 'denied' }], is_error: true },
-        { type: 'tool_result', tool_use_id: 'toolu_styx_3', content: [{ type: 'text', text: '' }], is_error: false },
+        { type: 'tool_result', tool_use_id: 'toolu_rice_1', content: [{ type: 'text', text: 'file body' }], is_error: false },
+        { type: 'tool_result', tool_use_id: 'toolu_rice_2', content: [{ type: 'text', text: 'denied' }], is_error: true },
+        { type: 'tool_result', tool_use_id: 'toolu_rice_3', content: [{ type: 'text', text: '' }], is_error: false },
       ],
     },
   ]
   expect(toMessages(messages)).toEqual([
     { role: 'user', content: [{ text: 'go' }] },
-    { role: 'assistant', content: [{ text: 'Reading.' }, { toolUse: { toolUseId: 'toolu_styx_1', name: 'Read', input: { a: 'x' } } }] },
+    { role: 'assistant', content: [{ text: 'Reading.' }, { toolUse: { toolUseId: 'toolu_rice_1', name: 'Read', input: { a: 'x' } } }] },
     {
       role: 'user',
       content: [
-        { toolResult: { toolUseId: 'toolu_styx_1', content: [{ text: 'file body' }] } },
-        { toolResult: { toolUseId: 'toolu_styx_2', content: [{ text: 'denied' }], status: 'error' } },
-        { toolResult: { toolUseId: 'toolu_styx_3', content: [{ text: '(no output)' }] } },
+        { toolResult: { toolUseId: 'toolu_rice_1', content: [{ text: 'file body' }] } },
+        { toolResult: { toolUseId: 'toolu_rice_2', content: [{ text: 'denied' }], status: 'error' } },
+        { toolResult: { toolUseId: 'toolu_rice_3', content: [{ text: '(no output)' }] } },
       ],
     },
   ])
@@ -493,21 +493,21 @@ test('reasoning interleaved with text and a call, [T1, A, T2, B], comes back in 
     stop(3),
     done('tool_use'),
   )
-  const asm = assembler(bedrock, 'p', remoteIds(), () => 'toolu_styx_x')
+  const asm = assembler(bedrock, 'p', remoteIds(), () => 'toolu_rice_x')
   const d = bedrock.decoder()
   asm.feed([...d.feed(bytes), ...d.end()])
   const transcript = [
     { role: 'user' as const, content: 'go' },
-    { role: 'assistant' as const, content: [{ type: 'text', text: 'A' }, { type: 'tool_use', id: 'toolu_styx_x', name: 'Read', input: {} }] },
-    { role: 'user' as const, content: [{ type: 'tool_result', tool_use_id: 'toolu_styx_x', content: 'x' }] },
+    { role: 'assistant' as const, content: [{ type: 'text', text: 'A' }, { type: 'tool_use', id: 'toolu_rice_x', name: 'Read', input: {} }] },
+    { role: 'user' as const, content: [{ type: 'tool_result', tool_use_id: 'toolu_rice_x', content: 'x' }] },
   ]
-  const sealed = (id: string) => (id === 'toolu_styx_x' ? asm.turn().blocks : undefined)
+  const sealed = (id: string) => (id === 'toolu_rice_x' ? asm.turn().blocks : undefined)
   const sent = turn(normalize(transcript, true, () => undefined, sealed)).json['messages'] as { content: object[] }[]
   expect(sent[1]?.content).toEqual([
     { reasoningContent: { reasoningText: { text: 'one', signature: 'S1' } } },
     { text: 'A' },
     { reasoningContent: { redactedContent: 'cmVk' } },
-    { toolUse: { toolUseId: 'toolu_styx_x', name: 'Read', input: {} } },
+    { toolUse: { toolUseId: 'toolu_rice_x', name: 'Read', input: {} } },
   ])
 })
 

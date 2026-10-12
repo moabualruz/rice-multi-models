@@ -1,7 +1,8 @@
 // Copied from Trosfy/claude-styx hooks/config.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
 // Modified by mkh: Effort comes from ./protocol. A model's `tools` may also be a list of tool names: the only
-// tools that model is sent (for small local models).
+// tools that model is sent (for small local models). A provider may name a `sessionHeader`, which the helper
+// sets to a hash of the conversation.
 // Styx's config (styx.json in Claude Code's config directory): parsing, all-or-nothing validation, model-name resolution, and the
 // pure texts and schemas derived from a config. No I/O.
 import type { Effort } from './protocol'
@@ -50,6 +51,8 @@ export type ProviderConfig = {
   timeoutMs?: number
   streamUsage: boolean
   maxTools: number
+  // A header the helper sets to a stable hash of the conversation (OpenCode Go and Zen route by it). Added by mkh.
+  sessionHeader?: string
   models: Readonly<Record<string, ModelConfig>>
 }
 
@@ -102,7 +105,7 @@ const HEADER_VALUE_RE = /^[\x20-\x7e]*$/
 // a dash, and no trailing dot.
 const HOST_RE = /^(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+$/
 export const RESERVED_ALIASES = new Set(['fable', 'opus', 'sonnet', 'haiku', 'default', 'inherit', 'native'])
-const PROVIDER_KEYS = ['kind', 'baseUrl', 'allowHttp', 'auth', 'headers', 'params', 'timeoutMs', 'maxTools', 'models']
+const PROVIDER_KEYS = ['kind', 'baseUrl', 'allowHttp', 'auth', 'headers', 'params', 'timeoutMs', 'maxTools', 'models', 'sessionHeader']
 // The keys a model and an alias share: what a request is built from.
 const REQUEST_KEYS = ['params', 'effort', 'cache', 'headers']
 const MODEL_KEYS = ['contextWindow', 'maxInputTokens', 'maxOutputTokens', 'tools', 'vision', ...REQUEST_KEYS]
@@ -305,6 +308,9 @@ function provider(id: string, v: unknown, path: string, errors: string[]): Provi
   if (authHeader !== undefined && authHeader !== 'bearer' && authHeader !== 'x-api-key') errors.push(`${path}.authHeader: must be "bearer" or "x-api-key"`)
   if (timeoutMs !== undefined && !(isCount(timeoutMs) && timeoutMs <= MAX_TIMEOUT_MS)) errors.push(`${path}.timeoutMs: must be a positive integer of at most ${MAX_TIMEOUT_MS}`)
   if (maxTools !== undefined && !isCount(maxTools)) errors.push(`${path}.maxTools: must be a positive integer`)
+  const sessionHeader = v['sessionHeader']
+  const sessionHeaderOk = typeof sessionHeader === 'string' && HEADER_NAME_RE.test(sessionHeader)
+  if (sessionHeader !== undefined && !sessionHeaderOk) errors.push(`${path}.sessionHeader: must be a header name`)
   const out: Record<string, ModelConfig> = {}
   if (!isObject(models)) errors.push(`${path}.models: must be a map of model ids`)
   else {
@@ -330,6 +336,7 @@ function provider(id: string, v: unknown, path: string, errors: string[]): Provi
     ...(timeoutMs === undefined ? {} : { timeoutMs: timeoutMs as number }),
     streamUsage: bool(spec.providerKeys.includes('streamUsage') ? v['streamUsage'] : undefined, true, `${path}.streamUsage`, errors),
     maxTools: (maxTools as number | undefined) ?? 128,
+    ...(sessionHeaderOk ? { sessionHeader: (sessionHeader as string).toLowerCase() } : {}),
     models: out,
   }
 }

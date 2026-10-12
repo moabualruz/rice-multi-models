@@ -1,6 +1,6 @@
 // Copied from Trosfy/claude-styx styxd/history.spec.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: import paths for this layout.
+// Modified by mkh: import paths for this layout; messages name rice-multi-models.
 // The engine transcript as every codec reads it: thinking dropped, other blocks named as text, orphan tool
 // results dropped, every field but the content's own stripped, images downgraded without vision; and the
 // provider's own tool-call ids, given back to that provider only and bounded to the latest 256.
@@ -62,17 +62,17 @@ test('images pass with vision and become a note without it, in messages and in t
 test("a minted id goes out as the provider's own only to the provider that made it, and the latest 256 are kept; the map holds ids and nothing else", () => {
   const ids = remoteIds()
   expect(Object.keys(ids).sort()).toEqual(['of', 'remember'])
-  ids.remember('kimi', 'toolu_styx_a', 'functions.Read:0')
+  ids.remember('kimi', 'toolu_rice_a', 'functions.Read:0')
   const transcript: ApiMessage[] = [
-    { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_styx_a', name: 'Read', input: {} }] },
-    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_styx_a', content: 'x' }] },
+    { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_rice_a', name: 'Read', input: {} }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_rice_a', content: 'x' }] },
   ]
   const sentIds = (provider: string) => normalize(transcript, true, ids.of(provider)).map(m => m.content[0] as { id?: string; tool_use_id?: string }).map(b => b.id ?? b.tool_use_id)
   expect(sentIds('kimi')).toEqual(['functions.Read:0', 'functions.Read:0'])
-  expect(sentIds('claude')).toEqual(['toolu_styx_a', 'toolu_styx_a'])
-  for (let i = 0; i < 256; i++) ids.remember('kimi', `toolu_styx_${i}`, `r${i}`)
-  expect(ids.of('kimi')('toolu_styx_a')).toBeUndefined()
-  expect(ids.of('kimi')('toolu_styx_255')).toBe('r255')
+  expect(sentIds('claude')).toEqual(['toolu_rice_a', 'toolu_rice_a'])
+  for (let i = 0; i < 256; i++) ids.remember('kimi', `toolu_rice_${i}`, `r${i}`)
+  expect(ids.of('kimi')('toolu_rice_a')).toBeUndefined()
+  expect(ids.of('kimi')('toolu_rice_255')).toBe('r255')
 })
 
 const think = (thinking: string, signature = 'sig'): Placed['block'] => ({ type: 'thinking', thinking, signature })
@@ -86,41 +86,41 @@ const turn = (...calls: string[]): ApiMessage[] => [
 test("the thinking blocks kept for a turn's calls come back in that turn, given only to the model that wrote them; a turn with calls and none kept is marked", () => {
   const store = thinkingStore()
   const blocks = placed([0, think('hm')], [0, { type: 'redacted_thinking', data: 'red' }])
-  store.seal('acme/m', ['toolu_styx_a', 'toolu_styx_b'], blocks)
-  store.seal('acme/m', ['toolu_styx_none'], [])
+  store.seal('acme/m', ['toolu_rice_a', 'toolu_rice_b'], blocks)
+  store.seal('acme/m', ['toolu_rice_none'], [])
   const assistant = (calls: string[], owner: string) => normalize(turn(...calls), true, none, store.sealed(owner))[1]
-  expect(assistant(['toolu_styx_a', 'toolu_styx_b'], 'acme/m')).toEqual({
+  expect(assistant(['toolu_rice_a', 'toolu_rice_b'], 'acme/m')).toEqual({
     role: 'assistant',
-    content: [...blocks.map(p => p.block), { type: 'text', text: 'ok' }, { type: 'tool_use', id: 'toolu_styx_a', name: 'Read', input: {} }, { type: 'tool_use', id: 'toolu_styx_b', name: 'Read', input: {} }],
+    content: [...blocks.map(p => p.block), { type: 'text', text: 'ok' }, { type: 'tool_use', id: 'toolu_rice_a', name: 'Read', input: {} }, { type: 'tool_use', id: 'toolu_rice_b', name: 'Read', input: {} }],
   })
-  expect(assistant(['toolu_styx_none'], 'acme/m')?.content.map(b => b.type)).toEqual(['text', 'tool_use'])
-  expect(assistant(['toolu_styx_none'], 'acme/m')?.unsealed).toBeUndefined()
+  expect(assistant(['toolu_rice_none'], 'acme/m')?.content.map(b => b.type)).toEqual(['text', 'tool_use'])
+  expect(assistant(['toolu_rice_none'], 'acme/m')?.unsealed).toBeUndefined()
   // Not kept (a restart), or kept for another model: marked, and nothing sent.
-  expect(assistant(['toolu_styx_lost'], 'acme/m')).toMatchObject({ unsealed: true, content: [{ type: 'text' }, { type: 'tool_use' }] })
-  expect(assistant(['toolu_styx_a'], 'acme/other')).toMatchObject({ unsealed: true, content: [{ type: 'text' }, { type: 'tool_use' }] })
+  expect(assistant(['toolu_rice_lost'], 'acme/m')).toMatchObject({ unsealed: true, content: [{ type: 'text' }, { type: 'tool_use' }] })
+  expect(assistant(['toolu_rice_a'], 'acme/other')).toMatchObject({ unsealed: true, content: [{ type: 'text' }, { type: 'tool_use' }] })
   // A turn with no calls, and a transcript read with no thinking source, are never marked.
   expect(normalize([{ role: 'assistant', content: 'plain' }], true, none, store.sealed('acme/m'))).toEqual([{ role: 'assistant', content: [{ type: 'text', text: 'plain' }] }])
-  expect(normalize(turn('toolu_styx_lost'), true, none)[1]?.unsealed).toBeUndefined()
+  expect(normalize(turn('toolu_rice_lost'), true, none)[1]?.unsealed).toBeUndefined()
 })
 
 test('each thinking block goes back where it came in its turn: before the blocks it preceded, and last when it came after them all', () => {
   const store = thinkingStore()
   const [t1, t2, t3] = [think('one'), think('two'), think('three')]
-  store.seal('o', ['toolu_styx_a', 'toolu_styx_b'], placed([0, t1], [1, t2], [2, t3]))
-  const content = normalize(turn('toolu_styx_a', 'toolu_styx_b'), true, none, store.sealed('o'))[1]?.content.map(b => (b.type === 'thinking' ? b.thinking : b.type === 'text' ? b.text : b.type === 'tool_use' ? b.id : b.type))
+  store.seal('o', ['toolu_rice_a', 'toolu_rice_b'], placed([0, t1], [1, t2], [2, t3]))
+  const content = normalize(turn('toolu_rice_a', 'toolu_rice_b'), true, none, store.sealed('o'))[1]?.content.map(b => (b.type === 'thinking' ? b.thinking : b.type === 'text' ? b.text : b.type === 'tool_use' ? b.id : b.type))
   // The turn holds a text block and two calls: [T1, ok, T2, a, T3, b].
-  expect(content).toEqual(['one', 'ok', 'two', 'toolu_styx_a', 'three', 'toolu_styx_b'])
+  expect(content).toEqual(['one', 'ok', 'two', 'toolu_rice_a', 'three', 'toolu_rice_b'])
   // A place past the end (the turn came back with fewer blocks than it had) puts the block last.
-  store.seal('o', ['toolu_styx_c'], placed([0, t1], [9, t2]))
-  expect(normalize(turn('toolu_styx_c'), true, none, store.sealed('o'))[1]?.content.map(b => b.type)).toEqual(['thinking', 'text', 'tool_use', 'thinking'])
+  store.seal('o', ['toolu_rice_c'], placed([0, t1], [9, t2]))
+  expect(normalize(turn('toolu_rice_c'), true, none, store.sealed('o'))[1]?.content.map(b => b.type)).toEqual(['thinking', 'text', 'tool_use', 'thinking'])
 })
 
 test('the thinking kept is bounded to the latest 256 calls, and to 8 MiB in all', () => {
   const store = thinkingStore()
-  for (let i = 0; i < 257; i++) store.seal('o', [`toolu_styx_${i}`], [])
-  expect(store.sealed('o')('toolu_styx_0')).toBeUndefined()
-  expect(store.sealed('o')('toolu_styx_1')).toEqual([])
-  expect(store.sealed('o')('toolu_styx_256')).toEqual([])
+  for (let i = 0; i < 257; i++) store.seal('o', [`toolu_rice_${i}`], [])
+  expect(store.sealed('o')('toolu_rice_0')).toBeUndefined()
+  expect(store.sealed('o')('toolu_rice_1')).toEqual([])
+  expect(store.sealed('o')('toolu_rice_256')).toEqual([])
   const big = placed([0, think('x'.repeat(3 * 1024 * 1024))])
   const heavy = thinkingStore()
   for (const id of ['a', 'b', 'c']) heavy.seal('o', [id], big)

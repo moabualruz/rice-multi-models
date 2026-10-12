@@ -1,6 +1,6 @@
 // Copied from Trosfy/claude-styx styxd/codecs/anthropic.spec.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: import paths for this layout.
+// Modified by mkh: import paths for this layout; messages name rice-multi-models.
 // The `anthropic` codec: request bodies from the normalized transcript, and its decoder read event by event
 // and through the step assembler, beside the conformance suite's recorded and synthetic streams.
 import { expect, test } from 'bun:test'
@@ -21,7 +21,7 @@ const cfg = (model: Record<string, unknown> = {}, provider: Record<string, unkno
       providers: {
         acme: {
           kind: 'anthropic',
-          baseUrl: 'https://styx.invalid',
+          baseUrl: 'https://rice-models.invalid',
           auth: { command: ['/usr/bin/security'] },
           ...provider,
           models: { m: { contextWindow: 100_000, maxOutputTokens: 8000, ...model } },
@@ -69,13 +69,13 @@ function read(...pieces: string[]) {
 }
 // The step events a whole response gives through the assembler.
 function run(stream: string) {
-  const asm = assembler(anthropic, 'acme', remoteIds(), () => 'toolu_styx_x')
+  const asm = assembler(anthropic, 'acme', remoteIds(), () => 'toolu_rice_x')
   const { fed, end } = read(stream)
   const events = [...asm.feed(fed.flat()), ...asm.feed(end)]
   const closed = asm.end(cfg().p)
   return { events: [...events, ...closed.events], note: closed.note }
 }
-const failed = (detail: string) => ({ type: 'error', kind: 'response', text: `styx: acme response failed: ${detail}; retry, or see the debug log` })
+const failed = (detail: string) => ({ type: 'error', kind: 'response', text: `rice-multi-models: acme response failed: ${detail}; retry, or see the debug log` })
 
 test('the request goes to /v1/messages with the version header, the model, max_tokens, the system text and tools as input_schema', () => {
   const b = encode({ tools: [{ name: 'Read' }] })
@@ -209,7 +209,7 @@ test('an error event ends the reading with one line; nothing after it is read, a
 test('a stream that ends inside a tool call, before a stop reason, or on broken data is an error and holds no tool_use', () => {
   expect<unknown>(run(sse(START, tool(0), json(0, '{"a":'))).events).toEqual([failed('the stream ended inside a tool call')])
   expect<unknown>(run(sse(START, tool(0), json(0, '{"a":'), ...END('tool_use'))).events).toEqual([failed('the stream ended inside a tool call')])
-  expect<unknown>(run(sse(START, tool(0, 'Read'), json(0, '{}'), stop(0))).events).toEqual([{ type: 'tool_use', id: 'toolu_styx_x', name: 'Read', input: {} }, failed('the stream ended with no stop reason')])
+  expect<unknown>(run(sse(START, tool(0, 'Read'), json(0, '{}'), stop(0))).events).toEqual([{ type: 'tool_use', id: 'toolu_rice_x', name: 'Read', input: {} }, failed('the stream ended with no stop reason')])
   expect(run(`${sse(START, tool(0))}data: {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_del`).events.map(e => e.type)).toEqual(['error'])
   expect<unknown>(run('data: [1]\n\n').events).toEqual([failed('unparseable stream data: [1]')])
   expect(run(sse(START, block(0, 'x'), delta(0, 5), ...END('end_turn'))).events.at(-1)).toEqual({ type: 'stop', reason: 'end_turn' })
@@ -325,20 +325,20 @@ test('thinking blocks interleaved with text and a call, [T1, A, T2, B], come bac
     stop(3),
     ...END('tool_use'),
   )
-  const asm = assembler(anthropic, 'acme', remoteIds(), () => 'toolu_styx_x')
+  const asm = assembler(anthropic, 'acme', remoteIds(), () => 'toolu_rice_x')
   const { fed, end } = read(stream)
   asm.feed([...fed.flat(), ...end])
   const messages: ApiMessage[] = [
     USER,
-    { role: 'assistant', content: [{ type: 'text', text: 'A' }, { type: 'tool_use', id: 'toolu_styx_x', name: 'Read', input: {} }] },
-    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_styx_x', content: 'x' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'A' }, { type: 'tool_use', id: 'toolu_rice_x', name: 'Read', input: {} }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_rice_x', content: 'x' }] },
   ]
-  const sent = encode({ model: { params: { thinking: { type: 'enabled', budget_tokens: 2048 } } }, messages, sealed: { toolu_styx_x: asm.turn().blocks } }).sent
+  const sent = encode({ model: { params: { thinking: { type: 'enabled', budget_tokens: 2048 } } }, messages, sealed: { toolu_rice_x: asm.turn().blocks } }).sent
   expect((sent['messages'] as { content: unknown[] }[])[1]?.content).toEqual([
     { type: 'thinking', thinking: 'one', signature: 'S1' },
     { type: 'text', text: 'A' },
     { type: 'redacted_thinking', data: 'R2' },
-    { type: 'tool_use', id: 'toolu_styx_x', name: 'Read', input: {} },
+    { type: 'tool_use', id: 'toolu_rice_x', name: 'Read', input: {} },
   ])
 })
 

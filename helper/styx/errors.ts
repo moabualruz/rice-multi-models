@@ -21,7 +21,7 @@ export function oneLine(text: string, max = 200): string {
   return redact(text.slice(0, end).split('\n').map(l => l.trim()).filter(Boolean).join(' ')).slice(0, max)
 }
 
-// A string as JSON for a debug line, with U+2028, U+2029 and the bidi controls (U+202A–U+202E, U+2066–U+2069) as \u escapes.
+// A string as JSON for a debug line, with U+2028, U+2029 and the bidi controls (U+202A to U+202E, U+2066 to U+2069) as \u escapes.
 export const logJson = (text: string) => JSON.stringify(text).replace(/[\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)
 
 // A provider's error, read from an error body or an in-stream `error` value: its `error.message` (or
@@ -57,34 +57,34 @@ export function httpErrorText(p: ProviderConfig, status: number, body: string, m
   if (/^\s*</.test(body) && /<(?:!doctype\s+html|html|head|body)\b/i.test(body.slice(0, 512))) {
     const raw = /<title>([^<]{1,80})<\/title>/i.exec(body)?.[1]
     const title = raw === undefined ? '' : oneLine(raw.replace(/\p{Cc}+/gu, ' ').replace(/\s+/g, ' '))
-    return `styx: ${p.id} blocked the request at its gateway (HTTP ${status}${title ? `, "${title}"` : ''}), before the API answered; ask the ${p.id} platform team what their edge rule rejected`
+    return `rice-multi-models: ${p.id} blocked the request at its gateway (HTTP ${status}${title ? `, "${title}"` : ''}), before the API answered; ask the ${p.id} platform team what their edge rule rejected`
   }
   const { message, type } = errorDetail(body)
   const said = oneLine(message, 300) || 'no error message'
   if (/key_model_access_denied/.test(type) || /not allowed to access model/i.test(message)) {
     const allowed = allowedModels(message)
     const shown = allowed.length > 12 ? `${allowed.slice(0, 12).join(', ')} (+${allowed.length - 12} more)` : allowed.join(', ')
-    return `styx: your key for ${p.id} can't use ${model}${shown ? `; allowed: ${shown}` : ''}. Pick an allowed model, or ask the gateway's admin for access`
+    return `rice-multi-models: your key for ${p.id} can't use ${model}${shown ? `; allowed: ${shown}` : ''}. Pick an allowed model, or ask the gateway's admin for access`
   }
-  if (status === 401) return p.auth === 'none' ? `styx: ${p.id} wants a key (HTTP 401) but auth is "none"; run bun run auth login ${p.id} and set auth.command, then retry` : `styx: ${p.id} rejected its key (HTTP 401); store a valid one with bun run auth login ${p.id}, then retry`
-  if (/policy|guardrail|content_filter|moderation/i.test(`${type} ${message}`)) return `styx: ${p.id} refused the request under its content policy (HTTP ${status}): ${said}. Rephrase it, or use another model`
+  if (status === 401) return p.auth === 'none' ? `rice-multi-models: ${p.id} wants a key (HTTP 401) but auth is "none"; store the key in the keychain (security add-generic-password -U -s rice-multi-models -a ${p.id} -w) and set auth.command, then retry` : `rice-multi-models: ${p.id} rejected its key (HTTP 401); store a valid one with security add-generic-password -U -s rice-multi-models -a ${p.id} -w, then retry`
+  if (/policy|guardrail|content_filter|moderation/i.test(`${type} ${message}`)) return `rice-multi-models: ${p.id} refused the request under its content policy (HTTP ${status}): ${said}. Rephrase it, or use another model`
   const fixes: Record<number, string> = {
     429: 'rate limited: wait, then retry',
-    403: p.auth === 'none' ? `ask the ${p.id} admin for access; if it wants a key, run bun run auth login ${p.id} and set auth.command (auth is "none")` : `ask the ${p.id} admin for access, or store another key with bun run auth login ${p.id}`,
+    403: p.auth === 'none' ? `ask the ${p.id} admin for access; if it wants a key, store the key in the keychain (security add-generic-password -U -s rice-multi-models -a ${p.id} -w) and set auth.command (auth is "none")` : `ask the ${p.id} admin for access, or store another key with security add-generic-password -U -s rice-multi-models -a ${p.id} -w`,
     404: `check providers.${p.id}.baseUrl and the model id ${model}`,
   }
-  const fix = status >= 500 ? 'the provider failed: retry, or pick another model' : (fixes[status] ?? `check the params of ${model} in styx.json`)
-  return `styx: ${p.id} HTTP ${status}: ${said}; ${fix}`
+  const fix = status >= 500 ? 'the provider failed: retry, or pick another model' : (fixes[status] ?? `check the params of ${model} in rice-multi-models.json`)
+  return `rice-multi-models: ${p.id} HTTP ${status}: ${said}; ${fix}`
 }
 
 // The text for a request cut before a usable response ended, by how it was cut: the provider's id and the
 // cut's detail.
 const CUTS: Record<Cut['kind'], (id: string, detail: string) => string> = {
-  'connect-timeout': id => `styx: ${id} could not connect within ${CONNECT_TIMEOUT_S} s; check the network or VPN, then retry`,
-  connect: (id, d) => `styx: ${id} could not connect (${oneLine(d)}); check the network or VPN, then retry`,
-  stall: (id, d) => `styx: ${id} stalled (no data for ${d} s); retry`,
-  total: (id, d) => `styx: ${id} timed out after ${d} s; retry, or raise providers.${id}.timeoutMs`,
-  redirect: (id, d) => `styx: ${id} answered with a redirect (HTTP ${d}), which styx does not follow; set providers.${id}.baseUrl to the URL it redirects to`,
-  reset: (id, d) => `styx: ${id} request failed (${oneLine(d)}); retry, or see the debug log`,
+  'connect-timeout': id => `rice-multi-models: ${id} could not connect within ${CONNECT_TIMEOUT_S} s; check the network or VPN, then retry`,
+  connect: (id, d) => `rice-multi-models: ${id} could not connect (${oneLine(d)}); check the network or VPN, then retry`,
+  stall: (id, d) => `rice-multi-models: ${id} stalled (no data for ${d} s); retry`,
+  total: (id, d) => `rice-multi-models: ${id} timed out after ${d} s; retry, or raise providers.${id}.timeoutMs`,
+  redirect: (id, d) => `rice-multi-models: ${id} answered with a redirect (HTTP ${d}), which rice-multi-models does not follow; set providers.${id}.baseUrl to the URL it redirects to`,
+  reset: (id, d) => `rice-multi-models: ${id} request failed (${oneLine(d)}); retry, or see the debug log`,
 }
 export const cutText = (p: ProviderConfig, c: Cut) => CUTS[c.kind](p.id, c.detail)

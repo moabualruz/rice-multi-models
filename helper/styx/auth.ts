@@ -34,11 +34,11 @@ export function createKeys(run: Runner, now: () => number) {
     try {
       r = await run(auth.command, HELPER_TIMEOUT_MS)
     } catch (err) {
-      return failed(`styx: ${p.id} key helper did not finish (${redact(firstLine(String(err))).slice(0, 200)}); unlock the keychain or fix auth.command, then retry`)
+      return failed(`rice-multi-models: ${p.id} key helper did not finish (${redact(firstLine(String(err))).slice(0, 200)}); unlock the keychain or fix auth.command, then retry`)
     }
-    if (r.exitCode !== 0) return failed(`styx: ${p.id} key helper failed (exit ${r.exitCode}): keychain locked, or no key stored? Run bun run auth login ${p.id}`)
+    if (r.exitCode !== 0) return failed(`rice-multi-models: ${p.id} key helper failed (exit ${r.exitCode}): keychain locked, or no key stored? Run security add-generic-password -U -s rice-multi-models -a ${p.id} -w`)
     const key = r.stdout.trim()
-    if (!isUsableKey(key)) return failed(`styx: ${p.id} key helper printed no usable key (empty, over 4 KiB, or holding spaces, control or non-ASCII characters); run bun run auth login ${p.id}`)
+    if (!isUsableKey(key)) return failed(`rice-multi-models: ${p.id} key helper printed no usable key (empty, over 4 KiB, or holding spaces, control or non-ASCII characters); run security add-generic-password -U -s rice-multi-models -a ${p.id} -w`)
     keys.set(fp, { key, until: now() + auth.ttlSeconds * 1000 })
     failures.delete(fp)
     return { key, cached: false }
@@ -53,7 +53,7 @@ export function createKeys(run: Runner, now: () => number) {
     // unapproved provider's helper never runs.
     async get(p: ProviderConfig, approved: ReadonlySet<string>): Promise<Key> {
       const fp = fingerprint(p)
-      if (!approved.has(fp)) return { error: `styx: ${p.id} not approved — run /model <alias> to approve it` }
+      if (!approved.has(fp)) return { error: `rice-multi-models: ${p.id} not approved; run /rice-models approve ${p.id}` }
       if (p.auth === 'none') return { key: null, cached: false }
       const hit = keys.get(fp)
       if (hit !== undefined && now() < hit.until) return { key: hit.key, cached: true }

@@ -1,6 +1,6 @@
 // Copied from Trosfy/claude-styx styxd/codecs/conformance.spec.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: import paths for this layout.
+// Modified by mkh: import paths for this layout; messages name rice-multi-models.
 // The codec conformance suite. Every response under fixtures/<kind>/<scenario>.<ext> is decoded whole and
 // split at random byte offsets (a character split included), and must give the events its
 // <scenario>.expected.json holds (text deltas merged, minted ids numbered). Every kind holds the shared
@@ -28,7 +28,7 @@ function decode(kind: Kind, bytes: Uint8Array, cuts: readonly number[]): StepEve
   const codec = CODECS[kind]
   if (codec === undefined) throw new Error(`no ${kind} codec`)
   let n = 0
-  const asm = assembler(codec, P.id, remoteIds(), () => `toolu_styx_${String(++n).padStart(24, '0')}`)
+  const asm = assembler(codec, P.id, remoteIds(), () => `toolu_rice_${String(++n).padStart(24, '0')}`)
   const decoder = codec.decoder()
   const out: StepEvent[] = []
   let at = 0
@@ -58,11 +58,11 @@ function invariants(events: readonly StepEvent[]) {
     if (e.type === 'tool_use') {
       expect(e.name).not.toBe('')
       expect(typeof e.input === 'object' && e.input !== null && !Array.isArray(e.input)).toBe(true)
-      expect(e.id).toMatch(/^toolu_styx_\d{24}$/)
+      expect(e.id).toMatch(/^toolu_rice_\d{24}$/)
     }
     if (e.type === 'usage') for (const n of [e.in, e.out, e.cacheRead, e.cacheWrite]) expect(Number.isInteger(n) && n >= 0).toBe(true)
     if (e.type === 'error') {
-      expect(e.text).toMatch(/^styx: /)
+      expect(e.text).toMatch(/^rice-multi-models: /)
       expect(e.text).not.toContain('\n')
     }
   }

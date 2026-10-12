@@ -56,6 +56,8 @@ or `"none"` for a local server; plain http needs `"allowHttp": true`) and `model
 (`contextWindow`, `maxOutputTokens`, optional `effort` maps and `params`). A model's
 `tools` can list the only tools it is sent, which keeps small local models inside
 their window: `["Read", "Edit", "Write", "Bash", "Glob", "Grep"]`.
+A provider's `sessionHeader` (for OpenCode Go and Zen: `"x-opencode-session"`) carries a
+stable hash of the conversation, which those services route and cache by.
 
 Each provider is approved once: the first step asks (or run
 `/rice-models approve <provider>`), and a changed address or key command asks again.

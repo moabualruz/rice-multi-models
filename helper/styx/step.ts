@@ -1,6 +1,7 @@
 // Copied from Trosfy/claude-styx styxd/step.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: import paths for this layout; Effort comes from hooks/protocol.
+// Modified by mkh: import paths for this layout; Effort comes from hooks/protocol. A provider's sessionHeader
+// carries a hash of the conversation.
 // One routed step inside styxd: the target resolved from the config the request carries, the key (whose
 // approval check this is), the request encoded by its kind's codec, the answer decoded into StepEvents (a
 // tool call only whole and parsed), and one debug line. Pure over a port: main.ts owns the transport.
@@ -11,6 +12,7 @@ import { mintToolId } from '../../hooks/protocol'
 import type { ProviderStatus, StepEvent, StepWire, Usage, Wire } from '../../hooks/protocol'
 import { coalesce } from '../../hooks/coalesce'
 import { createKeys } from './auth'
+import { createHash } from 'node:crypto'
 import type { Runner } from './auth'
 import { parseJson } from './codec'
 import type { Codec, Decoded } from './codec'
@@ -35,7 +37,7 @@ export type Env = {
 }
 
 const DEFAULT_TOTAL_S = 1800
-// A finish reason as the short lowercase token the debug line, the stats and /styx may show; any other text reads as `other`.
+// A finish reason as the short lowercase token the debug line, the stats and /rice-models may show; any other text reads as `other`.
 const finishToken = (reason: string) => reason.toLowerCase().match(/^[a-z0-9_.-]{1,64}$/)?.[0] ?? 'other'
 
 // Decoded events as StepEvents: a tool call gets a minted id (its own id remembered for `provider`) once its
@@ -82,7 +84,7 @@ export function assembler(codec: Codec, provider: string, ids: ReturnType<typeof
     end(p: ProviderConfig, cut?: string): { events: StepEvent[]; finish: string; note?: string } {
       if (cut !== undefined) return { events: [{ type: 'error', kind: 'request', text: cut }], finish: 'error' }
       if (failure !== undefined) {
-        const text = `styx: ${p.id} response failed: ${oneLine(errorDetail(failure).message, 300)}; retry, or see the debug log`
+        const text = `rice-multi-models: ${p.id} response failed: ${oneLine(errorDetail(failure).message, 300)}; retry, or see the debug log`
         return { events: [{ type: 'error', kind: 'response', text }], finish: 'error' }
       }
       const reason = own(codec.stops, finish ?? 'stop')
@@ -139,7 +141,7 @@ export function createStepper(env: Env) {
       return [...events, st]
     }
     const refuse = (text: string) => close([{ type: 'error', kind: 'request', text }], 'error')
-    if (t?.kind !== 'remote') return yield* refuse(`styx: ${req.target} is not configured in this session; run /styx reload`)
+    if (t?.kind !== 'remote') return yield* refuse(`rice-multi-models: ${req.target} is not configured in this session; run /rice-models reload`)
     const { provider: p, model: m } = t
     const owner = `${p.id}/${m.id}`
     const approved = new Set(w.approved)
@@ -153,7 +155,8 @@ export function createStepper(env: Env) {
     reqBytes = new TextEncoder().encode(enc.body).length
     if (enc.lost) notes = ' note="thinking param left out: the signed blocks of this tool turn are not held"'
     const configured = Object.fromEntries(Object.entries({ ...p.headers, ...m.headers }).map(([k, v]) => [k.toLowerCase(), v]))
-    const headers = { 'content-type': 'application/json', ...enc.headers, ...configured, 'user-agent': w.userAgent ?? 'claude-code' }
+    const conversation = p.sessionHeader ? { [p.sessionHeader]: createHash('sha256').update(`${req.session}:${req.who}`).digest('hex') } : {}
+    const headers = { 'content-type': 'application/json', ...enc.headers, ...configured, ...conversation, 'user-agent': w.userAgent ?? 'claude-code' }
     const stallS = Math.max(1, Math.floor(Math.min(600, (p.timeoutMs ?? 600_000) / 1000)))
     const totalS = p.timeoutMs === undefined ? DEFAULT_TOTAL_S : Math.ceil(p.timeoutMs / 1000)
     const post = (k: string | null) => env.post({ url: `${p.baseUrl}${enc.path}`, allowHttp: p.allowHttp, headers: { ...headers, ...(k === null ? {} : p.authHeader === 'x-api-key' ? { 'x-api-key': k } : { authorization: `Bearer ${k}` }) }, body: enc.body, stallS, totalS }, signal)

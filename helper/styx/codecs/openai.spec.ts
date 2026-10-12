@@ -1,6 +1,6 @@
 // Copied from Trosfy/claude-styx styxd/codecs/openai.spec.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: import paths for this layout.
+// Modified by mkh: import paths for this layout; messages name rice-multi-models.
 // The `openai` codec: request bodies from the normalized transcript, and its decoder read the way styxd
 // reads it (whole tool calls, ids minted, one stop or error) and the way the engine gets it (through the
 // step assembler), against the captured LV1 fixtures and hand-built streams for the cases LV1 cannot produce.
@@ -28,7 +28,7 @@ const cfg = (model: Record<string, unknown> = {}, provider: Record<string, unkno
       providers: {
         acme: {
           kind: 'openai',
-          baseUrl: 'https://styx.invalid/v1',
+          baseUrl: 'https://rice-models.invalid/v1',
           auth: { command: ['/usr/bin/security'] },
           ...provider,
           models: { m: { contextWindow: 100_000, maxOutputTokens: 8000, ...model } },
@@ -69,7 +69,7 @@ function parse(pieces: readonly string[], failure?: string) {
   const remote: Record<string, string> = {}
   const ids = remoteIds()
   const { p } = cfg()
-  const asm = assembler(openai, 'acme', { ...ids, remember: (prov, minted, id) => ((remote[minted] = id), ids.remember(prov, minted, id)) }, () => `toolu_styx_${String(++n).padStart(24, '0')}`)
+  const asm = assembler(openai, 'acme', { ...ids, remember: (prov, minted, id) => ((remote[minted] = id), ids.remember(prov, minted, id)) }, () => `toolu_rice_${String(++n).padStart(24, '0')}`)
   const decoder = openai.decoder()
   const chunker = createAssembler('acme/m')
   const bytes = new TextEncoder()
@@ -82,7 +82,7 @@ function parse(pieces: readonly string[], failure?: string) {
   const end = { ...chunker.end(), ...(closed.note === undefined ? {} : { note: closed.note }) }
   return { events, closed, fed, chunks: [...fed.flat(), ...tailChunks, ...end.chunks], end, remote }
 }
-const failed = (detail: string) => `styx: acme response failed: ${detail}; retry, or see the debug log`
+const failed = (detail: string) => `rice-multi-models: acme response failed: ${detail}; retry, or see the debug log`
 const sse = (...events: unknown[]) => events.map(e => `data: ${typeof e === 'string' ? e : JSON.stringify(e)}\n\n`).join('')
 const delta = (d: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({ choices: [{ index: 0, delta: d, ...extra }] })
 const call = (index: number | undefined, fn: Record<string, unknown>, id?: string) => ({ ...(index === undefined ? {} : { index }), ...(id ? { id } : {}), type: 'function', function: fn })
@@ -94,7 +94,7 @@ for (const model of ['model-a', 'model-b']) {
   test(`the ${model} LV1 step-1 fixture parses to one get_weather call and a tool_use stop`, () => {
     const { chunks, end, remote } = parse([SSE(`${model}-step1.sse`)])
     expect(kinds(chunks)).toEqual(['tool0', 'input0', 'stop'])
-    expect(chunks[0]).toEqual({ kind: 'tool', index: 0, id: 'toolu_styx_000000000000000000000001', name: 'get_weather' })
+    expect(chunks[0]).toEqual({ kind: 'tool', index: 0, id: 'toolu_rice_000000000000000000000001', name: 'get_weather' })
     expect(chunks[1]).toEqual({ kind: 'input', index: 0, json: '{"city":"London"}' })
     expect(end.stopReason).toBe('tool_use')
     expect(end.usage).toEqual({ input_tokens: 55, output_tokens: 19, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'acme/m' })
@@ -138,12 +138,12 @@ test('the next body after LV1 step 1 has exactly the step-2 shape the gateway ac
 test('without a stored remote id the minted id is sent back', () => {
   const messages: ApiMessage[] = [
     { role: 'user', content: [{ type: 'text', text: 'q' }] },
-    { role: 'assistant', content: [{ type: 'text', text: 'checking' }, { type: 'tool_use', id: 'toolu_styx_x', name: 'Read', input: { file_path: '/a' } }] },
-    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_styx_x', content: 'text' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'checking' }, { type: 'tool_use', id: 'toolu_rice_x', name: 'Read', input: { file_path: '/a' } }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_rice_x', content: 'text' }] },
   ]
   const sent = body({ messages })['messages'] as Record<string, unknown>[]
-  expect(sent[2]).toMatchObject({ content: 'checking', tool_calls: [{ id: 'toolu_styx_x' }] })
-  expect(sent[3]).toMatchObject({ tool_call_id: 'toolu_styx_x' })
+  expect(sent[2]).toMatchObject({ content: 'checking', tool_calls: [{ id: 'toolu_rice_x' }] })
+  expect(sent[3]).toMatchObject({ tool_call_id: 'toolu_rice_x' })
 })
 
 test('body precedence: base, provider params, model params, effort level, then styx-owned keys; null deletes; objects deep-merge', () => {
@@ -329,16 +329,16 @@ test('live emission: a call is yielded when the next starts, the next when text 
 })
 
 test('a transport failure after a complete call keeps it and stops tool_use; before any call it stops end_turn', () => {
-  const cut = parse([sse(delta({ tool_calls: [call(0, { name: 'A', arguments: '{}' }, 'c0')] }), delta({ tool_calls: [call(1, { name: 'B', arguments: '{"par' }, 'c1')] }))], 'styx: acme stalled (no data for 600 s)')
+  const cut = parse([sse(delta({ tool_calls: [call(0, { name: 'A', arguments: '{}' }, 'c0')] }), delta({ tool_calls: [call(1, { name: 'B', arguments: '{"par' }, 'c1')] }))], 'rice-multi-models: acme stalled (no data for 600 s)')
   expect(kinds(cut.chunks)).toEqual(['tool0', 'input0', 'text1', 'stop'])
-  expect(cut.end).toMatchObject({ stopReason: 'tool_use', usage: null, toolUses: [{ name: 'A', input: {} }], answer: 'styx: acme stalled (no data for 600 s)' })
-  const early = parse([sse(delta({ content: 'par' }))], 'styx: acme stalled (no data for 600 s)')
-  expect(early.end).toMatchObject({ stopReason: 'end_turn', answer: 'parstyx: acme stalled (no data for 600 s)' })
+  expect(cut.end).toMatchObject({ stopReason: 'tool_use', usage: null, toolUses: [{ name: 'A', input: {} }], answer: 'rice-multi-models: acme stalled (no data for 600 s)' })
+  const early = parse([sse(delta({ content: 'par' }))], 'rice-multi-models: acme stalled (no data for 600 s)')
+  expect(early.end).toMatchObject({ stopReason: 'end_turn', answer: 'parrice-multi-models: acme stalled (no data for 600 s)' })
 })
 
 test('a truncated held call is never yielded: empty or partial arguments with a failed transport', () => {
   for (const args of ['', '{"cit']) {
-    const { chunks } = parse([sse(delta({ tool_calls: [call(0, { name: 'get_weather', arguments: args }, 'c0')] }))], 'styx: acme stalled (no data for 600 s)')
+    const { chunks } = parse([sse(delta({ tool_calls: [call(0, { name: 'get_weather', arguments: args }, 'c0')] }))], 'rice-multi-models: acme stalled (no data for 600 s)')
     expect(kinds(chunks)).toEqual(['text0', 'stop'])
   }
 })
@@ -350,7 +350,7 @@ test('malformed completed arguments fail before any chunk for that call', () => 
 })
 
 test('[DONE] then a failed exit gives the error text before exactly one stop; a clean fixture stops only at end', () => {
-  const failed = parse([sse(delta({ content: 'ok' }), FINISH('stop'), '[DONE]')], 'styx: acme curl exit 56: curl: (56) Recv failure')
+  const failed = parse([sse(delta({ content: 'ok' }), FINISH('stop'), '[DONE]')], 'rice-multi-models: acme curl exit 56: curl: (56) Recv failure')
   expect(kinds(failed.chunks)).toEqual(['text0', 'text1', 'stop'])
   expect(failed.chunks.filter(c => c.kind === 'stop')).toHaveLength(1)
   const clean = parse([SSE('model-b-step2.sse')])
@@ -398,7 +398,7 @@ test('the parser emits raw deltas as they come, and a tool call only whole, with
     sse(FINISH('tool_calls'), USAGE),
   ])
   expect(events.map(types)).toEqual([['thinking', 'thinking', 'text', 'text'], [], [], ['tool_use']])
-  expect(events[3]?.[0]).toEqual({ type: 'tool_use', id: 'toolu_styx_000000000000000000000001', name: 'Read', input: { file_path: '/a' } })
+  expect(events[3]?.[0]).toEqual({ type: 'tool_use', id: 'toolu_rice_000000000000000000000001', name: 'Read', input: { file_path: '/a' } })
   expect(closed.events).toEqual([
     { type: 'usage', in: 100, out: 30, cacheRead: 20, cacheWrite: 0 },
     { type: 'stop', reason: 'tool_use' },
@@ -407,13 +407,13 @@ test('the parser emits raw deltas as they come, and a tool call only whole, with
 })
 
 test('a stream cut mid tool call emits no tool_use: one request error, and no usage or stop', () => {
-  const cut = parse([sse(delta({ content: 'x' }), delta({ tool_calls: [call(0, { name: 'Write', arguments: '{"content":"par' }, 'c0')] }))], 'styx: acme stalled (no data for 600 s); retry')
+  const cut = parse([sse(delta({ content: 'x' }), delta({ tool_calls: [call(0, { name: 'Write', arguments: '{"content":"par' }, 'c0')] }))], 'rice-multi-models: acme stalled (no data for 600 s); retry')
   expect([...cut.events.flat(), ...cut.closed.events]).toEqual([
     { type: 'text', text: 'x' },
-    { type: 'error', kind: 'request', text: 'styx: acme stalled (no data for 600 s); retry' },
+    { type: 'error', kind: 'request', text: 'rice-multi-models: acme stalled (no data for 600 s); retry' },
   ])
-  const whole = parse([sse(delta({ tool_calls: [call(0, { name: 'Read', arguments: '{"file_path":"/a"}' }, 'c0')] }))], 'styx: acme stalled (no data for 600 s); retry')
-  expect(whole.closed.events).toEqual([{ type: 'error', kind: 'request', text: 'styx: acme stalled (no data for 600 s); retry' }])
+  const whole = parse([sse(delta({ tool_calls: [call(0, { name: 'Read', arguments: '{"file_path":"/a"}' }, 'c0')] }))], 'rice-multi-models: acme stalled (no data for 600 s); retry')
+  expect(whole.closed.events).toEqual([{ type: 'error', kind: 'request', text: 'rice-multi-models: acme stalled (no data for 600 s); retry' }])
   const truncated = parse([sse(delta({ tool_calls: [call(0, { name: 'Write', arguments: '{"content":"par' }, 'c0')] }))])
   expect(truncated.closed.events).toEqual([{ type: 'error', kind: 'response', text: failed('the stream ended with no finish reason') }])
 })

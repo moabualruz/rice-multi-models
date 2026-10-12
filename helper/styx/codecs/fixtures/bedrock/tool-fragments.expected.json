@@ -5,7 +5,7 @@
   },
   {
     "type": "tool_use",
-    "id": "toolu_styx_000000000000000000000001",
+    "id": "toolu_rice_000000000000000000000001",
     "name": "Read",
     "input": {
       "file_path": "/tmp/a.txt"
