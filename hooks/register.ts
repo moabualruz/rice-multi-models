@@ -13,6 +13,8 @@ import { carryFor, remember, withCarry } from './carry'
 import type { Reasoning } from './carry'
 import { COMPACT_SYSTEM, compactRequest, summaryMessage, withUserText } from './compact'
 import { createMemory } from './memory'
+import { agyModelIds, codexRows, mergeRows, providerRows, workerRows } from './picker'
+import type { PickerRow } from './picker'
 import { approvalQuestion, CONFIG_FILE, emptyLoaded, estimateTokens, loadText, providerLines, remoteOf, TRUST_PREFIX } from './providers'
 import type { Loaded, Remote } from './providers'
 import { definitionOf, rewriteMain, systemFor, withIdentity } from './prompts'
@@ -391,22 +393,54 @@ async function statusText($: EngineInterface): Promise<string> {
   return lines.join('\n')
 }
 
-async function modelsText($: EngineInterface): Promise<string> {
+async function codexCache($: EngineInterface): Promise<{ models?: { slug?: string; display_name?: string; context_window?: number; visibility?: string }[] }> {
   const home = (await $.env.get('CODEX_HOME')) || `${(await $.env.get('HOME')) ?? ''}/.codex`
   try {
-    const cache = JSON.parse(await $.fs.read(`${home}/models_cache.json`)) as { models?: { slug?: string; display_name?: string; context_window?: number; visibility?: string }[] }
-    const rows = (cache.models ?? []).filter(model => model.slug && model.visibility !== 'hide')
-
-    return `${rows.map(model => `codex/${model.slug}  ${model.display_name ?? ''}  ${model.context_window ? `${Math.round(model.context_window / 1000)}k` : ''}`).join('\n')}\n\nUse one with /model <id>, --model <id>, or model: <id> in an agent file.`
+    return JSON.parse(await $.fs.read(`${home}/models_cache.json`)) as { models?: { slug?: string; display_name?: string; context_window?: number; visibility?: string }[] }
   } catch {
-    return 'No Codex model list found; run codex once to fetch it (it is cached in ~/.codex/models_cache.json).'
+    return {}
   }
+}
+
+/** Every routed model as a picker row: Codex's, the declared providers', and the installed workers'. */
+async function routedRows($: EngineInterface): Promise<PickerRow[]> {
+  const rows = [...codexRows(await codexCache($)), ...providerRows(loaded.config)]
+  if (await hasCli($, 'agy')) {
+    const listed = await $.process.run(['/bin/sh', '-c', 'exec "$(command -v agy || echo "$HOME/.local/bin/agy")" models'], { timeoutMs: 30_000 }).catch(() => undefined)
+    const ids = listed?.exitCode === 0 ? agyModelIds(listed.stdout) : []
+    rows.push(...workerRows('agy', 'Antigravity', ids.length > 0 ? ids : [WORKERS.agy?.model ?? 'gemini-3.8-flash-high']))
+  }
+  if (await hasCli($, 'grok')) rows.push(...workerRows('grok', 'Grok', [WORKERS.grok?.model ?? 'grok-build']))
+
+  return rows
+}
+
+async function modelsText($: EngineInterface): Promise<string> {
+  const rows = await routedRows($)
+  if (rows.length === 0) return 'No routed models: sign in to Codex (codex login), declare providers in rice-multi-models.json, or install agy or grok.'
+
+  return `${rows.map(row => `${row.model}  ${row.label}`).join('\n')}\n\nUse one with /model <id>, --model <id>, or model: <id> in an agent file. /rice-models picker write lists them in /model.`
+}
+
+/** The user settings with the picker's routed rows replaced by the current ones. */
+async function writePicker($: EngineInterface): Promise<string> {
+  const dir = (await $.env.get('CLAUDE_CONFIG_DIR')) || `${(await $.env.get('HOME')) ?? ''}/.claude`
+  const path = `${dir}/settings.json`
+  const settings = (await $.fs.exists(path)) ? (JSON.parse(await $.fs.read(path)) as Record<string, unknown>) : {}
+  const picker = (settings.modelPicker && typeof settings.modelPicker === 'object' ? settings.modelPicker : {}) as Record<string, unknown>
+  const rows = await routedRows($)
+  const ours = (model: string): boolean => ['codex/', 'agy/', 'grok/'].some(prefix => model.startsWith(prefix)) || remoteOf(loaded, model) !== undefined
+  const options = mergeRows(picker.options, rows, ours)
+  await $.fs.write(path, `${JSON.stringify({ ...settings, modelPicker: { ...picker, options } }, null, 2)}\n`)
+
+  return `Wrote ${rows.length} routed rows into ${path} (modelPicker); rows you wrote yourself were kept. /model lists them in new sessions.`
 }
 
 async function runCommand($: EngineInterface, args: string): Promise<string> {
   const [first, value] = args.trim().split(/\s+/)
   if (!first || first === 'status') return statusText($)
   if (first === 'models') return modelsText($)
+  if (first === 'picker') return value === 'write' ? writePicker($) : `${JSON.stringify({ modelPicker: { options: await routedRows($) } }, null, 2)}\n\n/rice-models picker write puts these rows in your user settings.`
   if (first === 'providers') return providerLines(loaded, await approvedSet($)).join('\n')
   if (first === 'reload') {
     await loadProviders($)
@@ -455,7 +489,7 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
     return `Routed requests use ${value === 'auto' ? 'a WebSocket, falling back to server-sent events' : value === 'ws' ? 'a WebSocket only' : 'server-sent events only'}.`
   }
 
-  return 'Usage: /rice-models [status | models | providers | approve <provider> | reload | effort <level> | transport auto|ws|sse | helper session|once]'
+  return 'Usage: /rice-models [status | models | picker [write] | providers | approve <provider> | reload | effort <level> | transport auto|ws|sse | helper session|once | workers read|write]'
 }
 
 export const register: Register = on => {
@@ -467,7 +501,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'rice-models',
       description: 'Non-Anthropic models in this session: status, models, providers, approvals, effort, transport',
-      argumentHint: '[status | models | providers | approve <provider> | reload | effort <level> | transport auto|ws|sse | helper session|once]',
+      argumentHint: '[status | models | picker [write] | providers | approve <provider> | reload | effort <level> | transport auto|ws|sse | helper session|once | workers read|write]',
     })
     await registerAgents($)
     preferSession((await read($, prefsAtom)).helper !== 'once')

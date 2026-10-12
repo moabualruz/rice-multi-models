@@ -35,7 +35,9 @@ compaction are answered by the Codex model itself.
 the last step. `/rice-models effort <level>`, `/rice-models transport auto|ws|sse`
 and `/rice-models helper session|once` change them for the session.
 
-To list Codex models in the `/model` picker, add rows to `~/.claude/settings.json`:
+`/rice-models picker write` lists every routed model (Codex, declared providers, workers) in the
+`/model` picker by writing `modelPicker` rows into `~/.claude/settings.json`; rows you wrote yourself
+are kept, and `/rice-models picker` shows the rows without writing. A row looks like:
 
 ```json
 {
