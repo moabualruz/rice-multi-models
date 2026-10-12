@@ -150,3 +150,9 @@ Adapted from [Trosfy/claude-styx](https://github.com/Trosfy/claude-styx) (MIT:
 routing, prompts, transcript, assembler, schema generator) and
 [greenpolo/cc-multi-cli-plugin](https://github.com/greenpolo/cc-multi-cli-plugin)
 (Apache-2.0: Messages/Responses translation, Codex login renewal). See `THIRD_PARTY_NOTICES.md`.
+
+## License
+
+MIT, see `LICENSE`, except the files adapted from cc-multi-cli-plugin: they stay
+under the Apache License 2.0 and say so in their headers. `THIRD_PARTY_NOTICES.md`
+lists both upstreams.

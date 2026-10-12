@@ -12,3 +12,5 @@ names its upstream path and pinned commit and says whether it was modified. The 
 Files adapted from cc-multi-cli-plugin remain under the Apache License 2.0 and carry a prominent
 notice that they were changed, as section 4(b) of that license requires. Its NOTICE file is
 reproduced unchanged.
+
+Everything else in this plugin is under the MIT License in `LICENSE`.
