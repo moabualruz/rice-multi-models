@@ -5,6 +5,7 @@
 import type { ApiMessage, RemoteTool, StepEvent, StepRequest, StepWire } from '../hooks/protocol.ts'
 import { failedStep, splitTarget } from '../hooks/protocol.ts'
 import { codexStep } from './codex.ts'
+import { harnessStep } from './harness.ts'
 import type { SocketPool } from './socket.ts'
 import type { Runner } from './styx/auth'
 import { createStepper } from './styx/step'
@@ -51,6 +52,11 @@ export async function* runStep(wire: StepWire, signal: AbortSignal, options: Run
   const target = splitTarget(wire.req.target)
   if (target?.provider === 'codex') {
     yield* codexStep(wire.req, target.model, signal, { pool: options.pool })
+
+    return
+  }
+  if (target?.provider === 'agy' || target?.provider === 'grok') {
+    yield* harnessStep(wire.req, target.provider, target.model, signal)
 
     return
   }

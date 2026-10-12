@@ -30,6 +30,12 @@ export type StepRequest = {
   who: string
   session: string
   transport?: Transport
+  /** The directory a worker CLI runs in (the session's). */
+  cwd?: string
+  /** A worker CLI's session to resume: the conversation's run, kept from its `resume` event. */
+  resume?: string
+  /** Whether a worker CLI may edit files (accept-edits) or only read and plan. */
+  workerWrite?: boolean
 }
 
 export type StopReason = 'end_turn' | 'max_tokens' | 'refusal' | 'tool_use' | 'stop_sequence'
@@ -52,6 +58,7 @@ export type StepEvent =
   | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
   | ({ type: 'usage' } & Usage)
   | { type: 'limits'; limits: Limits }
+  | { type: 'resume'; key: string }
   | { type: 'stop'; reason: StopReason }
   | { type: 'error'; kind: 'request' | 'response'; text: string }
   | ({ type: 'stats' } & StepStats)

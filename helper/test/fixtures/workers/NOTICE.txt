@@ -1,0 +1,2 @@
+These recorded CLI streams are copied unchanged from greenpolo/cc-multi-cli-plugin test/unit/fixtures
+(antigravity/, grok/) at 3dcb057, Apache-2.0; see ../../../../LICENSES/cc-multi-cli-plugin.Apache-2.0.txt.

@@ -27,9 +27,14 @@ import { handbackState, withTask } from './transcript'
 
 const PLUGIN = 'rice-multi-models'
 const CURL = '/usr/bin/curl'
-const PROVIDERS: Readonly<Record<string, string>> = { codex: 'OpenAI Codex (ChatGPT subscription)' }
+const PROVIDERS: Readonly<Record<string, string>> = { codex: 'OpenAI Codex (ChatGPT subscription)', agy: 'Antigravity (agy CLI)', grok: 'Grok (grok CLI)' }
+/** Agent CLIs that run their own loop and tools: their label, default model, and what a user asks for to use them. */
+const WORKERS: Readonly<Record<string, { label: string; model: string; ask: string }>> = {
+  agy: { label: 'Antigravity (Gemini)', model: 'gemini-3.8-flash-high', ask: 'Antigravity or Gemini' },
+  grok: { label: 'Grok Build', model: 'grok-build', ask: 'Grok' },
+}
 const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
-const prefsAtom = atom({ plugin: 'rice-multi-models', key: 'prefs' } as const, { effort: null, transport: 'auto', helper: 'session' })
+const prefsAtom = atom({ plugin: 'rice-multi-models', key: 'prefs' } as const, { effort: null, transport: 'auto', helper: 'session', workers: 'read' })
 
 const memory = createMemory()
 const described = new Map<string, Described>()
@@ -41,6 +46,10 @@ let bun: string | undefined
 let codexDefaults: { model?: string; effort?: Effort } = {}
 let limits: Limits | undefined
 let lastStep: { model: string; who: string; ms: number; transport: string } | undefined
+/** Each conversation's worker run to resume (`main` or a subagent's id). */
+const resumes = new Map<string, string>()
+/** Whether each registered worker agent type may edit files. */
+const workerWrites = new Map<string, boolean>()
 let loaded: Loaded = emptyLoaded(CONFIG_FILE)
 
 /** Whether a model name is answered here: a Codex id, or a declared provider's model or alias. */
@@ -195,6 +204,57 @@ async function registerAgents($: EngineInterface): Promise<void> {
     await $.agent.register({ name: agent.name, description: agent.description, prompt: agent.def.prompt, model, ...(agent.def.tools ? { tools: agent.def.tools } : {}) })
     registered.set(`${PLUGIN}:${agent.name}`, agent.def)
   }
+  for (const [worker, info] of Object.entries(WORKERS)) {
+    if (!(await hasCli($, worker))) continue
+    const workerModel = `${worker}/${info.model}`
+    for (const write of [false, true]) {
+      const name = write ? `${worker}-write` : worker
+      const can = write ? 'reads, runs its own tools and may edit files (accept-edits)' : 'reads and plans only (plan mode)'
+      const prompt = `You are ${info.label} working for a Claude Code session. Do the task you are given with your own tools, then answer with a complete report of what you found or changed; that report is all the caller reads.`
+      await $.agent.register({ name, description: `Runs ${info.label} on ${workerModel} as a worker with its own tools; it ${can}. Use it when the user asks for ${info.ask}.`, prompt, model: workerModel, tools: [] })
+      registered.set(`${PLUGIN}:${name}`, { prompt, tools: [] })
+      workerWrites.set(`${PLUGIN}:${name}`, write)
+    }
+  }
+}
+
+async function hasCli($: EngineInterface, name: string): Promise<boolean> {
+  const found = await $.process.run(['/bin/sh', '-c', 'command -v "$0" >/dev/null || [ -x "$HOME/.local/bin/$0" ]', name], { timeoutMs: 10_000 }).catch(() => undefined)
+
+  return found?.exitCode === 0
+}
+
+/**
+ * A worker step's request: no Claude system prompt or tools (the CLI brings its own), the agent's own
+ * instructions when it has a definition, the transcript for its user turns, the session's directory, the
+ * conversation's run to resume, and whether the run may edit files.
+ */
+async function buildWorkerRequest($: EngineInterface, e: TurnStepInput, transcript: readonly ApiMessage[]): Promise<StepRequest> {
+  const who = e.agentId ?? 'main'
+  let system = ''
+  let write = (await read($, prefsAtom)).workers === 'write'
+  if (e.agentId !== undefined) {
+    const type = (await $.agent.list()).find(each => each.id === e.agentId)?.type
+    const def = (type && registered.get(type)) || (await definitionOf(promptsPort($), memory, type))
+    system = def?.prompt ?? ''
+    write = type ? (workerWrites.get(type) ?? false) : false
+  }
+  const prefs = await read($, prefsAtom)
+  const effort = e.effort ?? prefs.effort ?? undefined
+  const resume = resumes.get(who)
+
+  return {
+    target: e.model,
+    system,
+    tools: [],
+    transcript,
+    ...(effort ? { effort } : {}),
+    who,
+    session: await $.session.id(),
+    cwd: await $.session.cwd(),
+    ...(resume ? { resume } : {}),
+    workerWrite: write,
+  }
 }
 
 /** The request for one routed step: the system prompt, the tools, the transcript with reasoning put back. */
@@ -257,11 +317,14 @@ async function* routedStep($: EngineInterface, e: TurnStepInput): AsyncGenerator
   $.ui.log(`${PLUGIN}: step ${who} ${e.model} index=${e.index} effort=${e.effort ?? 'unset'}`, { to: 'debug' })
   const assembler = createAssembler(e.model)
   let handback: string | undefined
+  let deliver = false
   try {
     const transcript = await $.session.messages(e.agentId === undefined ? { as: 'api' } : { as: 'api', agentId: e.agentId })
     if (!Array.isArray(transcript)) throw new Error(`the transcript of ${who} is unreadable (${transcript.deny})`)
-    const built = await buildRequest($, e, transcript as ApiMessage[])
+    const isWorker = Object.hasOwn(WORKERS, targetOf(e.model)?.provider ?? '') && !targetOf(e.model)?.remote
+    const built = isWorker ? { req: await buildWorkerRequest($, e, transcript as ApiMessage[]), ...(e.agentId !== undefined && handbackState(transcript as ApiMessage[], HANDBACK_TOOL.name) === 'offered' ? { handback: HANDBACK_TOOL.name } : {}) } : await buildRequest($, e, transcript as ApiMessage[])
     handback = built.handback
+    deliver = isWorker
     const remote = targetOf(e.model)?.remote
     if (remote) {
       const refused = await approval($, remote)
@@ -273,6 +336,7 @@ async function* routedStep($: EngineInterface, e: TurnStepInput): AsyncGenerator
     let firstTool: string | undefined
     for await (const event of helperStep(helperPort($), await wireFor($, built.req))) {
       if (event.type === 'signature') reasoning.push({ thinking: event.thinking, signature: event.signature })
+      else if (event.type === 'resume') resumes.set(who, event.key)
       else if (event.type === 'limits') {
         limits = event.limits
         $.ui.status(limitsText())
@@ -290,7 +354,7 @@ async function* routedStep($: EngineInterface, e: TurnStepInput): AsyncGenerator
   } catch (error) {
     assembler.feed({ type: 'error', kind: 'request', text: `rice-multi-models: ${error instanceof Error ? error.message : String(error)}` })
   }
-  const end = assembler.end(handback ? { handback } : {})
+  const end = assembler.end(handback ? { handback, deliver } : {})
   if (end.failure !== undefined && e.agentId !== undefined) $.ui.toast(end.failure.split('\n')[0] ?? end.failure)
   yield* end.chunks
 
@@ -368,6 +432,13 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
     await update($, prefsAtom, prefs => ({ ...prefs, effort: value as Effort }))
 
     return `Routed models think at ${value} effort in this session, unless a request sets its own.`
+  }
+  if (first === 'workers') {
+    if (value !== 'read' && value !== 'write') return 'Usage: /rice-models workers read|write (for agy/... or grok/... as the session model)'
+    const workers: 'read' | 'write' = value
+    await update($, prefsAtom, prefs => ({ ...prefs, workers }))
+
+    return workers === 'write' ? 'A worker model in this session may edit files (accept-edits).' : 'A worker model in this session only reads and plans.'
   }
   if (first === 'helper') {
     if (value !== 'session' && value !== 'once') return 'Usage: /rice-models helper session|once'

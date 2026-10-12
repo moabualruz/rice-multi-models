@@ -14,6 +14,9 @@ Providers:
   (`/chat/completions`), Anthropic-style (`/v1/messages`) or Bedrock: Ollama,
   llama.cpp, vLLM, LM Studio, OpenRouter, OpenAI, Anthropic API keys, other clouds.
   Model ids `<provider>/<model>` or an alias. See `example.rice-multi-models.json`.
+- **Agent CLIs as workers**: Antigravity (`agy`, Gemini) and Grok (`grok`) run their own loop and
+  tools. Model ids `agy/<model>` and `grok/<model>`; agent types `rice-multi-models:agy`,
+  `agy-write`, `grok`, `grok-write` (registered when the CLI is installed).
 
 ## Use
 
@@ -46,6 +49,16 @@ To list Codex models in the `/model` picker, add rows to `~/.claude/settings.jso
 
 `behavesAs` gives the row a known model's capabilities (no unknown-model
 warning). Claude Code keeps a 200k window for these models, under Codex's own.
+
+## Workers (Antigravity, Grok)
+
+A worker step runs the CLI headless with the newest user turn: its narration, reasoning and
+actions (`▸ view_file ...`) stream as thinking, and its final response is the answer (a
+subagent's report). Each conversation keeps the CLI's own session, so a follow-up resumes it.
+The read-only types run in the CLI's plan mode; the `-write` types allow file edits
+(accept-edits). Neither skips the CLI's permission checks: a command the CLI would ask about
+is refused in headless mode. As the main session model (`/model agy/gemini-3.8-flash-high`),
+`/rice-models workers read|write` picks the mode. Sign in with the CLI first (`agy`, `grok login`).
 
 ## Declared providers
 

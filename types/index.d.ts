@@ -3,6 +3,7 @@ export type ModelPrefs = {
   effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null
   transport: 'auto' | 'ws' | 'sse'
   helper: 'session' | 'once'
+  workers: 'read' | 'write'
 }
 
 declare module 'claude-code' {
