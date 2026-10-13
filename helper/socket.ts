@@ -5,7 +5,7 @@ import type { Limits } from '../hooks/protocol.ts'
 import { ProviderFailure } from './core/provider-failure.ts'
 
 const OPEN_MS = 15_000
-const ENDS = new Set(['response.completed', 'response.failed', 'response.incomplete', 'error'])
+const ENDS = new Set(['response.completed', 'response.done', 'response.failed', 'response.incomplete', 'error'])
 const encoder = new TextEncoder()
 
 export class SocketError extends ProviderFailure {

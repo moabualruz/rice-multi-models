@@ -101,16 +101,17 @@ async function httpFailure(response: Response): Promise<UpstreamError> {
 }
 
 /** One response over HTTP with server-sent events; a 401 renews the Codex login once. */
-async function openHttp(url: string, request: ResponsesRequest, authFile: string, sessionId: string, signal: AbortSignal): Promise<AsyncIterable<Uint8Array>> {
-  const response = await codexRequest(authFile, signal, auth =>
-    fetch(url, {
+async function openHttp(url: string, request: ResponsesRequest, authFile: string, sessionId: string, signal: AbortSignal, onAuth: (auth: CodexAuthHeaders) => void): Promise<AsyncIterable<Uint8Array>> {
+  const response = await codexRequest(authFile, signal, auth => {
+    onAuth(auth)
+    return fetch(url, {
       method: 'POST',
       headers: { ...auth, 'content-type': 'application/json', accept: 'text/event-stream', originator: ORIGINATOR, session_id: sessionId, 'OpenAI-Beta': SSE_BETA },
       body: JSON.stringify(request),
       signal,
       redirect: 'error',
-    }),
-  )
+    })
+  })
   if (!response.ok || !response.body) throw await httpFailure(response)
 
   return response.body as unknown as AsyncIterable<Uint8Array>
@@ -248,8 +249,22 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
   const sessionId = `${req.session}:${req.who}`
   const choice: Transport = req.transport ?? 'auto'
   const onLimits = (limits: Limits) => queue.push({ type: 'limits', limits })
+  const credentials = new Set<string>()
+  let accountId: string | undefined
+  const onAuth = (auth: CodexAuthHeaders) => {
+    credentials.add(auth.authorization.slice('Bearer '.length))
+    credentials.add(auth['chatgpt-account-id'])
+    if (accountId !== undefined && accountId !== auth['chatgpt-account-id']) throw new CodexAuthError('Codex account changed during the step. Retry in the intended account.')
+    accountId = auth['chatgpt-account-id']
+  }
+  const finalText = (failure: ProviderFailure, attempts: number) => {
+    let text = failure.finalText(attempts)
+    for (const credential of credentials) if (credential) text = text.replaceAll(credential, '[REDACTED]')
+    return `codex: ${text}`
+  }
   const openSocket = async (): Promise<AsyncIterable<Uint8Array>> => {
     const auth = await readCodexAuth(authFile)
+    onAuth(auth)
     const headers = { ...auth, originator: ORIGINATOR, session_id: sessionId, 'OpenAI-Beta': WS_BETA }
     const url = options.wsUrl ?? WS_URL
     const { stream: _stream, ...body } = request
@@ -274,7 +289,7 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
         if (choice === 'ws' || signal.aborted || error instanceof CodexAuthError) throw error
       }
     }
-    const stream = await openHttp(options.httpUrl ?? HTTP_URL, request, authFile, sessionId, signal)
+    const stream = await openHttp(options.httpUrl ?? HTTP_URL, request, authFile, sessionId, signal, onAuth)
     transport = 'sse'
 
     return stream
@@ -285,6 +300,7 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
     try {
       const limit = options.maxInFlight ?? codexStepLimit(options.env)
       const auth = await readCodexAuth(authFile)
+      onAuth(auth)
       signal.throwIfAborted()
       const accountKey = createHash('sha256').update(auth['chatgpt-account-id']).digest('hex')
       release = await codexAccounts.acquire(accountKey, limit, signal)
@@ -333,7 +349,7 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
             await waitForRetry(delay, signal)
             continue
           }
-          queue.push({ type: 'error', kind: error instanceof UpstreamError || error instanceof CodexAuthError ? 'request' : 'response', text: `codex: ${failure.finalText(attempt)}` })
+          queue.push({ type: 'error', kind: error instanceof UpstreamError || error instanceof CodexAuthError ? 'request' : 'response', text: finalText(failure, attempt) })
           return
         }
       }
@@ -342,7 +358,7 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
         event: signal.aborted ? 'request.aborted' : error instanceof CodexAuthError ? 'auth.error' : 'request.admission',
         code: signal.aborted ? 'aborted' : error instanceof CodexAuthError ? 'codex-auth' : 'account-limit',
       })
-      queue.push({ type: 'error', kind: 'request', text: `codex: ${failure.finalText(attempts)}` })
+      queue.push({ type: 'error', kind: 'request', text: finalText(failure, attempts) })
     } finally {
       release?.()
       queue.close()

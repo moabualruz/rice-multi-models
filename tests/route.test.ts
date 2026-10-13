@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, test } from 'bun:test'
 
 import { remember, withCarry } from '../hooks/carry'
 import type { Carry } from '../hooks/carry'

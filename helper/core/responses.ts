@@ -609,7 +609,7 @@ class ResponseStream {
 
   result(): MessagesResponse {
     if (!this.completed || !this.message) {
-      throw new Error('OpenAI stream ended before completion');
+      throw new ProviderFailure('OpenAI stream ended before completion', { event: 'stream.closed', code: 'stream-closed', transient: true });
     }
     return this.message;
   }

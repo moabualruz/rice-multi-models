@@ -5,13 +5,14 @@ import { join } from 'node:path'
 
 import type { StepEvent, StepRequest } from '../../hooks/protocol.ts'
 import { codexStep } from '../codex.ts'
+import { MAX_RETRY_WAIT_MS, ProviderFailure, retryAfterMs, retryDelay, waitForRetry } from '../core/provider-failure.ts'
 
 const req: StepRequest = { target: 'codex/test', system: 'Test', tools: [{ name: 'echo', description: 'Echo', schema: { type: 'object' } }], transcript: [{ role: 'user', content: 'Hi' }], who: 'main', session: 'retry-test' }
 const created = { type: 'response.created', response: { id: 'resp_test' } }
 const success = [created, { type: 'response.completed', response: { id: 'resp_test', status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: 'OK' }] }], usage: { input_tokens: 1, output_tokens: 1 } } }]
 type Reply = { status?: number; headers?: Record<string, string>; events?: unknown[]; close?: number; body?: unknown }
 
-async function fake(replies: Reply[], transport: 'sse' | 'ws' = 'sse') {
+async function fake(replies: Reply[], transport: 'sse' | 'ws' | 'auto' = 'sse') {
   const dir = mkdtempSync(join(tmpdir(), 'mm-retry-'))
   const authFile = join(dir, 'auth.json')
   writeFileSync(authFile, JSON.stringify({ auth_mode: 'chatgpt', tokens: { access_token: 'test-only', account_id: 'retry-test' } }))
@@ -21,6 +22,10 @@ async function fake(replies: Reply[], transport: 'sse' | 'ws' = 'sse') {
     port: 0,
     async fetch(request, server) {
       if (new URL(request.url).pathname === '/ws') {
+        if (replies[Math.min(calls, replies.length - 1)]?.status) {
+          const reply = respond()
+          return new Response(JSON.stringify(reply.body), { status: reply.status, headers: reply.headers })
+        }
         if (server.upgrade(request)) return
         return new Response(null, { status: 400 })
       }
@@ -98,4 +103,89 @@ test('an emitted tool call prevents replay even on a transient error', async () 
   expect(result.calls).toBe(1)
   expect(result.events.filter(event => event.type === 'tool_use')).toHaveLength(1)
   expect(result.events.some(event => event.type === 'error')).toBe(true)
+})
+
+for (const reply of [
+  { events: [{ type: 'error', code: 'invalid_api_key' }] },
+  { events: [{ type: 'response.failed', response: { error: { type: 'invalid_request_error' } } }] },
+] satisfies Reply[]) {
+  test(`permanent streamed rejection is not retried: ${JSON.stringify(reply.events)}`, async () => {
+    const result = await fake([reply])
+    expect(result.calls).toBe(1)
+    expect(result.events.some(event => event.type === 'error')).toBe(true)
+  })
+}
+
+test('HTTP 503 and a truncated SSE response are transient', async () => {
+  for (const reply of [{ status: 503, body: { error: { type: 'server_error' } } }, { events: [created] }] satisfies Reply[]) {
+    const result = await fake([reply, {}])
+    expect(result.calls).toBe(2)
+    expect(result.events.some(event => event.type === 'stop')).toBe(true)
+  }
+})
+
+test('WebSocket policy close 1008 is permanent', async () => {
+  const result = await fake([{ events: [created], close: 1008 }], 'ws')
+  expect(result.calls).toBe(1)
+  const error = result.events.find(event => event.type === 'error')
+  if (error?.type !== 'error') throw new Error('missing error')
+  expect(error.text).toContain('websocket.close')
+  expect(error.text).toContain('close=1008')
+  expect(error.text).toContain('1 attempt')
+})
+
+test('discarded attempt text never leaks into the restarted answer', async () => {
+  const result = await fake([{ events: [created,
+    { type: 'response.output_item.added', output_index: 0, item: { type: 'message' } },
+    { type: 'response.output_text.delta', output_index: 0, delta: 'DISCARDED' },
+    { type: 'response.failed' },
+  ] }, {}])
+  expect(result.calls).toBe(2)
+  expect(result.events.filter(event => event.type === 'text')).toEqual([{ type: 'text', text: 'OK' }])
+})
+
+test('final stream failures redact the actual login even when echoed as a short unlabelled value', async () => {
+  const result = await fake([{ events: [{ type: 'error', code: 'invalid_api_key', message: 'Rejected test-only for retry-test' }] }])
+  const error = result.events.find(event => event.type === 'error')
+  if (error?.type !== 'error') throw new Error('missing error')
+  expect(error.text).not.toContain('test-only')
+  expect(error.text).not.toContain('retry-test')
+  expect(error.text).toContain('[REDACTED]')
+})
+
+test('an out-of-budget Retry-After is not shortened or retried early', async () => {
+  const result = await fake([{ status: 429, headers: { 'retry-after': '60' }, body: { error: { code: 'rate_limit_exceeded' } } }])
+  expect(result.calls).toBe(1)
+  expect(result.events.some(event => event.type === 'error')).toBe(true)
+})
+
+test('auto transport recovers a rejected handshake through HTTP and does not retry a permanent 401', async () => {
+  const result = await fake([{ status: 401, body: { error: { code: 'invalid_api_key' } } }], 'auto')
+  expect(result.calls).toBe(2)
+  const error = result.events.find(event => event.type === 'error')
+  if (error?.type !== 'error') throw new Error('missing error')
+  expect(error.text).toContain('HTTP 401')
+  expect(error.text).toContain('invalid_api_key')
+  expect(error.text).toContain('1 attempt')
+})
+
+test('classification and exponential jitter preserve bounded retry semantics', async () => {
+  for (const code of ['server_error', 'rate_limit_exceeded', 'concurrency_limit_exceeded']) expect(ProviderFailure.event({ type: 'error', error: { code } }).transient).toBe(true)
+  for (const code of ['invalid_api_key', 'insufficient_quota', 'unknown_error']) expect(ProviderFailure.event({ type: 'error', error: { code } }).transient).toBe(false)
+  for (const status of [429, 500, 503]) expect(new ProviderFailure('', { event: 'http.response', status }).transient).toBe(true)
+  for (const status of [401, 403, 400]) expect(new ProviderFailure('', { event: 'http.response', status, code: 'server_error' }).transient).toBe(false)
+  const failure = ProviderFailure.event({ type: 'response.failed' })
+  expect(retryDelay(failure, 1, () => 0)).toBe(500)
+  expect(retryDelay(failure, 1, () => 1)).toBe(1000)
+  expect(retryDelay(failure, 2, () => 0)).toBe(1000)
+  expect(retryDelay(failure, 2, () => 1)).toBe(2000)
+  expect(retryDelay(new ProviderFailure('', { event: 'error', retryAfterMs: 3000 }), 1, () => 0)).toBe(3000)
+  expect(retryDelay(new ProviderFailure('', { event: 'error', retryAfterMs: MAX_RETRY_WAIT_MS + 1 }), 1)).toBe(null)
+  expect(retryAfterMs('2')).toBe(2000)
+  expect(retryAfterMs('Thu, 01 Jan 1970 00:00:03 GMT', 1000)).toBe(2000)
+  expect(retryAfterMs('invalid')).toBeUndefined()
+  const controller = new AbortController()
+  const pending = waitForRetry(30_000, controller.signal)
+  controller.abort(new Error('cancelled'))
+  await expect(pending).rejects.toThrow('cancelled')
 })
