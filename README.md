@@ -160,7 +160,7 @@ Codex CLI on the same account. The session helper's overall 16-step cap is uncha
 
 ## Update
 
-Version 0.5.1 is published from this repository's `main`, which the `rice-mods` marketplace
+Version 0.5.2 is published from this repository's `main`, which the `rice-mods` marketplace
 tracks without a tag pin. Update the marketplace and installed mod, then restart the session:
 
 ```bash

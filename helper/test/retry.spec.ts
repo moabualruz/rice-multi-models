@@ -5,7 +5,7 @@ import { join } from 'node:path'
 
 import type { StepEvent, StepRequest } from '../../hooks/protocol.ts'
 import { codexStep } from '../codex.ts'
-import { MAX_RETRY_WAIT_MS, ProviderFailure, retryAfterMs, retryDelay, waitForRetry } from '../core/provider-failure.ts'
+import { MAX_ATTEMPTS, MAX_RETRY_WAIT_MS, maxAttempts, OVERLOAD_MAX_ATTEMPTS, ProviderFailure, retryAfterMs, retryDelay, waitForRetry } from '../core/provider-failure.ts'
 
 const req: StepRequest = { target: 'codex/test', system: 'Test', tools: [{ name: 'echo', description: 'Echo', schema: { type: 'object' } }], transcript: [{ role: 'user', content: 'Hi' }], who: 'main', session: 'retry-test' }
 const created = { type: 'response.created', response: { id: 'resp_test' } }
@@ -230,4 +230,23 @@ test('classification and exponential jitter preserve bounded retry semantics', a
   const pending = waitForRetry(30_000, controller.signal)
   controller.abort(new Error('cancelled'))
   await expect(pending).rejects.toThrow('cancelled')
+})
+
+test('provider overload is transient with a longer, capped schedule', () => {
+  const overloaded = new ProviderFailure('Our servers are currently overloaded. Please try again later.', { event: 'error', code: 'server_is_overloaded' })
+  expect(overloaded.overloaded).toBe(true)
+  expect(overloaded.transient).toBe(true)
+  expect(maxAttempts(overloaded)).toBe(OVERLOAD_MAX_ATTEMPTS)
+  expect(retryDelay(overloaded, 1, () => 0)).toBe(2000)
+  expect(retryDelay(overloaded, 4, () => 0)).toBe(16000)
+  expect(retryDelay(overloaded, 5, () => 1)).toBe(MAX_RETRY_WAIT_MS)
+  const capacity = new ProviderFailure('Selected model is at capacity. Please try a different model.', { event: 'error' })
+  expect(capacity.overloaded).toBe(true)
+  expect(new ProviderFailure('', { event: 'http.response', status: 503 }).overloaded).toBe(true)
+  const ordinary = new ProviderFailure('', { event: 'error', code: 'rate_limit_exceeded' })
+  expect(ordinary.overloaded).toBe(false)
+  expect(maxAttempts(ordinary)).toBe(MAX_ATTEMPTS)
+  const permanent = new ProviderFailure('model unavailable for this account', { event: 'error', code: 'model_not_found' })
+  expect(permanent.overloaded).toBe(false)
+  expect(permanent.transient).toBe(false)
 })

@@ -3,6 +3,8 @@ import { oneLine } from '../styx/errors.ts'
 const TRANSIENT = new Set(['server_error', 'internal_server_error', 'internal_error', 'rate_limit_exceeded', 'rate_limit_error', 'too_many_requests', 'concurrency_limit_exceeded', 'concurrent_request_limit_exceeded', 'overloaded_error', 'service_unavailable', 'temporarily_unavailable', 'timeout', 'request_timeout'])
 const PERMANENT = new Set(['authentication_error', 'invalid_api_key', 'unauthorized', 'permission_denied', 'permission_error', 'invalid_request_error', 'invalid_request', 'insufficient_quota', 'billing_hard_limit_reached', 'content_policy_violation', 'model_not_found'])
 const TRANSIENT_CLOSE = new Set([1000, 1001, 1005, 1006, 1011, 1012, 1013, 1014])
+// Provider-side saturation ("server_is_overloaded", "model at capacity", 503/529): recovers in minutes, not seconds.
+const OVERLOAD = /overload|capacity|unavailable/i
 const record = (value: unknown): Record<string, unknown> => typeof value === 'object' && value !== null ? value as Record<string, unknown> : {}
 const string = (value: unknown): string => typeof value === 'string' ? value : ''
 
@@ -22,10 +24,14 @@ export type FailureInfo = { event: string; code?: string; type?: string; status?
 
 export class ProviderFailure extends Error {
   readonly transient: boolean
+  readonly overloaded: boolean
   constructor(message: string, readonly info: FailureInfo) {
     super(oneLine(message, 300))
     const labels = [info.code, info.type].filter((value): value is string => !!value)
+    this.overloaded = !labels.some(label => PERMANENT.has(label))
+      && (labels.some(label => OVERLOAD.test(label)) || info.status === 503 || info.status === 529 || OVERLOAD.test(message))
     this.transient = labels.some(label => PERMANENT.has(label)) ? false
+      : this.overloaded ? true
       : info.status !== undefined
         ? info.status === 408 || info.status === 429 || (info.status >= 500 && info.status <= 599)
         : info.closeCode !== undefined
@@ -58,12 +64,21 @@ export class ProviderFailure extends Error {
 }
 
 export const MAX_ATTEMPTS = 3
+/** Provider overload gets a longer schedule (about 2, 4, 8, 16, 30 s) before the step fails. */
+export const OVERLOAD_MAX_ATTEMPTS = 6
 export const MAX_RETRY_WAIT_MS = 30_000
+
+export function maxAttempts(failure: ProviderFailure): number {
+  return failure.overloaded ? OVERLOAD_MAX_ATTEMPTS : MAX_ATTEMPTS
+}
 
 /** A Retry-After outside the bounded retry window is not shortened: fail rather than retry early. */
 export function retryDelay(failure: ProviderFailure, attempt: number, random = Math.random): number | null {
-  const delay = Math.max(500 * 2 ** (attempt - 1) * (1 + Math.max(0, Math.min(1, random()))), failure.info.retryAfterMs ?? 0)
-  return delay <= MAX_RETRY_WAIT_MS ? delay : null
+  const after = failure.info.retryAfterMs ?? 0
+  if (after > MAX_RETRY_WAIT_MS) return null
+  const base = failure.overloaded ? 2000 : 500
+  const backoff = Math.min(base * 2 ** (attempt - 1) * (1 + Math.max(0, Math.min(1, random()))), MAX_RETRY_WAIT_MS)
+  return Math.max(backoff, after)
 }
 
 export function waitForRetry(ms: number, signal: AbortSignal): Promise<void> {

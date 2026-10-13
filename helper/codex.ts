@@ -14,7 +14,7 @@ import { CodexAuthError, codexRequest, readCodexAuth } from './openai/auth.ts'
 import type { CodexAuthHeaders } from './openai/auth.ts'
 import { openaiInstructions } from './openai/instructions.ts'
 import { CodexSocket, SocketPool } from './socket.ts'
-import { MAX_ATTEMPTS, ProviderFailure, retryAfterMs, retryDelay, waitForRetry } from './core/provider-failure.ts'
+import { maxAttempts, OVERLOAD_MAX_ATTEMPTS, ProviderFailure, retryAfterMs, retryDelay, waitForRetry } from './core/provider-failure.ts'
 import { oneLine } from './styx/errors.ts'
 import { codexAccounts, codexStepLimit } from './account-steps.ts'
 
@@ -314,7 +314,7 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
       signal.throwIfAborted()
       const accountKey = createHash('sha256').update(auth['chatgpt-account-id']).digest('hex')
       release = await codexAccounts.acquire(accountKey, limit, signal)
-      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      for (let attempt = 1; attempt <= OVERLOAD_MAX_ATTEMPTS; attempt++) {
         attempts = attempt
         let pending: StepEvent[] = []
         let committed = false
@@ -355,7 +355,7 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
             { event: signal.aborted ? 'request.aborted' : error instanceof CodexAuthError ? 'auth.error' : 'response.decode', code: error instanceof CodexAuthError ? 'codex-auth' : 'stream-error' },
           )
           const delay = retryDelay(failure, attempt)
-          if (!signal.aborted && failure.transient && !committed && attempt < MAX_ATTEMPTS && delay !== null) {
+          if (!signal.aborted && failure.transient && !committed && attempt < maxAttempts(failure) && delay !== null) {
             await waitForRetry(delay, signal)
             continue
           }
