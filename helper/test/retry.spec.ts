@@ -105,6 +105,14 @@ test('an emitted tool call prevents replay even on a transient error', async () 
   expect(result.events.some(event => event.type === 'error')).toBe(true)
 })
 
+test('malformed function arguments from the model resample the step before any tool call is emitted', async () => {
+  const broken = { type: 'function_call', call_id: 'call_test', name: 'echo', arguments: '{"text":' }
+  const result = await fake([{ events: [created, { type: 'response.output_item.added', output_index: 0, item: broken }, { type: 'response.output_item.done', output_index: 0, item: broken }] }, {}])
+  expect(result.calls).toBe(2)
+  expect(result.events.some(event => event.type === 'tool_use')).toBe(false)
+  expect(result.events.find(event => event.type === 'stop')).toEqual({ type: 'stop', reason: 'end_turn' })
+})
+
 for (const reply of [
   { events: [{ type: 'error', code: 'invalid_api_key' }] },
   { events: [{ type: 'response.failed', response: { error: { type: 'invalid_request_error' } } }] },

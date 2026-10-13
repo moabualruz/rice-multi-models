@@ -864,7 +864,18 @@ class ResponseStream {
     if (slot.arguments && slot.arguments !== item.arguments) {
       throw new Error('OpenAI function arguments changed after streaming');
     }
-    const input: unknown = JSON.parse(item.arguments);
+    let input: unknown;
+    try {
+      input = JSON.parse(item.arguments);
+    } catch (error) {
+      // The model sampled invalid JSON arguments; a fresh sample usually succeeds, and the caller
+      // retries only while no tool call from this attempt has been emitted.
+      throw new ProviderFailure(`OpenAI function arguments are not valid JSON: ${error instanceof Error ? error.message : String(error)}`, {
+        event: 'response.function_arguments',
+        code: 'malformed-arguments',
+        transient: true,
+      });
+    }
     if (!isRecord(input)) {
       throw new Error('OpenAI function arguments must be an object');
     }

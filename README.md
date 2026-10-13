@@ -154,6 +154,10 @@ An attempt whose connection or stream sends no bytes for `RICE_CODEX_STREAM_IDLE
 a transient `stream.idle` failure, under the same tool-call replay boundary. A silent stream
 no longer stalls a subagent until Claude Code stops it.
 
+Function-call arguments that the model streams as invalid JSON are a transient
+`response.function_arguments` failure: the attempt is discarded and the step sampled again, under
+the same tool-call replay boundary, instead of ending the subagent on a decode error.
+
 No attempt is replayed after it emits a whole tool call. Before that boundary, text, reasoning
 and signatures are buffered until completion or the first tool call, then released in order.
 This prevents a failed attempt's partial answer from contaminating the next one. Final errors
@@ -171,7 +175,7 @@ Codex CLI on the same account. The session helper accepts up to 64 concurrent st
 
 ## Update
 
-Version 0.5.4 is published from this repository's `main`, which the `rice-mods` marketplace
+Version 0.5.5 is published from this repository's `main`, which the `rice-mods` marketplace
 tracks without a tag pin. Update the marketplace and installed mod, then restart the session:
 
 ```bash
