@@ -17,6 +17,7 @@ import { CodexSocket, SocketPool } from './socket.ts'
 import { maxAttempts, OVERLOAD_MAX_ATTEMPTS, ProviderFailure, retryAfterMs, retryDelay, waitForRetry } from './core/provider-failure.ts'
 import { oneLine } from './styx/errors.ts'
 import { codexAccounts, codexStepLimit } from './account-steps.ts'
+import { postResponse } from './core/http-stream.ts'
 
 const HTTP_URL = 'https://chatgpt.com/backend-api/codex/responses'
 const WS_URL = 'wss://chatgpt.com/backend-api/codex/responses'
@@ -104,12 +105,12 @@ async function httpFailure(response: Response): Promise<UpstreamError> {
 async function openHttp(url: string, request: ResponsesRequest, authFile: string, sessionId: string, signal: AbortSignal, onAuth: (auth: CodexAuthHeaders) => void): Promise<AsyncIterable<Uint8Array>> {
   const response = await codexRequest(authFile, signal, auth => {
     onAuth(auth)
-    return fetch(url, {
-      method: 'POST',
-      headers: { ...auth, 'content-type': 'application/json', accept: 'text/event-stream', originator: ORIGINATOR, session_id: sessionId, 'OpenAI-Beta': SSE_BETA },
-      body: JSON.stringify(request),
-      signal,
-      redirect: 'error',
+    return postResponse(url, { ...auth, 'content-type': 'application/json', accept: 'text/event-stream', originator: ORIGINATOR, session_id: sessionId, 'OpenAI-Beta': SSE_BETA }, JSON.stringify(request), signal).catch(error => {
+      signal.throwIfAborted()
+      if (error && typeof error === 'object' && error.code === 'ECONNRESET') {
+        throw new ProviderFailure('the Codex HTTP connection reset before response headers', { event: 'http.connect', code: 'ECONNRESET', transient: true })
+      }
+      throw error
     })
   })
   if (!response.ok || !response.body) throw await httpFailure(response)

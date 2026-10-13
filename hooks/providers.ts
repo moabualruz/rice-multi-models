@@ -24,7 +24,7 @@ export function loadText(path: string, text: string): Loaded {
 }
 
 /** What a model name routes to among the declared providers, with the model's input budget. */
-export type Remote = { provider: ProviderConfig; model: ModelConfig; modelId: string; target: string; budget: number; fingerprint: string }
+export type Remote = { provider: ProviderConfig; model: ModelConfig; modelId: string; target: string; budget: number | null; fingerprint: string }
 
 export function remoteOf(loaded: Loaded, name: string): Remote | undefined {
   if (!loaded.config) return undefined

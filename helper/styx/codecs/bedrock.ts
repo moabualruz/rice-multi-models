@@ -96,6 +96,7 @@ function decoder() {
 
 export const bedrock: Codec = {
   encode(n, p, m) {
+    if (m.maxOutputTokens === undefined) throw new Error(`rice-multi-models: ${p.id}/${m.id} requires an explicit maxOutputTokens request policy because its output limit was not reported`)
     const tools = m.tools ? n.tools : []
     const { body, level } = params({ inferenceConfig: { maxTokens: m.maxOutputTokens } }, p, m, n.effort)
     // A tool turn whose signed thinking is lost goes without the thinking param: the API wants the blocks back.
@@ -106,8 +107,10 @@ export const bedrock: Codec = {
     const point = m.cache === undefined ? [] : [{ cachePoint: { type: 'default', ...(m.cache === '1h' ? { ttl: m.cache } : {}) } }]
     const messages = toMessages(n.messages)
     for (const turn of lastUsers(messages)) turn.content.push(...point)
+    const inference = obj(body['inferenceConfig'])
     const sent = {
       ...body,
+      inferenceConfig: { ...inference, maxTokens: Math.min(m.maxOutputTokens, typeof inference['maxTokens'] === 'number' ? inference['maxTokens'] : Infinity) },
       messages,
       ...(n.system.trim() === '' ? {} : { system: [{ text: n.system }, ...point] }),
       ...(tools.length > 0 ? { toolConfig: { tools: [...tools.map(t => ({ toolSpec: { name: t.name, ...(t.description === '' ? {} : { description: t.description }), inputSchema: { json: t.schema } } })), ...point] } } : {}),

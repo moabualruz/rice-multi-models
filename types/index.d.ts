@@ -10,6 +10,7 @@ declare module 'claude-code' {
   interface PluginState {
     'rice-multi-models': {
       prefs: ModelPrefs
+      nativeContext: { original: string | null; applied: string | null; relinquished: boolean }
     }
   }
 }

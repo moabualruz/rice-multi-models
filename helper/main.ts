@@ -1,40 +1,102 @@
-// The helper that answers routed steps, on Bun (TypeScript as is, Node built-ins, WebSocket with headers).
-// `serve`: the session helper (helper/serve.ts), started once per session. `once`: one StepWire on stdin,
-// its events on stdout, one JSON object per line, for when the session helper is not running; killing the
-// process cancels the request.
+// Node 22+ helper entry point. Source imports are inert; the bundled file dispatches only when run.
+import { realpathSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import type { StepWire } from '../hooks/protocol.ts'
 import { failedStep } from '../hooks/protocol.ts'
 import { runStep } from './run.ts'
 import { serve } from './serve.ts'
+import { client } from './client.ts'
+import { setupInfo, setupCodex } from './setup-info.ts'
+import { syncPicker } from './picker-settings.ts'
+import { opencodeEntries, opencodeKey } from './opencode-auth.ts'
+import { discoverCodex } from './codex-catalog.ts'
+import { discover } from './discover.ts'
 
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = []
-  for await (const chunk of process.stdin) chunks.push(chunk as Buffer)
-
+  for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk))
   return Buffer.concat(chunks).toString('utf8')
 }
 
-async function once(): Promise<void> {
+async function once(lifetime?: AbortSignal): Promise<void> {
   const controller = new AbortController()
-  for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.on(signal, () => controller.abort())
-  let wire: StepWire
+  const abort = () => controller.abort()
+  for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.on(signal, abort)
+  lifetime?.addEventListener('abort', abort, { once: true })
+  if (lifetime?.aborted) abort()
   try {
-    wire = JSON.parse(await readStdin()) as StepWire
-  } catch (error) {
-    for (const event of failedStep(`rice-multi-models: the step request did not parse: ${error instanceof Error ? error.message : String(error)}`)) process.stdout.write(`${JSON.stringify(event)}\n`)
-    process.exitCode = 2
-
-    return
+    let wire: StepWire
+    try {
+      wire = JSON.parse(await readStdin()) as StepWire
+    } catch (error) {
+      for (const event of failedStep(`rice-multi-models: the step request did not parse: ${error instanceof Error ? error.message : String(error)}`)) process.stdout.write(`${JSON.stringify(event)}\n`)
+      process.exitCode = 2
+      return
+    }
+    try {
+      for await (const event of runStep(wire, controller.signal)) {
+        if (lifetime?.aborted) break
+        process.stdout.write(`${JSON.stringify(event)}\n`)
+      }
+    } catch (error) {
+      if (!lifetime?.aborted) for (const event of failedStep(`rice-multi-models: ${error instanceof Error ? error.message : String(error)}`)) process.stdout.write(`${JSON.stringify(event)}\n`)
+      process.exitCode = 1
+    }
+  } finally {
+    lifetime?.removeEventListener('abort', abort)
+    for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.off(signal, abort)
   }
-  for await (const event of runStep(wire, controller.signal)) process.stdout.write(`${JSON.stringify(event)}\n`)
 }
 
-if (import.meta.main) {
+export async function main(lifetime?: AbortSignal): Promise<void> {
+  if (Number(process.versions.node.split('.')[0]) < 22) throw new Error('rice-multi-models requires Node 22 or newer')
   const mode = process.argv[2] ?? 'once'
-  if (mode === 'once') await once()
-  else if (mode === 'serve') serve()
-  else {
+  if (mode === 'once') await once(lifetime)
+  else if (mode === 'serve') serve(lifetime)
+  else if (mode === 'client') {
+    if (!process.argv[3]) throw new Error('client requires a socket path')
+    process.exitCode = await client(process.argv[3], await readStdin(), lifetime)
+  } else if (mode === 'discover') {
+    process.stdout.write(`${JSON.stringify(await discover(JSON.parse(await readStdin()), lifetime))}\n`)
+  } else if (mode === 'discover-codex') {
+    const controller = new AbortController()
+    const abort = () => controller.abort()
+    for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.on(signal, abort)
+    lifetime?.addEventListener('abort', abort, { once: true })
+    if (lifetime?.aborted) abort()
+    try { process.stdout.write(`${JSON.stringify(await discoverCodex({ signal: controller.signal }))}\n`) } finally {
+      lifetime?.removeEventListener('abort', abort)
+      for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.off(signal, abort)
+    }
+  } else if (mode === 'doctor') process.stdout.write(`${JSON.stringify(await setupInfo())}\n`)
+  else if (mode === 'setup-codex') {
+    const result = await setupCodex()
+    process.stdout.write(`${JSON.stringify(result)}\n`)
+    if (!result.ok) process.exitCode = 1
+  } else if (mode === 'sync-picker') {
+    const result = await syncPicker(JSON.parse(await readStdin()))
+    process.stdout.write(`${JSON.stringify(result)}\n`)
+    if (!result.ok) process.exitCode = 1
+  } else if (mode === 'opencode-entries') {
+    if (!process.argv[3]) throw new Error('opencode-entries requires an auth file')
+    process.stdout.write(`${JSON.stringify(await opencodeEntries(process.argv[3]))}\n`)
+  } else if (mode === 'opencode-key') {
+    if (!process.argv[3] || !process.argv[4]) throw new Error('opencode-key requires a tier and auth file')
+    // This is the sole intentional secret-output mode, used only by the credential runner.
+    process.stdout.write(await opencodeKey(process.argv[3], process.argv[4]))
+  } else {
     process.stderr.write(`rice-multi-models helper: unknown mode ${mode}\n`)
     process.exitCode = 2
   }
+}
+
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
+  // Abort routed work and await its cleanup instead of exiting ahead of detached worker termination.
+  const lifetime = new AbortController()
+  process.stdout.on('error', () => { process.exitCode = 1; lifetime.abort() })
+  await main(lifetime.signal).catch(() => {
+    process.stderr.write('rice-multi-models: helper command failed\n')
+    process.exitCode = 1
+  })
+  if (lifetime.signal.aborted) process.exitCode = 1
 }

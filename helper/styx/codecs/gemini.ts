@@ -115,8 +115,10 @@ export const gemini: Codec = {
   encode(n, p, m) {
     const tools = m.tools ? n.tools : []
     const { body, level } = params({}, p, m, n.effort)
+    const generation = isObject(body['generationConfig']) ? body['generationConfig'] : {}
     const sent = {
       ...body,
+      ...(m.maxOutputTokens === undefined ? {} : { generationConfig: { ...generation, maxOutputTokens: Math.min(m.maxOutputTokens, typeof generation['maxOutputTokens'] === 'number' ? generation['maxOutputTokens'] : Infinity) } }),
       contents: toContents(n, m),
       ...(n.system.trim() === '' ? {} : { systemInstruction: { parts: [{ text: n.system }] } }),
       ...(tools.length > 0

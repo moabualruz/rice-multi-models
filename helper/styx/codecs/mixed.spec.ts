@@ -40,8 +40,10 @@ test('a model names its own kind; the key goes in the header its kind takes unle
   const bearer = parseConfig(JSON.stringify({ providers: { zen: { ...GATEWAY, authHeader: 'bearer' } } })).config as Config
   const claude = bearer.providers['zen']?.models['claude']
   expect(claude === undefined ? undefined : authHeaderOf(bearer.providers['zen'] as never, claude)).toBe('bearer')
-  // anthropic sends max_tokens, so its budget leaves room for the output; the others do not
+  // Output caps reserve shared context; Chat Completions has no declared cap dialect.
   expect(inputBudget(target('claude').m)).toBe(136_000)
+  expect(inputBudget(target('gpt').m)).toBe(272_000)
+  expect(inputBudget(target('gemini-3.8-flash').m)).toBe(983_040)
   expect(inputBudget(target('chat').m)).toBe(200_000)
 })
 

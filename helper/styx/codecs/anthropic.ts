@@ -93,6 +93,7 @@ function decoder() {
 
 export const anthropic: Codec = {
   encode(n, p, m) {
+    if (m.maxOutputTokens === undefined) throw new Error(`rice-multi-models: ${p.id}/${m.id} requires an explicit maxOutputTokens request policy because its output limit was not reported`)
     const tools = m.tools ? n.tools : []
     const base: Json = { max_tokens: m.maxOutputTokens }
     if (!m.parallelToolCalls && tools.length > 0) base['tool_choice'] = { type: 'auto', disable_parallel_tool_use: true }

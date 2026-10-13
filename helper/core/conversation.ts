@@ -1,5 +1,6 @@
-// Copied unchanged from greenpolo/cc-multi-cli-plugin plugins/multi-core/src/gateway/conversation.ts at 3dcb057
+// Adapted from greenpolo/cc-multi-cli-plugin plugins/multi-core/src/gateway/conversation.ts at 3dcb057
 // (Apache-2.0, Copyright 2026 greenpolo; see LICENSES/cc-multi-cli-plugin.Apache-2.0.txt and its NOTICE).
+// Modified by mkh: preserve server-side search/fetch transcript blocks as historical text.
 import type { ContentBlock, RequestMessage } from './messages.ts';
 import { isRecord } from './record.ts';
 import { callId, toolName } from './tools.ts';
@@ -142,6 +143,53 @@ function toolOutput(block: ContentBlock): string | NormalizedContent[] {
   ];
 }
 
+function serverToolText(block: ContentBlock): string {
+  if (block.type === 'server_tool_use') {
+    if (!block.id || !block.name || !isRecord(block.input)) {
+      throw new Error('Invalid server_tool_use');
+    }
+  } else {
+    if (!block.tool_use_id) {
+      throw new Error('Missing server tool result ID');
+    }
+    const content = block.content;
+    const errorType = `${block.type}_error`;
+    if (isRecord(content) && content.type === errorType) {
+      if (typeof content.error_code !== 'string' || !content.error_code) {
+        throw new Error(`Invalid ${errorType}`);
+      }
+    } else if (block.type === 'web_search_tool_result' && Array.isArray(content)) {
+      for (const result of content) {
+        if (!isRecord(result) || result.type !== 'web_search_result') {
+          throw new Error('Unsupported server search result content');
+        }
+        if (!['title', 'url', 'encrypted_content'].every((key) => typeof result[key] === 'string')) {
+          throw new Error('Invalid web_search_result');
+        }
+      }
+    } else if (block.type === 'web_fetch_tool_result' && isRecord(content)) {
+      if (content.type !== 'web_fetch_result') {
+        throw new Error('Unsupported server fetch result content');
+      }
+      if (typeof content.url !== 'string') {
+        throw new Error('Invalid web_fetch_result');
+      }
+      const document = content.content;
+      if (!isRecord(document) || document.type !== 'document') {
+        throw new Error('Unsupported server fetch document content');
+      }
+      // Fetch returns a document object, not the array used by client tool_result.
+      // Validate its supported source without converting it into a new input file.
+      documentInput(document as unknown as ContentBlock);
+    } else {
+      throw new Error(`Invalid ${block.type} content`);
+    }
+  }
+  // These calls already ran on Anthropic's server. Keep their full payload and
+  // linking IDs as text, never as function calls requiring a client-side result.
+  return `Historical server tool transcript (${block.type}):\n${JSON.stringify(block)}`;
+}
+
 function assistantInput<R>(
   block: ContentBlock,
   decodeReasoning: AssistantReasoningDecoder<R>,
@@ -209,6 +257,20 @@ function normalizeMessage<R>(
               type: role === 'assistant' ? 'output_text' : 'input_text',
               text: textContent([block]),
             },
+          ],
+        },
+      ];
+    }
+    if (
+      (role === 'assistant' && block.type === 'server_tool_use') ||
+      (role !== 'system' &&
+        (block.type === 'web_search_tool_result' || block.type === 'web_fetch_tool_result'))
+    ) {
+      return [
+        {
+          role,
+          content: [
+            { type: role === 'assistant' ? 'output_text' : 'input_text', text: serverToolText(block) },
           ],
         },
       ];

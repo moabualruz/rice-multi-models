@@ -31,7 +31,7 @@ const cfg = (model: Record<string, unknown> = {}, provider: Record<string, unkno
           baseUrl: 'https://rice-models.invalid/v1',
           auth: { command: ['/usr/bin/security'] },
           ...provider,
-          models: { m: { contextWindow: 100_000, maxOutputTokens: 8000, ...model } },
+          models: { m: { contextWindow: 100_000, maxOutputTokens: 8000, maxTokensParam: 'max_tokens', ...model } },
         },
       },
     }),
@@ -162,10 +162,26 @@ test('body precedence: base, provider params, model params, effort level, then s
   expect(body({ provider: { streamUsage: false } })['stream_options']).toBeUndefined()
 })
 
-test('maxTokensParam sends exactly the declared key, or none', () => {
-  expect(body({ model: { maxTokensParam: 'max_completion_tokens' } })).toMatchObject({ max_completion_tokens: 8000 })
-  const none = body({})
-  expect(['max_tokens', 'max_completion_tokens'].filter(k => k in none)).toEqual([])
+test('maxTokensParam sends exactly the declared key, or none when the output ceiling is unknown', () => {
+  for (const maxTokensParam of ['max_tokens', 'max_completion_tokens'] as const) {
+    const capped = body({ model: { maxTokensParam } })
+    expect(capped[maxTokensParam]).toBe(8000)
+    expect(['max_tokens', 'max_completion_tokens'].filter(key => key in capped)).toEqual([maxTokensParam])
+    const raised = body({ model: { maxTokensParam }, provider: { params: { [maxTokensParam]: 16_000 } } })
+    expect(raised[maxTokensParam]).toBe(8000)
+    const lowered = body({ model: { maxTokensParam }, provider: { params: { [maxTokensParam]: 100 } } })
+    expect(lowered[maxTokensParam]).toBe(100)
+  }
+  for (const maxTokensParam of [undefined, 'max_tokens', 'max_completion_tokens']) {
+    const none = body({ model: { maxOutputTokens: undefined, maxTokensParam } })
+    expect(['max_tokens', 'max_completion_tokens'].filter(key => key in none)).toEqual([])
+  }
+})
+
+test('a known OpenAI output ceiling without an explicit dialect refuses instead of guessing a cap key', () => {
+  for (const params of [undefined, { max_tokens: 100 }, { max_completion_tokens: 100 }]) {
+    expect(() => body({ model: { maxTokensParam: undefined }, provider: { params } })).toThrow('requires an explicit maxTokensParam request policy (max_tokens or max_completion_tokens)')
+  }
 })
 
 test('effort applies the declared level, else the nearest below, else above; nothing when undeclared or numeric', () => {

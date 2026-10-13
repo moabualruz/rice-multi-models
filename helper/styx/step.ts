@@ -151,7 +151,12 @@ export function createStepper(env: Env) {
     let key = await keys.get(p, approved)
     if ('error' in key) return yield* refuse(key.error)
     const conversationKey = createHash('sha256').update(`${req.session}:${req.who}`).digest('hex')
-    const enc = codec.encode({ system: req.system, messages: normalize(req.transcript, m.vision, ids.of(p.id), thinking.sealed(owner)), tools: req.tools, ...(req.effort === undefined ? {} : { effort: req.effort }), cacheKey: conversationKey }, p, m)
+    let enc: ReturnType<Codec['encode']>
+    try {
+      enc = codec.encode({ system: req.system, messages: normalize(req.transcript, m.vision, ids.of(p.id), thinking.sealed(owner)), tools: req.tools, ...(req.effort === undefined ? {} : { effort: req.effort }), cacheKey: conversationKey }, p, m)
+    } catch (error) {
+      return yield* refuse(error instanceof Error ? error.message : 'rice-multi-models: request policy could not be encoded')
+    }
     // The applied level, after the one asked for when the model declares another nearest it.
     effort = typeof req.effort === 'string' && enc.effort !== req.effort && enc.effort !== 'none' ? `${req.effort}→${enc.effort}` : enc.effort
     reqBytes = new TextEncoder().encode(enc.body).length

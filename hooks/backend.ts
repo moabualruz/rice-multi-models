@@ -1,5 +1,5 @@
-// The helper that calls providers, seen from the mod. The session helper (helper/main.ts `serve`, started
-// at session start) keeps one provider connection per conversation; each step reaches it through curl on
+// The helper that calls providers, seen from the mod. The shipped Node helper (`serve`, started
+// at session start) keeps one provider connection per conversation; each step reaches it through its client on
 // its private Unix socket, the token in the request body. When it is not running a step starts a one-shot
 // helper (`once`) instead. Either way the step goes in on standard input and its events come back one JSON
 // line at a time; leaving the loop, or the dispatch being abandoned, kills the process and so cancels the
@@ -13,7 +13,7 @@ type Child = HookStream<ProcessSpawnChunk, ProcessSpawnResult>
 /** How the mod starts processes; register.ts builds it over `$.process.spawn`. */
 export type HelperPort = {
   once: (input: string) => Child
-  curl: (input: string, socketPath: string) => Child
+  client: (input: string, socketPath: string) => Child
 }
 
 /** The running session helper: where it listens and the token every call carries. */
@@ -35,13 +35,18 @@ export function preferSession(prefer: boolean): void {
   useSession = prefer
 }
 
-const READY = /^ready (\S+) ([0-9a-f]{64})$/m
-
-/** The session helper's announcement on its standard output, once complete. */
+/** The session helper's structured announcement, only after its entire line arrives. */
 export function readyLine(text: string): SessionHelper | undefined {
-  const match = READY.exec(text)
-
-  return match ? { socketPath: match[1] as string, token: match[2] as string } : undefined
+  for (const line of text.split('\n').slice(0, -1)) {
+    if (!line.startsWith('ready ')) continue
+    try {
+      const value: unknown = JSON.parse(line.slice(6))
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue
+      const ready = value as Record<string, unknown>
+      if (typeof ready.socketPath === 'string' && ready.socketPath !== '' && !/[\r\n\0]/.test(ready.socketPath) && typeof ready.token === 'string' && /^[0-9a-f]{64}$/.test(ready.token)) return { socketPath: ready.socketPath, token: ready.token }
+    } catch { /* A partial or malformed announcement is not readiness. */ }
+  }
+  return undefined
 }
 
 const lastLine = (text: string) => text.trim().split('\n').at(-1)?.slice(0, 300) ?? ''
@@ -76,8 +81,8 @@ async function* eventsOf(child: Child, ended: { code: number | null; stderr: str
   ended.code = next.value.code
 }
 
-/** curl's exits that mean the session helper was not reached or dropped the call before answering. */
-const UNREACHED = new Set([7, 52, 56])
+/** Client exit 3 means unavailable before sending a request. Other failures must never be replayed. */
+const UNREACHED = new Set([3])
 
 /**
  * A step's events. Through the session helper when it runs; a call it never answered goes to a one-shot
@@ -89,13 +94,13 @@ export async function* helperStep(port: HelperPort, wire: StepWire): AsyncGenera
   const helper = useSession ? session : undefined
   if (helper) {
     const ended = { code: null as number | null, stderr: '', events: 0 }
-    for await (const event of eventsOf(port.curl(JSON.stringify({ ...wire, token: helper.token }), helper.socketPath), ended)) {
+    for await (const event of eventsOf(port.client(JSON.stringify({ ...wire, token: helper.token }), helper.socketPath), ended)) {
       if (event.type === 'stop' || event.type === 'error') finished = true
       yield event
     }
     if (finished) return
     if (ended.events > 0 || !UNREACHED.has(ended.code ?? -1)) {
-      yield { type: 'error', kind: 'request', text: `rice-multi-models: the session helper ended the step without an answer (curl exit ${ended.code})` }
+      yield { type: 'error', kind: 'request', text: `rice-multi-models: the session helper ended the step without an answer (client exit ${ended.code})` }
 
       return
     }

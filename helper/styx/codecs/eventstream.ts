@@ -1,13 +1,21 @@
 // Copied from Trosfy/claude-styx styxd/codecs/eventstream.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: import paths for this layout.
+// Modified by mkh: import paths for this layout; portable IEEE CRC-32.
 // The AWS event-stream framing Bedrock streams its answer in. A frame is a prelude (total length, headers
 // length, CRC32 of those 8 bytes), the headers, the payload, and a CRC32 of everything before it, all
 // integers big-endian. Pure.
 
-// The runtime's CRC-32. The mod's type environment reaches this file through the kit tests and has no Bun global.
-declare const Bun: { hash: { crc32(data: Uint8Array): number } }
-export const crc32 = (b: Uint8Array) => Bun.hash.crc32(b)
+const CRC_TABLE = Uint32Array.from({ length: 256 }, (_, byte) => {
+  let value = byte
+  for (let bit = 0; bit < 8; bit++) value = (value >>> 1) ^ ((value & 1) ? 0xedb88320 : 0)
+  return value >>> 0
+})
+
+export function crc32(bytes: Uint8Array): number {
+  let value = 0xffffffff
+  for (const byte of bytes) value = (value >>> 8) ^ (CRC_TABLE[(value ^ byte) & 0xff] as number)
+  return (value ^ 0xffffffff) >>> 0
+}
 
 export type Frame = { headers: Record<string, string>; payload: string }
 

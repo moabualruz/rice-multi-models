@@ -13,4 +13,9 @@ Files adapted from cc-multi-cli-plugin remain under the Apache License 2.0 and c
 notice that they were changed, as section 4(b) of that license requires. Its NOTICE file is
 reproduced unchanged.
 
+The compiled `dist/helper.mjs` also bundles [ws](https://github.com/websockets/ws) version
+`8.22.0`, under the MIT License reproduced in `LICENSES/ws.MIT.txt`. Native optional addons are
+disabled in the bundle; no runtime npm packages are needed. `dist/helper.meta.json` records the
+pinned WebSocket version and the bundle's SHA-256 checksum.
+
 Everything else in this plugin is under the MIT License in `LICENSE`.

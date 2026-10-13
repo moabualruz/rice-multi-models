@@ -4,24 +4,21 @@
 // thinking for the helper's life.
 import type { ApiMessage, RemoteTool, StepEvent, StepRequest, StepWire } from '../hooks/protocol.ts'
 import { failedStep, splitTarget } from '../hooks/protocol.ts'
+import { parseConfig } from '../hooks/config.ts'
+import { resolve } from '../hooks/names.ts'
 import { codexStep } from './codex.ts'
 import { harnessStep } from './harness.ts'
 import type { SocketPool } from './socket.ts'
 import type { Runner } from './styx/auth'
 import { createStepper } from './styx/step'
 import { post } from './styx/upstream'
+import { runCommand } from './core/subprocess.ts'
 
 export type RunOptions = { pool?: SocketPool }
 
 // A credential helper run with no shell, its stdin closed and its stderr dropped, killed after `timeoutMs`.
 // From Trosfy/claude-styx styxd/main.ts at 5072384 (MIT; see LICENSES/claude-styx.MIT.txt).
-const runHelper: Runner = async (argv, timeoutMs) => {
-  const child = Bun.spawn([...argv], { stdin: 'ignore', stdout: 'pipe', stderr: 'ignore', timeout: timeoutMs })
-  const [stdout, exitCode] = await Promise.all([new Response(child.stdout).text(), child.exited])
-  if (child.signalCode === 'SIGTERM') throw new Error(`timed out after ${timeoutMs} ms`)
-
-  return { exitCode, stdout }
-}
+const runHelper: Runner = runCommand
 
 let stepper: ReturnType<typeof createStepper> | undefined
 const styx = () => (stepper ??= createStepper({ post, run: runHelper, now: () => Date.now(), log: line => process.stderr.write(`${line}\n`) }))
@@ -50,6 +47,13 @@ export function offeredTools(req: StepRequest): RemoteTool[] {
 
 export async function* runStep(wire: StepWire, signal: AbortSignal, options: RunOptions = {}): AsyncGenerator<StepEvent> {
   const target = splitTarget(wire.req.target)
+  const parsed = wire.configText.trim() === '' ? undefined : parseConfig(wire.configText)
+  const configured = parsed?.config ? resolve(parsed.config, wire.req.target) : undefined
+  if (configured?.kind === 'remote') {
+    yield* styx().step({ ...wire, req: { ...wire.req, tools: offeredTools(wire.req) } }, signal)
+
+    return
+  }
   if (target?.provider === 'codex') {
     yield* codexStep(wire.req, target.model, signal, { pool: options.pool })
 

@@ -155,11 +155,40 @@ test('an abruptly reset HTTP body retries without treating malformed JSON as tra
   try {
     const events: StepEvent[] = []
     for await (const event of codexStep({ ...req, transport: 'sse' }, 'test', new AbortController().signal, { authFile, httpUrl: `http://127.0.0.1:${server.port}` })) events.push(event)
-    expect(calls).toBe(2)
+    expect(calls, JSON.stringify({ calls, events })).toBe(2)
     expect(events.some(event => event.type === 'stop')).toBe(true)
     const malformed = await fake([{ rawSse: 'data: {invalid\n\n' }])
     expect(malformed.calls).toBe(1)
     expect(malformed.events.some(event => event.type === 'error')).toBe(true)
+  } finally {
+    server.stop(true)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('an HTTP connection reset before response headers retries', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mm-opening-reset-'))
+  const authFile = join(dir, 'auth.json')
+  writeFileSync(authFile, JSON.stringify({ auth_mode: 'chatgpt', tokens: { access_token: 'test-only', account_id: 'opening-reset-test' } }))
+  let calls = 0
+  const server = Bun.listen<{ responded: boolean }>({
+    hostname: '127.0.0.1', port: 0, data: { responded: false },
+    socket: {
+      open(socket) { socket.data = { responded: false } },
+      data(socket) {
+        if (socket.data.responded) return
+        socket.data.responded = true
+        if (++calls === 1) { socket.end(); return }
+        const body = success.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')
+        socket.end(`HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`)
+      },
+    },
+  })
+  try {
+    const events: StepEvent[] = []
+    for await (const event of codexStep({ ...req, transport: 'sse' }, 'test', new AbortController().signal, { authFile, httpUrl: `http://127.0.0.1:${server.port}` })) events.push(event)
+    expect(calls, JSON.stringify({ calls, events })).toBe(2)
+    expect(events.find(event => event.type === 'stop')).toEqual({ type: 'stop', reason: 'end_turn' })
   } finally {
     server.stop(true)
     rmSync(dir, { recursive: true, force: true })

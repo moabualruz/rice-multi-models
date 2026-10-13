@@ -1,6 +1,6 @@
 // rice-multi-models: non-Anthropic models as session and subagent models. A model id `codex/<slug>` set with
 // /model, --model or an agent's `model:` is answered here: the request is built from the engine's own
-// transcript, system prompt and tools, a helper process (helper/main.ts, one per request, stdio only) calls
+// transcript, system prompt and tools, the shipped Node helper (dist/helper.mjs) calls
 // the provider, and its stream comes back as the engine's own chunks. Claude models pass through untouched.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, ModelCompleteResult, ModelUsage, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
@@ -11,33 +11,39 @@ import { collectText, helperStep, preferSession, readyLine, sessionHelper, setSe
 import type { HelperPort } from './backend'
 import { carryFor, remember, withCarry } from './carry'
 import type { Reasoning } from './carry'
-import { COMPACT_SYSTEM, compactRequest, summaryMessage, withUserText } from './compact'
+import { withUserText } from './compact'
 import { createMemory } from './memory'
 import { CATALOG_URL, kindCounts, liveIds, opencodeProvider, TIERS } from './opencode'
 import type { Tier } from './opencode'
-import { agyModelIds, codexRows, mergeRows, providerRows, workerRows } from './picker'
+import { catalogueRows } from './picker'
+import type { ModelCatalogue } from './catalogue'
+import { runtimeConfig } from './catalogue-runtime'
 import type { PickerRow } from './picker'
+import { AGENT_TYPE_TOOL, agentTypeInput, candidates, DISCOVERY_SCHEMAS, DISCOVERY_TOOL, discoveryInput, limitsReport, modelsReport, nativeAgentSpec, reserveAgentType, withDiscoverySection, workerAgentSpec } from './discovery'
+import type { CandidateRoute } from './discovery'
 import { approvalQuestion, CONFIG_FILE, emptyLoaded, estimateTokens, loadText, providerLines, remoteOf, TRUST_PREFIX } from './providers'
 import type { Loaded, Remote } from './providers'
 import { definitionOf, rewriteMain, systemFor, withIdentity } from './prompts'
 import type { PromptsPort } from './prompts'
 import { splitTarget } from './protocol'
 import type { ApiMessage, Effort, Limits, RemoteTool, StepRequest, StepWire, Transport } from './protocol'
+import { fingerprint } from './config'
 import { STAMP } from './schemas.gen'
 import { createAssembler } from './step'
 import { remoteTools } from './tools'
 import type { Described } from './tools'
 import { handbackState, withTask } from './transcript'
+import { commandText, detectRuntime as probeRuntime, helperFile, setupSummary, startupNotice as publishNotice, syncPicker as synchronizePicker } from './setup'
+import type { PickerResult, Runtime } from './setup'
 
 const PLUGIN = 'rice-multi-models'
 /** Who the requests to declared providers say they come from (OpenCode Go asks each client to name itself). */
 const USER_AGENT = 'rice-multi-models/0.5.0 (claude-code)'
-const CURL = '/usr/bin/curl'
 const PROVIDERS: Readonly<Record<string, string>> = { codex: 'OpenAI Codex (ChatGPT subscription)', agy: 'Antigravity (agy CLI)', grok: 'Grok (grok CLI)' }
 /** Agent CLIs that run their own loop and tools: their label, default model, and what a user asks for to use them. */
-const WORKERS: Readonly<Record<string, { label: string; model: string; ask: string }>> = {
-  agy: { label: 'Antigravity (Gemini)', model: 'gemini-3.8-flash-high', ask: 'Antigravity or Gemini' },
-  grok: { label: 'Grok Build', model: 'grok-build', ask: 'Grok' },
+const WORKERS: Readonly<Record<string, { label: string; ask: string }>> = {
+  agy: { label: 'Antigravity (Gemini)', ask: 'Antigravity or Gemini' },
+  grok: { label: 'Grok Build', ask: 'Grok' },
 }
 const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 const prefsAtom = atom({ plugin: 'rice-multi-models', key: 'prefs' } as const, { effort: null, transport: 'auto', helper: 'session', workers: 'read' })
@@ -48,7 +54,9 @@ const described = new Map<string, Described>()
 const agentModels = new Map<string, string>()
 /** The agent types this mod registers, by their full name, with what they run on. */
 const registered = new Map<string, AgentDef>()
-let bun: string | undefined
+let runtime: Runtime = {}
+let helperSupervision: Promise<void> | undefined
+let helperReadiness: Promise<void> | undefined
 let codexDefaults: { model?: string; effort?: Effort } = {}
 let limits: Limits | undefined
 let lastStep: { model: string; who: string; ms: number; transport: string } | undefined
@@ -56,7 +64,122 @@ let lastStep: { model: string; who: string; ms: number; transport: string } | un
 const resumes = new Map<string, string>()
 /** Whether each registered worker agent type may edit files. */
 const workerWrites = new Map<string, boolean>()
-let loaded: Loaded = emptyLoaded(CONFIG_FILE)
+const dynamicAgentTypes = new Map<string, string>()
+const dynamicAgentBindings = new Map<string, { type: string; model: string; execution: CandidateRoute['execution']; identity: string }>()
+let nextDynamicAgent = 1
+let limitsObservedAt: number | undefined
+let declared: Loaded = emptyLoaded(CONFIG_FILE)
+let loaded: Loaded = declared
+let catalogue: ModelCatalogue = { models: [], providers: [] }
+let nativeContextSync = Promise.resolve()
+
+function activeContext(model: string) {
+  const route = splitTarget(model)
+  const target = remoteOf(loaded, model)?.target ?? (route ? `${route.provider}/${route.model}` : model)
+  const provider = target.slice(0, target.indexOf('/'))
+  if (!isRouted(model) || !catalogue.providers.some(entry => entry.provider === provider && entry.status === 'fresh')) return undefined
+  return catalogue.models.find(entry => entry.model === target && entry.execution === 'native provider')?.metadata
+}
+
+async function syncNativeContext($: EngineInterface, restore = false): Promise<void> {
+  const sync = nativeContextSync.then(async () => {
+    const current = await $.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS') ?? null
+    const ref = { plugin: 'rice-multi-models', key: 'nativeContext' } as const
+    let held = (await $.state.get(ref)).value
+    if (!held) {
+      held = { original: current, applied: null, relinquished: false }
+      await $.state.set(ref, held)
+    }
+    if (held.relinquished || held.original !== null) return
+    if (current !== (held.applied ?? held.original)) {
+      await $.state.set(ref, { ...held, applied: null, relinquished: true })
+      return
+    }
+    const metadata = !restore && runtime.executable && !runtime.error && await $.env.get('DISABLE_COMPACT') === undefined
+      ? activeContext(await $.session.model()) : undefined
+    const window = metadata?.contextWindow ?? metadata?.maxContextWindow
+    const desired = window !== undefined && window !== null && Number.isSafeInteger(window) && window > 0 ? String(window) : held.original
+    if ((await $.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS') ?? null) !== current) {
+      await $.state.set(ref, { ...held, applied: null, relinquished: true })
+      return
+    }
+    if (desired !== current) await $.env.set('CLAUDE_CODE_MAX_CONTEXT_TOKENS', desired ?? undefined)
+    try {
+      await $.state.set(ref, { ...held, applied: desired })
+    } catch (error) {
+      if (desired !== current && (await $.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS') ?? null) === desired) {
+        await $.env.set('CLAUDE_CODE_MAX_CONTEXT_TOKENS', current ?? undefined)
+      }
+      throw error
+    }
+  })
+  nativeContextSync = sync.catch(() => { $.ui.log(`${PLUGIN}: native primary context synchronization unavailable`, { to: 'debug' }) })
+  await nativeContextSync
+}
+
+function requestBudget(model: string): number | null {
+  const remote = remoteOf(loaded, model)
+  if (remote) return remote.budget
+  const metadata = catalogue.models.find(entry => entry.model === model)?.metadata
+  if (!metadata) return null
+  const bounds = [metadata.inputTokenLimit, metadata.contextWindow].filter((value): value is number => value !== null)
+  return bounds.length ? Math.min(...bounds) : null
+}
+
+function budgetError(req: StepRequest): string | undefined {
+  const budget = requestBudget(req.target)
+  const size = estimateTokens(req)
+  return budget !== null && size > 0.95 * budget
+    ? `estimated request size ${Math.round(size / 1000)}k exceeds the local 95% safety threshold of ${req.target}'s ${budget} token input bound; reduce context or start a new session, native routed compaction is unavailable (token estimates are approximate)`
+    : undefined
+}
+
+function defaultModel(provider: string): string | undefined {
+  const models = catalogue.models.filter(model => model.model.startsWith(`${provider}/`))
+  const preferred = provider === 'codex' && codexDefaults.model ? `codex/${codexDefaults.model}` : undefined
+  return models.find(model => model.model === preferred)?.model ?? models[0]?.model
+}
+
+async function refreshCatalogue($: EngineInterface): Promise<void> {
+  const source = 'session startup discovery'
+  if (!runtime.executable || runtime.error) {
+    catalogue = { models: [], providers: [{ provider: 'runtime', status: 'unavailable', source, error: 'helper-unavailable' }] }
+  } else {
+    try {
+      const result = await $.process.run([runtime.executable, helperFile($.plugin.root), 'discover'], { stdin: JSON.stringify({ configText: declared.text, approved: [...await approvedSet($)] }), timeoutMs: 15_000 })
+      if (result.exitCode !== 0) throw new Error('helper-failed')
+      const snapshot = JSON.parse(result.stdout) as ModelCatalogue
+      if (!Array.isArray(snapshot.models) || !Array.isArray(snapshot.providers)) throw new Error('protocol-invalid')
+      catalogue = snapshot
+    } catch {
+      catalogue = { models: [], providers: [{ provider: 'runtime', status: 'unavailable', source, error: 'discovery-helper-failed' }] }
+    }
+  }
+  loaded = runtimeConfig(declared, catalogue)
+  await syncNativeContext($)
+}
+
+/** Engine calls stay in this module; imported setup logic receives plain values and callable ports. */
+async function detectRuntime($: EngineInterface): Promise<Runtime> {
+  return probeRuntime({
+    helper: helperFile($.plugin.root),
+    override: await $.env.get('RICE_MULTI_MODELS_NODE'),
+    run: (argv, options) => $.process.run(argv, options),
+    exists: path => $.fs.exists(path),
+  })
+}
+
+async function syncPicker($: EngineInterface, current: Runtime, rows: PickerRow[]): Promise<PickerResult> {
+  return synchronizePicker({ helper: helperFile($.plugin.root), run: (argv, options) => $.process.run(argv, options) }, current, rows)
+}
+
+async function startupNotice($: EngineInterface, interactive: boolean, current: Runtime, picker: PickerResult | undefined, rows: PickerRow[], defaultModel: string | undefined): Promise<void> {
+  return publishNotice({
+    get: key => $.store.get(key),
+    set: (key, value) => $.store.set(key, value),
+    log: text => $.ui.log(text, { to: 'transcript' }),
+  }, interactive, current, picker, rows, defaultModel, catalogue.providers.map(provider => `${provider.provider}: ${provider.status}${provider.error ? ` (${provider.error})` : ''}`).join('; '))
+}
 
 /** Whether a model name is answered here: a Codex id, or a declared provider's model or alias. */
 export function isRouted(model: string | undefined): model is string {
@@ -76,9 +199,10 @@ function targetOf(model: string): { provider: string; model: string; label: stri
 }
 
 async function loadProviders($: EngineInterface): Promise<void> {
-  const dir = (await $.env.get('CLAUDE_CONFIG_DIR')) || `${(await $.env.get('HOME')) ?? ''}/.claude`
+  const dir = (await $.env.get('CLAUDE_CONFIG_DIR')) || `${(await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || ''}/.claude`
   const path = `${dir}/${CONFIG_FILE}`
-  loaded = (await $.fs.exists(path)) ? loadText(path, await $.fs.read(path)) : emptyLoaded(path)
+  declared = (await $.fs.exists(path)) ? loadText(path, await $.fs.read(path)) : emptyLoaded(path)
+  loaded = runtimeConfig(declared, catalogue)
 }
 
 async function approvedSet($: EngineInterface): Promise<Set<string>> {
@@ -117,7 +241,7 @@ function promptsPort($: EngineInterface): PromptsPort {
   return {
     compose: async (model, tools) => (await $.prompt.compose({ model, tools })).sections,
     cwd: () => $.session.cwd(),
-    configDir: async () => (await $.env.get('CLAUDE_CONFIG_DIR')) || `${(await $.env.get('HOME')) ?? ''}/.claude`,
+    configDir: async () => (await $.env.get('CLAUDE_CONFIG_DIR')) || `${(await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || ''}/.claude`,
     exists: path => $.fs.exists(path),
     read: path => $.fs.read(path),
     listDir: async dir => ((await $.fs.exists(dir)) ? (await $.fs.list(dir)).map(entry => ({ name: entry.name, kind: entry.kind })) : []),
@@ -135,8 +259,14 @@ function promptsPort($: EngineInterface): PromptsPort {
 
 function helperPort($: EngineInterface): HelperPort {
   return {
-    once: input => $.process.spawn({ argv: [bun ?? 'bun', `${$.plugin.root}/helper/main.ts`, 'once'], input }),
-    curl: (input, socketPath) => $.process.spawn({ argv: [CURL, '-q', '-sS', '-N', '--unix-socket', socketPath, '--data-binary', '@-', 'http://rice/step'], input }),
+    once: input => {
+      if (!runtime.executable || runtime.error) throw new Error(runtime.error || 'Node.js 22+ helper unavailable; /rice-models setup repair')
+      return $.process.spawn({ argv: [runtime.executable, helperFile($.plugin.root), 'once'], input })
+    },
+    client: (input, socketPath) => {
+      if (!runtime.executable || runtime.error) throw new Error(runtime.error || 'Node.js 22+ helper unavailable; /rice-models setup repair')
+      return $.process.spawn({ argv: [runtime.executable, helperFile($.plugin.root), 'client', socketPath], input })
+    },
   }
 }
 
@@ -145,41 +275,46 @@ function helperPort($: EngineInterface): HelperPort {
  * started again when it exits, and given up (one process per step from then on) after three exits within a
  * minute. The loop ends with the module, which ends the helper.
  */
-async function superviseHelper($: EngineInterface): Promise<void> {
+async function superviseHelper($: EngineInterface, announce: () => void): Promise<void> {
   let exits: number[] = []
-  while (bun) {
+  while (runtime.executable && !runtime.error) {
     let buffer = ''
     try {
-      for await (const piece of $.process.spawn({ argv: [bun, `${$.plugin.root}/helper/main.ts`, 'serve'] })) {
+      for await (const piece of $.process.spawn({ argv: [runtime.executable, helperFile($.plugin.root), 'serve'] })) {
         if (piece.stream !== 'stdout' || sessionHelper()) continue
-        buffer += piece.text
+        buffer = (buffer + piece.text).slice(-16_000)
         const ready = readyLine(buffer)
-        if (ready) setSessionHelper(ready)
+        if (ready) { setSessionHelper(ready); announce() }
       }
-    } catch (error) {
-      $.ui.log(`${PLUGIN}: the session helper did not start: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
+    } catch {
+      $.ui.log(`${PLUGIN}: the session helper did not start; using the shipped one-shot helper`, { to: 'debug' })
     }
     setSessionHelper(undefined)
+    announce()
     const now = await $.clock.now()
     exits = [...exits.filter(at => now - at < 60_000), now]
     if (exits.length >= 3) {
       $.ui.log(`${PLUGIN}: the session helper keeps exiting; each step starts its own helper now`, { to: 'debug' })
-
       return
     }
     await $.clock.sleep(1_000)
   }
 }
 
-async function findBun($: EngineInterface): Promise<string | undefined> {
-  const found = await $.process.run(['/bin/sh', '-c', 'command -v bun || { [ -x "$HOME/.bun/bin/bun" ] && echo "$HOME/.bun/bin/bun"; }'], { timeoutMs: 10_000 })
-
-  return found.exitCode === 0 && found.stdout.trim() !== '' ? found.stdout.trim().split('\n')[0] : undefined
+/** One supervisor per loaded module; startup waits a bounded time, never for the helper's lifetime. */
+async function ensureHelper($: EngineInterface): Promise<void> {
+  if (!runtime.executable || runtime.error || (await read($, prefsAtom)).helper === 'once') return
+  if (!helperSupervision) {
+    let announce: () => void = () => {}
+    helperReadiness = new Promise(resolve => { announce = resolve })
+    helperSupervision = superviseHelper($, announce).catch(() => { announce() }).finally(() => { helperSupervision = undefined })
+  }
+  await Promise.race([helperReadiness, $.clock.sleep(1500)])
 }
 
 /** The Codex CLI's own defaults: its model and reasoning effort, from config.toml. */
 async function readCodexDefaults($: EngineInterface): Promise<{ model?: string; effort?: Effort }> {
-  const home = (await $.env.get('CODEX_HOME')) || `${(await $.env.get('HOME')) ?? ''}/.codex`
+  const home = (await $.env.get('CODEX_HOME')) || `${(await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || ''}/.codex`
   try {
     const text = await $.fs.read(`${home}/config.toml`)
     const top = text.split(/^\[/m)[0] ?? ''
@@ -193,7 +328,7 @@ async function readCodexDefaults($: EngineInterface): Promise<{ model?: string; 
 }
 
 async function registerAgents($: EngineInterface): Promise<void> {
-  const model = `codex/${codexDefaults.model ?? 'gpt-6.1-sol'}`
+  const model = defaultModel('codex')
   const agents: { name: string; description: string; def: AgentDef }[] = [
     {
       name: 'codex',
@@ -206,13 +341,13 @@ async function registerAgents($: EngineInterface): Promise<void> {
       def: { prompt: EXPLORE_PROMPT, tools: ['Read', 'Glob', 'Grep', 'Bash', 'WebFetch', 'WebSearch'] },
     },
   ]
-  for (const agent of agents) {
+  if (model) for (const agent of agents) {
     await $.agent.register({ name: agent.name, description: agent.description, prompt: agent.def.prompt, model, ...(agent.def.tools ? { tools: agent.def.tools } : {}) })
     registered.set(`${PLUGIN}:${agent.name}`, agent.def)
   }
   for (const [worker, info] of Object.entries(WORKERS)) {
-    if (!(await hasCli($, worker))) continue
-    const workerModel = `${worker}/${info.model}`
+    const workerModel = defaultModel(worker)
+    if (!workerModel || !catalogue.models.some(entry => entry.model === workerModel && entry.execution === 'CLI worker')) continue
     for (const write of [false, true]) {
       const name = write ? `${worker}-write` : worker
       const can = write ? 'reads, runs its own tools and may edit files (accept-edits)' : 'reads and plans only (plan mode)'
@@ -222,12 +357,6 @@ async function registerAgents($: EngineInterface): Promise<void> {
       workerWrites.set(`${PLUGIN}:${name}`, write)
     }
   }
-}
-
-async function hasCli($: EngineInterface, name: string): Promise<boolean> {
-  const found = await $.process.run(['/bin/sh', '-c', 'command -v "$0" >/dev/null || [ -x "$HOME/.local/bin/$0" ]', name], { timeoutMs: 10_000 }).catch(() => undefined)
-
-  return found?.exitCode === 0
 }
 
 /**
@@ -303,11 +432,11 @@ async function buildRequest($: EngineInterface, e: TurnStepInput, transcript: re
     allow = tool => allowed(tool) && only.includes(tool)
   }
   messages = withCarry(withIdentity(messages, target.model, provider), carryFor(who))
-  const tools: RemoteTool[] = remoteTools(infos, described, allow)
+  const tools: RemoteTool[] = remoteTools(infos, described, allow, DISCOVERY_SCHEMAS)
   if (handback) tools.push({ name: HANDBACK_TOOL.name, description: HANDBACK_TOOL.description, schema: { ...HANDBACK_TOOL.schema } })
   const prefs = await read($, prefsAtom)
   const isCodex = target.provider === 'codex' && !target.remote
-  const effort: Effort | number | undefined = e.effort ?? prefs.effort ?? (isCodex ? (codexDefaults.effort ?? 'medium') : undefined)
+  const effort: Effort | number | undefined = e.effort ?? prefs.effort ?? (isCodex ? codexDefaults.effort : undefined)
 
   return {
     req: { target: e.model, system, tools, transcript: messages, ...(effort === undefined ? {} : { effort }), who, session: await $.session.id(), transport: prefs.transport },
@@ -319,7 +448,6 @@ async function buildRequest($: EngineInterface, e: TurnStepInput, transcript: re
  *  the engine never sends the routed model id to Anthropic. */
 async function* routedStep($: EngineInterface, e: TurnStepInput): AsyncGenerator<TurnStepChunk, TurnStepResult> {
   const who = e.agentId ?? 'main'
-  if (e.agentId !== undefined) agentModels.set(e.agentId, e.model)
   $.ui.log(`${PLUGIN}: step ${who} ${e.model} index=${e.index} effort=${e.effort ?? 'unset'}`, { to: 'debug' })
   const assembler = createAssembler(e.model)
   let handback: string | undefined
@@ -335,9 +463,12 @@ async function* routedStep($: EngineInterface, e: TurnStepInput): AsyncGenerator
     if (remote) {
       const refused = await approval($, remote)
       if (refused) throw new Error(refused)
-      const size = estimateTokens(built.req)
-      if (size > 0.95 * remote.budget) throw new Error(`the conversation is about ${Math.round(size / 1000)}k tokens, past ${remote.target}'s ${Math.round(remote.budget / 1000)}k input budget; run /compact`)
     }
+    const overBudget = budgetError(built.req)
+    if (overBudget) throw new Error(overBudget)
+    const metadata = catalogue.models.find(entry => entry.model === (remote?.target ?? e.model))?.metadata
+    if (metadata?.tools === false && built.req.tools.length) throw new Error(`${e.model} reports no tool-call support; choose a tool-capable model for this session`)
+    if (typeof built.req.effort === 'string' && metadata?.reasoningEfforts && !metadata.reasoningEfforts.includes(built.req.effort)) throw new Error(`${e.model} reports reasoning efforts ${metadata.reasoningEfforts.join(', ') || 'none'}; requested ${built.req.effort}`)
     const reasoning: Reasoning[] = []
     let firstTool: string | undefined
     for await (const event of helperStep(helperPort($), await wireFor($, built.req))) {
@@ -345,6 +476,7 @@ async function* routedStep($: EngineInterface, e: TurnStepInput): AsyncGenerator
       else if (event.type === 'resume') resumes.set(who, event.key)
       else if (event.type === 'limits') {
         limits = event.limits
+        limitsObservedAt = await $.clock.now()
         $.ui.status(limitsText())
       } else if (event.type === 'stats') {
         const via = event.transport ?? 'http'
@@ -373,6 +505,11 @@ const NO_USAGE: ModelUsage = { input_tokens: 0, output_tokens: 0, cache_read_inp
 async function complete($: EngineInterface, req: StepRequest): Promise<ModelCompleteResult> {
   const remote = targetOf(req.target)?.remote
   if (remote && (await approval($, remote))) return { isAnswered: false, reason: 'api-error', status: null, error: 'unknown', usage: NO_USAGE }
+  const refused = budgetError(req)
+  if (refused) {
+    $.ui.log(`${PLUGIN}: ${refused}`, { to: 'debug' })
+    return { isAnswered: false, reason: 'api-error', status: null, error: 'unknown', usage: NO_USAGE }
+  }
   const answer = await collectText(helperPort($), await wireFor($, req))
   if (answer.error !== undefined) return { isAnswered: false, reason: 'api-error', status: null, error: 'unknown', usage: answer.usage ?? NO_USAGE }
   if (answer.text.trim() === '') return { isAnswered: false, reason: 'empty-reply', usage: answer.usage ?? NO_USAGE }
@@ -380,14 +517,37 @@ async function complete($: EngineInterface, req: StepRequest): Promise<ModelComp
   return { isAnswered: true, text: answer.text, usage: answer.usage ?? NO_USAGE }
 }
 
+async function nativeContextStatus($: EngineInterface) {
+  const model = await $.session.model()
+  const metadata = activeContext(model)
+  const usage = await $.session.usage({ breakdown: 'summary' })
+  const held = (await $.state.get({ plugin: 'rice-multi-models', key: 'nativeContext' })).value
+  const current = await $.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS') ?? null
+  return {
+    model,
+    activeContextWindow: metadata?.contextWindow ?? null,
+    maxContextWindow: metadata?.maxContextWindow ?? null,
+    inputTokenLimit: metadata?.inputTokenLimit ?? null,
+    effectiveInputBound: requestBudget(model),
+    nativeWindow: usage.context.window,
+    override: held?.applied !== null && held?.applied !== undefined && held.applied === current ? 'plugin-owned' : current !== null ? 'owner/external' : 'unmanaged',
+    scope: 'primary model only; process-wide override does not establish independent custom-subagent windows or plugin-unload restoration',
+  }
+}
+
 async function statusText($: EngineInterface): Promise<string> {
   const prefs = await read($, prefsAtom)
   const version = await $.session.version()
+  const context = await nativeContextStatus($)
   const lines = [
-    `helper: ${!bun ? 'bun not found (install Bun, then /reload-plugins)' : prefs.helper === 'once' ? 'one process per step (/rice-models helper session for the session helper)' : sessionHelper() ? 'session helper running (one connection per conversation, private socket)' : 'session helper not running; one process per step'}`,
+    `helper: ${runtime.error || !runtime.executable ? runtime.error || 'Node.js 22+ unavailable; /rice-models setup repair' : prefs.helper === 'once' ? 'one process per step (/rice-models helper session for the session helper)' : sessionHelper() ? 'session helper running (one connection per conversation, private socket)' : 'session helper not running; one process per step'}`,
     `transport: ${prefs.transport} (auto = WebSocket, falling back to server-sent events)`,
-    `effort: ${prefs.effort ?? `${codexDefaults.effort ?? 'medium'} (Codex default)`}${prefs.effort ? ' (set here)' : ''}, unless the session sets one`,
-    `Codex default model: codex/${codexDefaults.model ?? 'gpt-6.1-sol'}`,
+    `effort: ${prefs.effort ?? (codexDefaults.effort ? `${codexDefaults.effort} (configured Codex policy)` : 'unset; provider chooses')}${prefs.effort ? ' (set here)' : ''}, unless the session sets one`,
+    `Codex session candidate: ${defaultModel('codex') ?? 'none discovered'}`,
+    `Discovery: ${catalogue.providers.map(provider => `${provider.provider}: ${provider.status}${provider.error ? ` (${provider.error})` : ''}`).join('; ')}`,
+    `Primary context (${context.model}): active context ${context.activeContextWindow ?? 'unknown'}, maximum context ${context.maxContextWindow ?? 'unknown'}, reported input ${context.inputTokenLimit ?? 'unknown'}, effective input bound ${context.effectiveInputBound ?? 'unknown'}, native window ${context.nativeWindow}; override ${context.override}.`,
+    `Native context scope: ${context.scope}. Numeric per-model registration is unsupported.`,
+    'Compaction: native routed compaction is unavailable; original transcript retained without custom summarization or provider fallback. Native Claude compaction is unchanged when its model is known; unknown subagent models after reload refuse compaction until their next observed turn. Model switches exceeding fresh exact routed destination input/context bounds are denied; unknown and native Claude destination bounds are not inferred.',
     `tool schemas: generated for ${STAMP.engineVersion}${version.version !== STAMP.engineVersion ? ` (this is ${version.version}: regenerate with scripts/gen-schemas.ts)` : ''}`,
     limitsText() ? `ChatGPT limits: ${limitsText()}` : 'ChatGPT limits: shown after the first WebSocket request',
     lastStep ? `last step: ${lastStep.model} for ${lastStep.who}, ${lastStep.ms} ms over ${lastStep.transport}` : 'no routed step yet',
@@ -397,55 +557,176 @@ async function statusText($: EngineInterface): Promise<string> {
   return lines.join('\n')
 }
 
-async function codexCache($: EngineInterface): Promise<{ models?: { slug?: string; display_name?: string; context_window?: number; visibility?: string }[] }> {
-  const home = (await $.env.get('CODEX_HOME')) || `${(await $.env.get('HOME')) ?? ''}/.codex`
-  try {
-    return JSON.parse(await $.fs.read(`${home}/models_cache.json`)) as { models?: { slug?: string; display_name?: string; context_window?: number; visibility?: string }[] }
-  } catch {
-    return {}
-  }
-}
-
-/** Every routed model as a picker row: Codex's, the declared providers', and the installed workers'. */
-async function routedRows($: EngineInterface): Promise<PickerRow[]> {
-  const rows = [...codexRows(await codexCache($)), ...providerRows(loaded.config)]
-  if (await hasCli($, 'agy')) {
-    const listed = await $.process.run(['/bin/sh', '-c', 'exec "$(command -v agy || echo "$HOME/.local/bin/agy")" models'], { timeoutMs: 30_000 }).catch(() => undefined)
-    const ids = listed?.exitCode === 0 ? agyModelIds(listed.stdout) : []
-    rows.push(...workerRows('agy', 'Antigravity', ids.length > 0 ? ids : [WORKERS.agy?.model ?? 'gemini-3.8-flash-high']))
-  }
-  if (await hasCli($, 'grok')) rows.push(...workerRows('grok', 'Grok', [WORKERS.grok?.model ?? 'grok-build']))
-
-  return rows
+function routedRows(): PickerRow[] {
+  return catalogueRows(catalogue)
 }
 
 async function modelsText($: EngineInterface): Promise<string> {
-  const rows = await routedRows($)
-  if (rows.length === 0) return 'No routed models: sign in to Codex (codex login), declare providers in rice-multi-models.json, or install agy or grok.'
-
-  return `${rows.map(row => `${row.model}  ${row.label}`).join('\n')}\n\nUse one with /model <id>, --model <id>, or model: <id> in an agent file. /rice-models picker write lists them in /model.`
+  return `${await discoveryText($, 'models')}\n\nUse a discovered candidate with /model <id>, --model <id>, or model: <id> in an agent file. /rice-models refresh fetches a new catalogue; discovery tools read this snapshot.`
 }
 
-/** The user settings with the picker's routed rows replaced by the current ones. */
+function candidateRoute(model: string): CandidateRoute | undefined {
+  const remote = remoteOf(loaded, model)
+  if (remote) {
+    return {
+      source: 'configured provider',
+      execution: 'native provider',
+      identity: JSON.stringify({
+        kind: 'configured-provider',
+        requestedModel: model,
+        resolvedTarget: remote.target,
+        approvalFingerprint: remote.fingerprint,
+        provider: remote.provider,
+        model: remote.model,
+      }),
+      codexSubscriptionQuota: false,
+    }
+  }
+  const target = splitTarget(model)
+  if (!target) return undefined
+  if (target.provider === 'codex') {
+    return {
+      source: 'Codex authenticated models endpoint',
+      execution: 'native provider',
+      identity: JSON.stringify({ kind: 'codex-subscription', model: target.model }),
+      codexSubscriptionQuota: true,
+    }
+  }
+  if (target.provider === 'agy' || target.provider === 'grok') {
+    return {
+      source: `${target.provider} installed worker`,
+      execution: 'CLI worker',
+      identity: JSON.stringify({ kind: 'cli-worker', provider: target.provider, model: target.model }),
+      codexSubscriptionQuota: false,
+    }
+  }
+  return undefined
+}
+
+function candidateModels() {
+  return candidates(routedRows(), candidateRoute).map(candidate => {
+    const entry = catalogue.models.find(model => model.model === candidate.model)!
+    return { ...candidate, source: entry.source, metadata: entry.metadata, metadataSources: entry.metadataSources, observedAt: entry.observedAt }
+  })
+}
+
+function dynamicBindingIsCurrent(type: string, model: string | undefined): boolean {
+  const binding = dynamicAgentBindings.get(type)
+  if (!binding) return true
+  if (!model || binding.type !== type || model !== binding.model) return false
+  const current = candidateRoute(model)
+  return catalogue.models.some(entry => entry.model === model) && current?.execution === binding.execution && current.identity === binding.identity && isRouted(model)
+}
+
+function staleBindingMessage(model: string): string {
+  return `rice-multi-models: the registered route for ${model} is no longer current; register a current candidate with mcp__rice-multi-models__agent_type`
+}
+
+async function discoveryText($: EngineInterface, action: 'models' | 'status'): Promise<string> {
+  const models = candidateModels()
+  const approvals = await approvedSet($)
+  const providers = Object.values(loaded.config?.providers ?? {}).map(provider => ({ provider: provider.id, approved: approvals.has(fingerprint(provider)) }))
+  const report = modelsReport(models, providers, limitsReport(limits, limitsObservedAt), catalogue)
+  if (action === 'models') return report
+  return `${report}\n\nSession status:\n${JSON.stringify(await discoveryStatus($), null, 2)}`
+}
+
+async function discoveryStatus($: EngineInterface): Promise<Record<string, unknown>> {
+  const prefs = await read($, prefsAtom)
+  const version = await $.session.version()
+  return {
+    helper: !runtime.executable || runtime.error ? 'unavailable' : prefs.helper === 'once' ? 'one process per step' : sessionHelper() ? 'session helper running' : 'one process per step',
+    transport: prefs.transport,
+    effort: prefs.effort ?? codexDefaults.effort ?? null,
+    defaultCodexModel: defaultModel('codex'),
+    nativeContext: await nativeContextStatus($),
+    toolSchemaVersion: STAMP.engineVersion,
+    currentEngineVersion: version.version,
+    limits: limitsReport(limits, limitsObservedAt),
+    lastStep: lastStep ? { model: lastStep.model, who: lastStep.who, durationMs: lastStep.ms, transport: lastStep.transport } : null,
+    diagnostics: { count: memory.notes.length, class: memory.notes.length === 0 ? 'none' : 'agent/configuration diagnostics' },
+  }
+}
+
+async function dynamicAgentType($: EngineInterface, input: unknown): Promise<string> {
+  const parsed = agentTypeInput(input)
+  if (!parsed) return 'Invalid input. Provide exactly model and optional mode (read or write).'
+  const models = candidateModels()
+  const candidate = models.find(model => model.model === parsed.model)
+  if (!candidate) return `Model ${parsed.model} is not in the supplied model catalogue for this session. Use mcp__rice-multi-models__models to discover candidates.`
+  if (!isRouted(parsed.model)) return `Model ${parsed.model} is no longer routed by the current provider configuration. Discover the current catalogue and register a current candidate.`
+
+  const key = JSON.stringify([parsed.model, parsed.mode, candidate.routeIdentity])
+  const existingName = dynamicAgentTypes.get(key)
+  if (existingName) {
+    return `model: ${parsed.model}\ntype: ${PLUGIN}:${existingName}\nmode: ${parsed.mode}\nexecution: ${candidate.execution}\nThis Agent type is already registered and is visible next turn. No worker was started; call the standard Agent tool with this type.`
+  }
+
+  const reserved = reserveAgentType(dynamicAgentTypes, key, nextDynamicAgent)
+  nextDynamicAgent = reserved.index
+  const name = reserved.name
+  const type = `${PLUGIN}:${name}`
+  const write = parsed.mode === 'write'
+  try {
+    let spec: ReturnType<typeof nativeAgentSpec>
+    if (candidate.execution === 'CLI worker') {
+      const provider = parsed.model.slice(0, parsed.model.indexOf('/'))
+      const info = WORKERS[provider]
+      if (!info) {
+        dynamicAgentTypes.delete(key)
+        return `Model ${parsed.model} is marked as a CLI worker, but its worker definition is unavailable.`
+      }
+      spec = workerAgentSpec(name, parsed.model, parsed.mode, info.label)
+    } else {
+      spec = nativeAgentSpec(name, parsed.model, parsed.mode)
+    }
+    await $.agent.register(spec)
+    registered.set(type, { prompt: spec.prompt, ...(spec.tools ? { tools: spec.tools } : {}) })
+    if (candidate.execution === 'CLI worker') workerWrites.set(type, write)
+  } catch {
+    dynamicAgentTypes.delete(key)
+    return `Could not register a native Agent type for ${parsed.model}; retry after checking this session's agent registration.`
+  }
+  dynamicAgentBindings.set(type, { type, model: parsed.model, execution: candidate.execution, identity: candidate.routeIdentity })
+
+  return `model: ${parsed.model}\ntype: ${type}\nmode: ${parsed.mode}\nexecution: ${candidate.execution}\nThis Agent type is visible next turn. No worker was started; call the standard Agent tool with this type. Standard Agent dispatch owns starting it and selecting effort.`
+}
+
+/** The Node helper serializes writes and tracks exact owned rows, never provider prefixes. */
 async function writePicker($: EngineInterface): Promise<string> {
-  const dir = (await $.env.get('CLAUDE_CONFIG_DIR')) || `${(await $.env.get('HOME')) ?? ''}/.claude`
-  const path = `${dir}/settings.json`
-  const settings = (await $.fs.exists(path)) ? (JSON.parse(await $.fs.read(path)) as Record<string, unknown>) : {}
-  const picker = (settings.modelPicker && typeof settings.modelPicker === 'object' ? settings.modelPicker : {}) as Record<string, unknown>
-  const rows = await routedRows($)
-  const ours = (model: string): boolean => ['codex/', 'agy/', 'grok/'].some(prefix => model.startsWith(prefix)) || remoteOf(loaded, model) !== undefined
-  const options = mergeRows(picker.options, rows, ours)
-  await $.fs.write(path, `${JSON.stringify({ ...settings, modelPicker: { ...picker, options } }, null, 2)}\n`)
-
-  return `Wrote ${rows.length} routed rows into ${path} (modelPicker); rows you wrote yourself were kept. /model lists them in new sessions.`
+  const result = await syncPicker($, runtime, routedRows())
+  return result.ok ? `Synchronized ${result.count} owned rows into ${result.path}; custom and edited rows were kept. /model lists them in new sessions.` : `Picker not changed: ${result.error}`
 }
 
-/** An installed CLI's absolute path, found on PATH by a shell, or undefined. */
-async function which($: EngineInterface, name: string): Promise<string | undefined> {
-  const found = await $.process.run(['/bin/sh', '-c', 'command -v "$0"', name], { timeoutMs: 10_000 }).catch(() => undefined)
-  const path = found?.exitCode === 0 ? found.stdout.trim().split('\n')[0] : undefined
+async function setupCommand($: EngineInterface, action: string | undefined): Promise<string> {
+  if (action && !['repair', 'codex'].includes(action)) return 'Usage: /rice-models setup [repair|codex]. Optional agy/grok CLIs require their vendor-supported installers; no global install is performed.'
+  runtime = await detectRuntime($)
+  if (runtime.error) {
+    await syncNativeContext($, true)
+    return setupSummary(runtime)
+  }
+  if (action === 'codex') {
+    try {
+      const result = await $.process.run([runtime.executable!, helperFile($.plugin.root), 'setup-codex'], { timeoutMs: 180_000 })
+      const installed = JSON.parse(result.stdout.trim()) as { ok: boolean; installed: boolean; login?: string[]; error?: string }
+      if (!installed.ok) return `Codex setup failed: ${installed.error || 'inspect /rice-models doctor'}`
+      runtime = await detectRuntime($)
+      return `${installed.installed ? 'Installed the pinned official Codex CLI into plugin-owned state (not globally).' : 'Using the existing Codex CLI; no install was needed.'}\nRun ${commandText(installed.login || ['codex', 'login'], runtime.info?.platform)} in your terminal to sign in. No login, provider approval or permission change was performed.`
+    } catch { return 'Codex setup did not complete; inspect /rice-models doctor and retry /rice-models setup codex. No login or provider approval was performed.' }
+  }
+  codexDefaults = await readCodexDefaults($)
+  await loadProviders($)
+  await refreshCatalogue($)
+  await registerAgents($)
+  await ensureHelper($)
+  const rows = routedRows()
+  return setupSummary(runtime, await syncPicker($, runtime, rows), rows.length, defaultModel('codex'))
+}
 
-  return path?.startsWith('/') ? path : undefined
+/** Pure diagnostics: no startup, settings write, install, network request, login or approval. */
+async function doctorCommand($: EngineInterface): Promise<string> {
+  const checked = await detectRuntime($)
+  return JSON.stringify({ runtime: checked.info || { node: { executable: checked.executable, version: checked.version } }, error: checked.error || null, actions: checked.error ? ['/rice-models setup repair'] : ['/rice-models setup repair', ...(!checked.info?.auth.codex ? ['codex login', ...(!checked.info?.clis.codex ? ['/rice-models setup codex'] : [])] : [])] }, null, 2)
 }
 
 /**
@@ -455,13 +736,13 @@ async function which($: EngineInterface, name: string): Promise<string | undefin
 async function opencodeCommand($: EngineInterface, words: readonly string[]): Promise<string> {
   const tiers: Tier[] = words.includes('zen') ? ['zen'] : words.includes('go') ? ['go'] : ['zen', 'go']
   const write = words.includes('write')
-  const jq = await which($, 'jq')
-  if (!jq) return 'rice-models opencode reads the key from OpenCode\'s auth file with jq; install jq first.'
-  const home = (await $.env.get('HOME')) ?? ''
-  const authFile = `${(await $.env.get('XDG_DATA_HOME')) || `${home}/.local/share`}/opencode/auth.json`
-  // The auth file's entry names only, never a value.
-  const listed = (await $.fs.exists(authFile)) ? await $.process.run([jq, '-r', 'keys[]', authFile], { timeoutMs: 10_000 }).catch(() => undefined) : undefined
-  const entries = new Set(listed?.exitCode === 0 ? listed.stdout.split('\n').map(line => line.trim()) : [])
+  if (!runtime.executable || runtime.error || !runtime.info) return setupSummary(runtime)
+  const home = runtime.info.home
+  const authFile = runtime.info.opencodeAuthFile
+  // The helper emits entry names only here, never credential values.
+  const listed = await $.process.run([runtime.executable, helperFile($.plugin.root), 'opencode-entries', authFile], { timeoutMs: 10_000 }).catch(() => undefined)
+  if (!listed || listed.exitCode !== 0) return 'OpenCode auth metadata is malformed or unreadable. Check /rice-models doctor or run opencode auth login; no provider configuration was written.'
+  const entries = new Set(JSON.parse(listed.stdout) as string[])
   const catalog = await $.http.fetch(CATALOG_URL)
   if (!catalog.ok) return `rice-models opencode: ${CATALOG_URL} answered HTTP ${catalog.status}; retry later.`
   const parsed: unknown = JSON.parse(catalog.text)
@@ -469,7 +750,7 @@ async function opencodeCommand($: EngineInterface, words: readonly string[]): Pr
   for (const tier of tiers) {
     const live = await $.http.fetch(`${TIERS[tier].base}/models`)
     if (!live.ok) return `rice-models opencode: ${TIERS[tier].base}/models answered HTTP ${live.status}; retry later.`
-    built.push({ tier, ...opencodeProvider(tier, parsed, liveIds(live.text), jq, authFile) })
+    built.push({ tier, ...opencodeProvider(tier, parsed, liveIds(live.text), runtime.executable, authFile, helperFile($.plugin.root)) })
   }
   const lines = built.map(({ tier, provider, skipped }) => {
     const t = TIERS[tier]
@@ -495,22 +776,26 @@ async function opencodeCommand($: EngineInterface, words: readonly string[]): Pr
 
 async function runCommand($: EngineInterface, args: string): Promise<string> {
   const [first, value] = args.trim().split(/\s+/)
+  if (first === 'setup') return setupCommand($, value)
+  if (first === 'doctor') return doctorCommand($)
   if (first === 'opencode') return opencodeCommand($, args.trim().split(/\s+/).slice(1))
   if (!first || first === 'status') return statusText($)
   if (first === 'models') return modelsText($)
-  if (first === 'picker') return value === 'write' ? writePicker($) : `${JSON.stringify({ modelPicker: { options: await routedRows($) } }, null, 2)}\n\n/rice-models picker write puts these rows in your user settings.`
+  if (first === 'picker') return value === 'write' ? writePicker($) : `${JSON.stringify({ modelPicker: { options: routedRows() } }, null, 2)}\n\n/rice-models picker write puts these rows in your user settings.`
   if (first === 'providers') return providerLines(loaded, await approvedSet($)).join('\n')
-  if (first === 'reload') {
+  if (first === 'reload' || first === 'refresh') {
     await loadProviders($)
-
-    return loaded.errors.length > 0 ? `${loaded.path} does not validate; no declared provider routes:\n${loaded.errors.join('\n')}` : providerLines(loaded, await approvedSet($)).join('\n')
+    await refreshCatalogue($)
+    await registerAgents($)
+    await syncPicker($, runtime, routedRows())
+    return `${loaded.errors.length > 0 ? `${loaded.path} does not validate; no declared provider routes:\n${loaded.errors.join('\n')}` : providerLines(loaded, await approvedSet($)).join('\n')}\n\n${await discoveryText($, 'models')}`
   }
   if (first === 'approve') {
     const provider = value ? loaded.config?.providers[value] : undefined
     if (!provider) return `Usage: /rice-models approve <provider>; declared: ${Object.keys(loaded.config?.providers ?? {}).join(', ') || 'none'}`
-    const remote = remoteOf(loaded, `${provider.id}/${Object.keys(provider.models)[0] ?? ''}`)
-    if (!remote) return `${provider.id} declares no model`
-    await $.store.set(`${TRUST_PREFIX}${remote.fingerprint}`, true)
+    await $.store.set(`${TRUST_PREFIX}${fingerprint(provider)}`, true)
+    await refreshCatalogue($)
+    await syncPicker($, runtime, routedRows())
 
     return `Approved ${provider.id}: conversations for its models go to ${provider.origin}. A changed address or key command asks again.`
   }
@@ -547,26 +832,79 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
     return `Routed requests use ${value === 'auto' ? 'a WebSocket, falling back to server-sent events' : value === 'ws' ? 'a WebSocket only' : 'server-sent events only'}.`
   }
 
-  return 'Usage: /rice-models [status | models | picker [write] | providers | approve <provider> | reload | opencode [zen|go] [write] | effort <level> | transport auto|ws|sse | helper session|once | workers read|write]'
+  return 'Usage: /rice-models [setup [repair|codex] | doctor | status | models | picker [write] | providers | approve <provider> | refresh | reload | opencode [zen|go] [write] | effort <level> | transport auto|ws|sse | helper session|once | workers read|write]'
 }
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
-    bun = await findBun($)
-    codexDefaults = await readCodexDefaults($)
-    await loadProviders($)
+    // Keep the repair and doctor command available even when runtime checks fail.
     await $.command.register({
       name: 'rice-models',
-      description: 'Non-Anthropic models in this session: status, models, providers, approvals, effort, transport',
-      argumentHint: '[status | models | picker [write] | providers | approve <provider> | reload | opencode [zen|go] [write] | effort <level> | transport auto|ws|sse | helper session|once | workers read|write]',
+      description: 'Native model setup, repair, read-only doctor, candidates, approvals and preferences',
+      argumentHint: '[setup [repair|codex] | doctor | status | models | picker [write] | providers | approve <provider> | refresh | reload | opencode [zen|go] [write] | effort <level> | transport auto|ws|sse | helper session|once | workers read|write]',
     })
+    runtime = await detectRuntime($)
+    codexDefaults = await readCodexDefaults($)
+    await loadProviders($)
+    await $.tool.register({
+      name: 'models',
+      description: 'Discover this session\'s supplied non-Anthropic model candidates or inspect their current status. Use action models or status. Candidates are not proof of live entitlement.',
+      inputSchema: DISCOVERY_SCHEMAS[DISCOVERY_TOOL],
+      isDeferred: true,
+    })
+    await $.tool.register({
+      name: 'agent_type',
+      description: 'Register and return a reusable native Agent type for an exact supplied model id. Choose read or write mode; registration does not start an agent.',
+      inputSchema: DISCOVERY_SCHEMAS[AGENT_TYPE_TOOL],
+      isDeferred: true,
+    })
+    await refreshCatalogue($)
     await registerAgents($)
     preferSession((await read($, prefsAtom)).helper !== 'once')
-    void superviseHelper($)
+    await ensureHelper($)
+    const rows = routedRows()
+    const picker = runtime.error ? undefined : await syncPicker($, runtime, rows)
+    await startupNotice($, e.isInteractive, runtime, picker, rows, defaultModel('codex'))
 
     return started
   })
+
+  on('classic.PreModelSwitch', async ($, e, next) => {
+    if (e.from_model !== e.to_model) {
+      const metadata = activeContext(e.to_model)
+      const bounds = [metadata?.inputTokenLimit, metadata?.contextWindow ?? metadata?.maxContextWindow]
+        .filter((value): value is number => value !== undefined && value !== null && Number.isSafeInteger(value) && value > 0)
+      const bound = bounds.length ? Math.min(...bounds) : undefined
+      if (bound !== undefined && e.context_tokens > bound) {
+        return { permissionDecision: 'deny', permissionDecisionReason: `${PLUGIN}: switching to ${e.to_model} would exceed its freshly discovered ${bound} token input/context bound (${e.context_tokens} context tokens); native routed compaction is unavailable, so the current model and transcript are retained. Start a new session or reduce context explicitly before retrying.` }
+      }
+    }
+    return next(e)
+  }).catch(() => ({ permissionDecision: 'deny', permissionDecisionReason: `${PLUGIN}: model-switch context check failed; current model and transcript retained` }))
+
+  on('classic.PostModelSwitch', async ($, e, next) => {
+    const switched = await next(e)
+    await syncNativeContext($)
+    return switched
+  })
+
+  on('session.end', async ($, e, next) => {
+    await syncNativeContext($, true)
+    return next(e)
+  })
+
+  on('prompt.compose', async ($, e, next) => {
+    const answer = await next(e)
+    return { ...answer, sections: withDiscoverySection(answer.sections) }
+  })
+
+  on('tool.call', { tool: 'mcp__rice-multi-models__models' }, async ($, e) => {
+    const input = discoveryInput(e.input)
+    return { result: input ? await discoveryText($, input.action) : 'Invalid input. Use exactly {"action":"models"} or {"action":"status"}.' }
+  })
+
+  on('tool.call', { tool: 'mcp__rice-multi-models__agent_type' }, async ($, e) => ({ result: await dynamicAgentType($, e.input) }))
 
   on('tool.describe', async ($, e, next) => {
     const answer = await next(e)
@@ -576,27 +914,34 @@ export const register: Register = on => {
   })
 
   on('turn.step', async function* ($, e, next) {
+    if (e.agentId !== undefined) {
+      const agent = (await $.agent.list()).find(each => each.id === e.agentId)
+      const binding = agent?.type ? dynamicAgentBindings.get(agent.type) : undefined
+      if (binding) {
+        if (!dynamicBindingIsCurrent(agent!.type, e.model)) {
+          const assembler = createAssembler(e.model)
+          assembler.feed({ type: 'error', kind: 'request', text: staleBindingMessage(binding.model) })
+          const end = assembler.end()
+          yield* end.chunks
+          return { turnId: e.turnId, index: e.index, answer: end.answer, toolUses: end.toolUses, stopReason: end.stopReason, usage: end.usage }
+        }
+      }
+    }
+    if (e.agentId !== undefined) agentModels.set(e.agentId, e.model)
     if (!isRouted(e.model)) return yield* next(e)
 
     return yield* routedStep($, e)
   })
 
   on('session.compact', async ($, e, next) => {
+    const agentType = e.agentId === undefined ? undefined : (await $.agent.list()).find(each => each.id === e.agentId)?.type
     const model = e.agentId === undefined ? await $.session.model() : agentModels.get(e.agentId)
+    const binding = agentType ? dynamicAgentBindings.get(agentType) : undefined
+    if (binding && !dynamicBindingIsCurrent(agentType!, model)) return { skip: staleBindingMessage(binding.model) }
+    if (model === undefined) return { skip: `${PLUGIN}: subagent active model is unknown; compaction was not attempted, original transcript retained. Its next observed turn establishes the model after reload.` }
     if (!isRouted(model)) return next(e)
-    if (e.trigger === 'precompute') return { skip: 'rice-multi-models compacts a routed conversation when it is due, not ahead' }
-    const transcript = await $.session.messages(e.agentId === undefined ? { as: 'api' } : { as: 'api', agentId: e.agentId })
-    if (!Array.isArray(transcript)) return { skip: `rice-multi-models: the transcript is unreadable (${transcript.deny})` }
-    const remote = targetOf(model)?.remote
-    const refused = remote ? await approval($, remote) : undefined
-    if (refused) return { skip: `rice-multi-models: ${refused}` }
-    const effort = (await read($, prefsAtom)).effort ?? (remote ? undefined : 'medium')
-    const req: StepRequest = { target: model, system: COMPACT_SYSTEM, tools: [], transcript: compactRequest(transcript as ApiMessage[], e.instructions), ...(effort ? { effort } : {}), who: `${e.agentId ?? 'main'}:compact`, session: await $.session.id() }
-    const answer = await collectText(helperPort($), await wireFor($, req))
-    if (answer.error !== undefined || answer.text.trim() === '') return { skip: `rice-multi-models: ${model} could not summarize (${answer.error ?? 'empty reply'})` }
-
-    return { messages: [{ role: 'user', text: summaryMessage(answer.text), toolUses: [] }] }
-  }).catch(($, e, next) => next(e))
+    return { skip: `${PLUGIN}: native routed compaction is unavailable for ${model}; the host API does not expose the native summarizer request. No custom summary or provider fallback was attempted; original transcript retained.` }
+  }).catch(() => ({ skip: `${PLUGIN}: compaction routing check failed; original transcript retained` }))
 
   on('model.complete', async ($, e, next) => {
     if (!isRouted(e.model)) return next(e)
@@ -605,13 +950,13 @@ export const register: Register = on => {
       system: e.system ?? '',
       tools: [],
       transcript: [{ role: 'user', content: [{ type: 'text', text: e.prompt }] }],
-      effort: e.effort ?? 'low',
+      ...(e.effort ? { effort: e.effort } : {}),
       who: 'complete',
       session: await $.session.id(),
     }
 
     return { value: await complete($, req) }
-  }).catch(($, e, next) => next(e))
+  }).catch(() => ({ value: { isAnswered: false, reason: 'api-error', status: null, error: 'unknown', usage: NO_USAGE } }))
 
   on('model.fork', async ($, e, next) => {
     const model = await $.session.model()
@@ -623,13 +968,12 @@ export const register: Register = on => {
       system: rewriteMain((await $.prompt.compose({ model })).sections, identityLine(targetOf(model)?.model ?? model, targetOf(model)?.label ?? 'codex')),
       tools: [],
       transcript: withUserText(transcript as ApiMessage[], e.prompt),
-      effort: 'low',
       who: 'fork',
       session: await $.session.id(),
     }
 
     return { value: await complete($, req) }
-  }).catch(($, e, next) => next(e))
+  }).catch(() => ({ value: { isAnswered: false, reason: 'api-error', status: null, error: 'unknown', usage: NO_USAGE } }))
 
   on('command.run', { command: 'rice-models' }, async ($, e) => ({ text: await runCommand($, e.args) }))
 }

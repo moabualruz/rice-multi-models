@@ -157,13 +157,15 @@ function decoder() {
 
 export const openai: Codec = {
   encode(n, p, m) {
+    if (m.maxOutputTokens !== undefined && !m.maxTokensParam) throw new Error('openai output ceiling requires an explicit maxTokensParam request policy (max_tokens or max_completion_tokens)')
     const tools = m.tools ? n.tools : []
     const base: Json = {}
-    if (m.maxTokensParam) base[m.maxTokensParam] = m.maxOutputTokens
+    if (m.maxTokensParam && m.maxOutputTokens !== undefined) base[m.maxTokensParam] = m.maxOutputTokens
     if (!m.parallelToolCalls && tools.length > 0) base['parallel_tool_calls'] = false
     const { body, level } = params(base, p, m, n.effort)
     const sent = {
       ...body,
+      ...(m.maxTokensParam && m.maxOutputTokens !== undefined ? { [m.maxTokensParam]: Math.min(m.maxOutputTokens, typeof body[m.maxTokensParam] === 'number' ? body[m.maxTokensParam] as number : Infinity) } : {}),
       model: m.id,
       messages: toMessages(n, m),
       ...(tools.length > 0 ? { tools: tools.map(t => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.schema } })) } : {}),

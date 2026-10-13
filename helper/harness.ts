@@ -11,6 +11,8 @@ import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 
 import type { ApiMessage, StepEvent, StepRequest } from '../hooks/protocol.ts'
+import { resolveExecutable } from './core/executable.ts'
+import { startProcess } from './core/subprocess.ts'
 
 export type Worker = 'agy' | 'grok'
 
@@ -149,7 +151,11 @@ export function grokArgs(req: StepRequest, model: string, prompt: string): strin
 }
 
 function binary(worker: Worker): string {
-  return Bun.which(worker) ?? `${homedir()}/.local/bin/${worker}`
+  try {
+    return resolveExecutable(worker)
+  } catch {
+    return `${homedir()}/.local/bin/${worker}`
+  }
 }
 
 /** One worker run as step events: progress as thinking, the final response as text, then usage and the stop. */
@@ -163,9 +169,12 @@ export async function* harnessStep(req: StepRequest, worker: Worker, model: stri
     return
   }
   const argv = [binary(worker), ...(worker === 'agy' ? agyArgs(req, model, prompt) : grokArgs(req, model, prompt))]
-  const child = Bun.spawn(argv, { cwd: req.cwd ?? process.cwd(), stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' })
-  const kill = () => child.kill()
+  signal.throwIfAborted()
+  const running = startProcess(argv, req.cwd ?? process.cwd())
+  const child = running.child
+  const kill = running.stop
   signal.addEventListener('abort', kill, { once: true })
+  if (signal.aborted) kill()
   const grok = grokParser()
   let ttfb: number | null = null
   let answer = ''
@@ -201,8 +210,8 @@ export async function* harnessStep(req: StepRequest, worker: Worker, model: stri
       }
     }
     yield* handle(worker === 'grok' ? grok.end() : [])
-    const code = await child.exited
-    const stderr = (await new Response(child.stderr).text()).trim().split('\n').at(-1)?.slice(0, 300) ?? ''
+    const code = await running.exited
+    const stderr = running.stderr()
     if (signal.aborted) {
       yield { type: 'error', kind: 'request', text: `rice-multi-models: ${worker} was stopped` }
     } else if (done?.kind === 'done' && done.ok) {
@@ -215,7 +224,8 @@ export async function* harnessStep(req: StepRequest, worker: Worker, model: stri
     }
   } finally {
     signal.removeEventListener('abort', kill)
-    if (child.exitCode === null) child.kill()
+    if (child.exitCode === null) kill()
+    await running.exited.catch(() => {})
   }
   yield { type: 'stats', ttfbMs: ttfb, totalMs: Date.now() - started, transport: worker }
 }

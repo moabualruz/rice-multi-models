@@ -4,7 +4,7 @@
 // keys and the transport to use; events add `signature` (reasoning to carry back) and `limits`.
 //
 // The contract between the mod and the helper that answers its routed steps. Pure: no engine types and
-// no I/O, so the helper (a Bun process) imports it as the mod does.
+// no I/O, so the shipped Node helper imports it as the mod does.
 
 /** A transcript message as `$.session.messages({ as: "api" })` gives it. */
 export type ApiMessage = { role: 'user' | 'assistant'; content: string | readonly ({ type: string } & Record<string, unknown>)[] }

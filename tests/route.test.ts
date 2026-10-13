@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 
 import { remember, withCarry } from '../hooks/carry'
 import type { Carry } from '../hooks/carry'
-import { compactRequest, summaryMessage, withUserText } from '../hooks/compact'
+import { withUserText } from '../hooks/compact'
 import { splitTarget } from '../hooks/protocol'
 import type { ApiMessage } from '../hooks/protocol'
 import { createAssembler } from '../hooks/step'
@@ -48,14 +48,12 @@ test('tools carry the generated schema for built-ins, a loose one otherwise, and
   expect(tools[1]?.schema).toEqual({ type: 'object', additionalProperties: true })
 })
 
-test('compaction asks for a summary on the last user turn and wraps the answer for continuation', async () => {
+test('fork text appends to the last user turn or follows the last assistant turn', async () => {
   const onUser: ApiMessage[] = [{ role: 'user', content: 'hello' }]
-  const asked = compactRequest(onUser, 'the file names')
-  expect(asked.length).toBe(1)
-  expect(JSON.stringify(asked[0]?.content)).toContain('stressing: the file names')
+  expect(withUserText(onUser, 'q')).toEqual([{ role: 'user', content: [{ type: 'text', text: 'hello' }, { type: 'text', text: 'q' }] }])
   const onModel: ApiMessage[] = [...onUser, { role: 'assistant', content: [{ type: 'text', text: 'hi' }] }]
   expect(withUserText(onModel, 'q').at(-1)).toEqual({ role: 'user', content: [{ type: 'text', text: 'q' }] })
-  expect(summaryMessage('  done  ').endsWith('\n\ndone')).toBe(true)
+  expect(onUser).toEqual([{ role: 'user', content: 'hello' }])
 })
 
 test('the assembler turns events into numbered chunks and ends a tool step on tool_use', async () => {

@@ -3,6 +3,7 @@
 // opens one per request and closes it after.
 import type { Limits } from '../hooks/protocol.ts'
 import { ProviderFailure } from './core/provider-failure.ts'
+import WebSocket from 'ws'
 
 const OPEN_MS = 15_000
 const ENDS = new Set(['response.completed', 'response.done', 'response.failed', 'response.incomplete', 'error'])
@@ -49,7 +50,9 @@ export class CodexSocket {
   /** A connection once the handshake is done; headers carry the login, which the backend checks here. */
   static open(url: string, headers: Record<string, string>, signal?: AbortSignal): Promise<CodexSocket> {
     signal?.throwIfAborted()
-    const socket = new WebSocket(url, { headers } as unknown as string[])
+    const socket = new WebSocket(url, { headers, followRedirects: false })
+    // ws emits an error when a connecting socket is closed; keep it handled after handshake cleanup.
+    socket.on('error', () => {})
 
     return new Promise((resolve, reject) => {
       const cleanup = () => {
@@ -62,19 +65,19 @@ export class CodexSocket {
       const fail = (error: unknown) => {
         cleanup()
         reject(error)
-        socket.close()
+        socket.terminate()
       }
       const abort = () => fail(signal?.reason)
       const opened = () => {
         cleanup()
         resolve(new CodexSocket(socket))
       }
-      const refused = (event: Event) => {
+      const refused = (event: WebSocket.ErrorEvent) => {
         const message = 'message' in event && typeof event.message === 'string' ? event.message : ''
         const status = /(?:server response|HTTP)[^0-9]*(\d{3})/i.exec(message)?.[1]
         fail(new SocketError('the Codex WebSocket was refused', 'websocket.open', undefined, status ? Number(status) : undefined))
       }
-      const closed = (event: CloseEvent) => fail(new SocketError(`the Codex WebSocket closed before it opened (${event.code})`, 'websocket.close', event.code))
+      const closed = (event: WebSocket.CloseEvent) => fail(new SocketError(`the Codex WebSocket closed before it opened (${event.code})`, 'websocket.close', event.code))
       const timer = setTimeout(() => fail(new SocketError('the Codex WebSocket did not open in time', 'websocket.open')), OPEN_MS)
       socket.addEventListener('open', opened)
       socket.addEventListener('error', refused)
@@ -88,9 +91,11 @@ export class CodexSocket {
     return !this.closed && !this.busy && this.socket.readyState === WebSocket.OPEN
   }
 
-  close(): void {
+  close(immediate = false): void {
     this.closed = true
-    if (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING) this.socket.close(1000)
+    // Cancelled/abandoned responses must not wait for an uncooperative peer's close handshake.
+    if (immediate) this.socket.terminate()
+    else if (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING) this.socket.close(1000)
   }
 
   /**
@@ -132,7 +137,7 @@ export class CodexSocket {
     this.drop = error => finish(error)
     const abort = () => {
       finish(new SocketError('aborted', 'request.aborted', 1008))
-      this.close()
+      this.close(true)
     }
     signal.addEventListener('abort', abort, { once: true })
     this.socket.send(JSON.stringify({ type: 'response.create', ...body }))
@@ -157,7 +162,7 @@ export class CodexSocket {
           signal.removeEventListener('abort', abort)
           if (!done) {
             finish(new SocketError('abandoned'))
-            self.close()
+            self.close(true)
           }
           self.busy = false
           self.lastUsed = Date.now()

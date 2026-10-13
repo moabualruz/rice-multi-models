@@ -16,9 +16,9 @@ export type ModelConfig = {
   id: string
   // The protocol this model is spoken in: its own `kind`, else its provider's.
   kind: Kind
-  contextWindow: number
+  contextWindow?: number
   maxInputTokens?: number
-  maxOutputTokens: number
+  maxOutputTokens?: number
   maxTokensParam?: 'max_tokens' | 'max_completion_tokens'
   systemRole: 'system' | 'developer' | 'user'
   effort?: Partial<Record<Effort, Json>>
@@ -229,7 +229,7 @@ function bool(v: unknown, fallback: boolean, path: string, errors: string[]): bo
 // searches PATH), shown verbatim when the provider is approved; or "none". The approval, not this check, is
 // what stands between an edited config and a helper run.
 function auth(id: string, v: Json, path: string, errors: string[]): Auth {
-  const login = `bun run auth login ${id}, which stores the key in the keychain and writes "auth": { "command": [...] }`
+  const login = `configure an absolute credential-helper argv in "auth": { "command": [...] } for ${id}; use /rice-models opencode for OpenCode's existing login`
   const a = v['auth']
   if (v['apiKeyEnv'] !== undefined) errors.push(`${path}.apiKeyEnv: no longer read; keys come from a credential helper. Run ${login} in its place`)
   else if (a === undefined) errors.push(`${path}.auth: missing; run ${login}, or set "auth": "none" for a server that checks no key`)
@@ -243,7 +243,7 @@ function auth(id: string, v: Json, path: string, errors: string[]): Auth {
   const { command, ttlSeconds } = a
   const argv = Array.isArray(command) && command.every(s => typeof s === 'string') ? (command as string[]) : undefined
   if (argv === undefined || argv.length === 0) errors.push(`${path}.auth.command: must be a non-empty list of strings`)
-  else if (!(argv[0] as string).startsWith('/')) errors.push(`${path}.auth.command: the first entry must be an absolute path (no shell expands ~ or searches PATH)`)
+  else if (!((argv[0] as string).startsWith('/') || /^[A-Za-z]:[\\/]/.test(argv[0] as string) || /^\\\\[^\\]+\\[^\\]+/.test(argv[0] as string))) errors.push(`${path}.auth.command: the first entry must be an absolute path (no shell expands ~ or searches PATH)`)
   else if (argv.some(s => /\p{Cc}/u.test(s))) errors.push(`${path}.auth.command: must not contain control characters`)
   if (ttlSeconds !== undefined && !isCount(ttlSeconds)) errors.push(`${path}.auth.ttlSeconds: must be a positive integer`)
   return { command: argv ?? [], ttlSeconds: (ttlSeconds as number | undefined) ?? KEY_TTL_S }
@@ -269,8 +269,8 @@ function model(id: string, providerKind: Kind, v: unknown, path: string, errors:
   const { contextWindow, maxInputTokens, maxOutputTokens } = v
   const maxTokensParam = mine('maxTokensParam')
   const systemRole = mine('systemRole')
-  if (!isCount(contextWindow)) errors.push(`${path}.contextWindow: must be a positive integer`)
-  if (!isCount(maxOutputTokens)) errors.push(`${path}.maxOutputTokens: must be a positive integer`)
+  if (contextWindow !== undefined && !isCount(contextWindow)) errors.push(`${path}.contextWindow: must be a positive integer`)
+  if (maxOutputTokens !== undefined && !isCount(maxOutputTokens)) errors.push(`${path}.maxOutputTokens: must be a positive integer`)
   if (maxInputTokens !== undefined && (!isCount(maxInputTokens) || (isCount(contextWindow) && maxInputTokens > contextWindow))) {
     errors.push(`${path}.maxInputTokens: must be a positive integer no larger than contextWindow`)
   }
@@ -283,9 +283,9 @@ function model(id: string, providerKind: Kind, v: unknown, path: string, errors:
   const out: ModelConfig = {
     id,
     kind,
-    contextWindow: contextWindow as number,
+    ...(contextWindow === undefined ? {} : { contextWindow: contextWindow as number }),
     ...(maxInputTokens === undefined ? {} : { maxInputTokens: maxInputTokens as number }),
-    maxOutputTokens: maxOutputTokens as number,
+    ...(maxOutputTokens === undefined ? {} : { maxOutputTokens: maxOutputTokens as number }),
     ...(maxTokensParam === undefined ? {} : { maxTokensParam: maxTokensParam as ModelConfig['maxTokensParam'] & string }),
     systemRole: (systemRole as ModelConfig['systemRole'] | undefined) ?? 'system',
     tools: toolsOf(v['tools'], `${path}.tools`, errors),
@@ -293,7 +293,8 @@ function model(id: string, providerKind: Kind, v: unknown, path: string, errors:
     vision: bool(v['vision'], true, `${path}.vision`, errors),
     ...requests(v, kind, path, errors, isCount(maxOutputTokens) ? maxOutputTokens : Infinity),
   }
-  if (isCount(contextWindow) && isCount(maxOutputTokens) && inputBudget(out) <= 0) {
+  const budget = inputBudget(out)
+  if (budget !== null && budget <= 0) {
     errors.push(`${path}: maxOutputTokens leaves no input budget inside contextWindow`)
   }
   return out
@@ -349,9 +350,8 @@ function provider(id: string, v: unknown, path: string, errors: string[]): Provi
   const sessionHeaderOk = typeof sessionHeader === 'string' && HEADER_NAME_RE.test(sessionHeader)
   if (sessionHeader !== undefined && !sessionHeaderOk) errors.push(`${path}.sessionHeader: must be a header name`)
   const out: Record<string, ModelConfig> = {}
-  if (!isObject(models)) errors.push(`${path}.models: must be a map of model ids`)
-  else {
-    if (Object.keys(models).length === 0) errors.push(`${path}.models: declares no models`)
+  if (models !== undefined && !isObject(models)) errors.push(`${path}.models: must be a map of model ids`)
+  else if (isObject(models)) {
     for (const [mid, m] of Object.entries(models)) {
       if (mid === '') errors.push(`${path}.models: a model id is empty`)
       const parsed = model(mid, kind, m, `${path}.models.${mid}`, errors)
@@ -359,7 +359,7 @@ function provider(id: string, v: unknown, path: string, errors: string[]): Provi
     }
   }
   const shared = params(v['params'], kinds, `${path}.params`, errors)
-  thinkingBudget(shared, Math.min(...Object.values(out).map(m => m.maxOutputTokens)), `${path}.params`, errors)
+  thinkingBudget(shared, Math.min(...Object.values(out).map(m => m.maxOutputTokens ?? Infinity)), `${path}.params`, errors)
   return {
     id,
     kind,
@@ -448,8 +448,10 @@ export function undeclared(config: Config, name: string): string | undefined {
 // argv (or "none"), so any change to the helper asks again.
 export const fingerprint = (p: ProviderConfig) => `${p.kind}|${p.origin}|${p.auth === 'none' ? 'none' : `cmd:${JSON.stringify(p.auth.command)}`}`
 
-// The tokens a request may carry: the input cap, and no more than the window leaves after a sent max-tokens
-// value (always sent by the anthropic and bedrock kinds; by openai when maxTokensParam names its key).
-export function inputBudget(m: Pick<ModelConfig, 'kind' | 'contextWindow' | 'maxInputTokens' | 'maxOutputTokens' | 'maxTokensParam'>): number {
-  return Math.min(m.maxInputTokens ?? Infinity, m.contextWindow - (KINDS[m.kind].sendsMaxTokens || m.maxTokensParam ? m.maxOutputTokens : 0))
+// Shared context must leave room for every output cap the selected codec emits.
+export function inputBudget(m: Pick<ModelConfig, 'kind' | 'contextWindow' | 'maxInputTokens' | 'maxOutputTokens' | 'maxTokensParam'>): number | null {
+  if (m.contextWindow === undefined && m.maxInputTokens === undefined) return null
+  const reserved = KINDS[m.kind].sendsMaxTokens || m.kind === 'responses' || m.kind === 'gemini' || m.maxTokensParam ? (m.maxOutputTokens ?? 0) : 0
+  const contextBudget = m.contextWindow === undefined ? Infinity : m.contextWindow - reserved
+  return Math.min(m.maxInputTokens ?? Infinity, contextBudget)
 }

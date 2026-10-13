@@ -149,6 +149,7 @@ export const responses: Codec = {
     const { body, level } = params(base, p, m, n.effort)
     const sent = {
       ...body,
+      ...(m.maxOutputTokens === undefined ? {} : { max_output_tokens: Math.min(m.maxOutputTokens, typeof body['max_output_tokens'] === 'number' ? body['max_output_tokens'] : Infinity) }),
       model: m.id,
       instructions: n.system,
       input: toInput(n),

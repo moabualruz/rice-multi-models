@@ -1,43 +1,13 @@
-// The `/model` picker rows for routed models (Claude Code's `modelPicker` setting): Codex models from the Codex
-// CLI's cache, every declared provider's models, and the worker CLIs' models. `behavesAs` lends each row a
-// known model's capabilities (the effort control) without changing the id that is sent. Rows the person wrote
-// themselves are kept when the routed ones are written. Pure.
-import type { Config } from './config'
+import type { ModelCatalogue } from './catalogue'
 
 export type PickerRow = { model: string; label: string; description?: string; behavesAs?: string }
 
-export const BEHAVES_AS = 'claude-sonnet-4-6'
-
-type CodexCache = { models?: { slug?: string; display_name?: string; context_window?: number; visibility?: string }[] }
-
-const window = (tokens: number | undefined) => (tokens ? `, ${Math.round(tokens / 1000)}k context` : '')
-
-export function codexRows(cache: CodexCache): PickerRow[] {
-  return (cache.models ?? [])
-    .filter(model => model.slug && model.visibility !== 'hide')
-    .map(model => ({
-      model: `codex/${model.slug}`,
-      label: `${model.display_name ?? model.slug} (Codex)`,
-      description: `ChatGPT subscription via rice-multi-models${window(model.context_window)}`,
-      behavesAs: BEHAVES_AS,
-    }))
-}
-
-export function providerRows(config: Config | undefined): PickerRow[] {
-  if (!config) return []
-
-  return Object.values(config.providers).flatMap(provider =>
-    Object.entries(provider.models).map(([id, model]) => ({
-      model: `${provider.id}/${id}`,
-      label: `${id} (${provider.id})`,
-      description: `${model.kind} endpoint ${provider.origin} via rice-multi-models${window(model.contextWindow)}`,
-      behavesAs: BEHAVES_AS,
-    })),
-  )
-}
-
-export function workerRows(worker: string, label: string, models: readonly string[]): PickerRow[] {
-  return models.map(model => ({ model: `${worker}/${model}`, label: `${model} (${label})`, description: `${label} CLI as a worker with its own tools, via rice-multi-models`, behavesAs: BEHAVES_AS }))
+export function catalogueRows(catalogue: ModelCatalogue): PickerRow[] {
+  return catalogue.models.map(({ model, label, execution, metadata }) => ({
+    model,
+    label,
+    description: `${execution}; reported context ${metadata.contextWindow ?? 'unknown'}, input ${metadata.inputTokenLimit ?? 'unknown'}, output ${metadata.outputTokenLimit ?? 'unknown'}; native context registration unsupported`,
+  }))
 }
 
 /** `agy models` output: one `<id>\t<name>` per line after its header. */
