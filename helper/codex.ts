@@ -16,6 +16,7 @@ import { openaiInstructions } from './openai/instructions.ts'
 import { CodexSocket, SocketPool } from './socket.ts'
 import { MAX_ATTEMPTS, ProviderFailure, retryAfterMs, retryDelay, waitForRetry } from './core/provider-failure.ts'
 import { oneLine } from './styx/errors.ts'
+import { codexAccounts, codexStepLimit } from './account-steps.ts'
 
 const HTTP_URL = 'https://chatgpt.com/backend-api/codex/responses'
 const WS_URL = 'wss://chatgpt.com/backend-api/codex/responses'
@@ -223,7 +224,7 @@ async function* closeAfter(stream: AsyncIterable<Uint8Array>, socket: CodexSocke
   }
 }
 
-export type CodexOptions = { authFile?: string; env?: Record<string, string | undefined>; httpUrl?: string; wsUrl?: string; pool?: SocketPool }
+export type CodexOptions = { authFile?: string; env?: Record<string, string | undefined>; httpUrl?: string; wsUrl?: string; pool?: SocketPool; maxInFlight?: number }
 
 /** Answers one step with a Codex model: streamed text, reasoning and tool calls, then usage and the stop. */
 export async function* codexStep(req: StepRequest, model: string, signal: AbortSignal, options: CodexOptions = {}): AsyncGenerator<StepEvent> {
@@ -279,8 +280,16 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
     return stream
   }
   const task = (async () => {
+    let release: (() => void) | undefined
+    let attempts = 0
     try {
+      const limit = options.maxInFlight ?? codexStepLimit(options.env)
+      const auth = await readCodexAuth(authFile)
+      signal.throwIfAborted()
+      const accountKey = createHash('sha256').update(auth['chatgpt-account-id']).digest('hex')
+      release = await codexAccounts.acquire(accountKey, limit, signal)
       for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        attempts = attempt
         let pending: StepEvent[] = []
         let committed = false
         const flush = () => {
@@ -328,9 +337,14 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
           return
         }
       }
-    } catch {
-      queue.push({ type: 'error', kind: 'request', text: 'codex: event=request.aborted, code=aborted, type=unknown; step aborted during retry wait' })
+    } catch (error) {
+      const failure = new ProviderFailure(signal.aborted ? 'step aborted' : error instanceof CodexAuthError ? error.message : oneLine(error instanceof Error ? error.message : String(error)), {
+        event: signal.aborted ? 'request.aborted' : error instanceof CodexAuthError ? 'auth.error' : 'request.admission',
+        code: signal.aborted ? 'aborted' : error instanceof CodexAuthError ? 'codex-auth' : 'account-limit',
+      })
+      queue.push({ type: 'error', kind: 'request', text: `codex: ${failure.finalText(attempts)}` })
     } finally {
+      release?.()
       queue.close()
     }
   })()
