@@ -20,6 +20,13 @@ jobs:
         with:
           bun-version: 1.3.14
       - run: bun install --frozen-lockfile --ignore-scripts
+      - name: Bind native plugin test prerequisite
+        shell: bash
+        run: |
+          claude_bin=/home/mkh/.local/share/mise/installs/claude/2.1.296/claude
+          test -x "$claude_bin"
+          "$claude_bin" --version
+          printf '%s\n' "${claude_bin%/*}" >> "$GITHUB_PATH"
       - run: bun run check
       - name: Reject typographic dashes in changed lines
         shell: bash

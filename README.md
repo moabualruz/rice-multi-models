@@ -371,10 +371,11 @@ Codex CLI on the same account. The session helper accepts up to 64 concurrent st
 
 ## Update
 
-Release **0.6.0** includes the shipped Node helper, automatic activation setup,
+Release **0.6.1** includes the shipped Node helper, automatic activation setup,
 native discovery, primary-window synchronization and temporary fail-closed routed
-compaction. The `rice-mods` marketplace tracks this repository's `main` without a
-tag pin. Update both the marketplace and your installed mod, then reload or
+compaction. It also binds the required Claude Code 2.1.296 native test executable
+in the self-hosted Linux workflow; no checks are skipped. The `rice-mods`
+marketplace tracks this repository's `main` without a tag pin. Update both the marketplace and your installed mod, then reload or
 restart the session:
 
 ```bash
