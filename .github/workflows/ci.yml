@@ -1,0 +1,31 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: [self-hosted, linux, x64, generic]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - run: bun run check
+      - name: Reject typographic dashes in changed lines
+        shell: bash
+        run: |
+          git diff --unified=0 HEAD^ HEAD -- '*.ts' '*.json' '*.md' '*.yml' > patch.txt
+          if grep '^+' patch.txt | grep -v '^+++' | grep -P '\x{2013}|\x{2014}'; then
+            exit 1
+          fi
+          rm patch.txt

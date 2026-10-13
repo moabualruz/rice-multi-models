@@ -130,6 +130,44 @@ them; `/rice-models reload` re-reads the file.
 4. An expiring ChatGPT login is renewed by asking `codex app-server` to do it,
    so Codex rewrites its own `auth.json`.
 
+## Codex retries and account admission
+
+A Codex step retries transient stream failures, early WebSocket closes (including code 1000),
+and HTTP 408, 429 and 5xx failures, up to **three total attempts**. Known authentication,
+permission, request, billing and policy errors are permanent. Unknown provider codes are not
+assumed transient. An anonymous `response.failed` or `error` event is transient.
+
+Backoff starts at 500 ms, doubles between attempts, and adds up to 100 percent jitter.
+`Retry-After` seconds or an HTTP date is a minimum wait. Each wait is bounded at 30 seconds:
+a larger provider wait ends the step rather than retrying before it permits. Cancellation
+interrupts admission, connection setup and retry waits. The existing one-time HTTP 401 login
+renewal remains separate from transient retries.
+
+No attempt is replayed after it emits a whole tool call. Before that boundary, text, reasoning
+and signatures are buffered until completion or the first tool call, then released in order.
+This prevents a failed attempt's partial answer from contaminating the next one. Final errors
+identify the event, provider code/type (or `unknown`), HTTP/close status when available, and
+attempt count; login values and credential-shaped text are redacted. Bun does not expose the
+HTTP status or headers of every refused WebSocket handshake: `auto` falls back to HTTP to
+recover the structured rejection, while forced `ws` reports the transport error.
+
+`RICE_CODEX_MAX_IN_FLIGHT` configures FIFO admission **per ChatGPT account in each helper
+process**. Default: `6`; allowed: `1` through `15`; `0` disables it. Set it in the environment
+before starting Claude Code. Waiting steps are cancellable and hold no provider connection.
+A slot is held through all attempts and released on success, failure or cancellation. Separate
+accounts have separate queues. This does not coordinate other Claude Code helpers or the
+Codex CLI on the same account. The session helper's overall 16-step cap is unchanged.
+
+## Update
+
+Version 0.5.1 is published from this repository's `main`, which the `rice-mods` marketplace
+tracks without a tag pin. Update the marketplace and installed mod, then restart the session:
+
+```bash
+claude plugin marketplace update rice-mods
+claude plugin update rice-multi-models@rice-mods
+```
+
 ## Requirements
 
 - Claude Code 2.1.296 (tool schemas are generated per build:
@@ -139,10 +177,14 @@ them; `/rice-models reload` re-reads the file.
 
 ## Tests
 
-- `claude plugin test .` runs the mod tests (`tests/`).
-- `bun test helper` runs the helper tests against captured Codex streams.
-- Type-check: `tsc -p helper/tsconfig.json --typeRoots <bun @types>`; the mod
-  type-checks against the engine's laid types.
+- `bun install --frozen-lockfile --ignore-scripts` installs the pinned development tools.
+- `bun run check` runs every helper and routing unit test, the helper type-check and Git's
+  whitespace check. Routing tests are pure and use Bun, without loading a mod into Claude Code.
+- `bun test helper tests` runs all tests, including fake Responses/WebSocket failures,
+  backoff, credential redaction, tool replay safety and account admission.
+- The source CI runs the same checks on self-hosted Linux runners only.
+- The mod itself type-checks against the engine's laid types; the helper's type-check does
+  not establish a live plugin reload or engine lifecycle qualification.
 
 ## Credits
 

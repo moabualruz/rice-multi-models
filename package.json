@@ -1,0 +1,13 @@
+{
+  "name": "rice-multi-models",
+  "private": true,
+  "scripts": {
+    "test": "bun test helper tests",
+    "typecheck": "tsc -p helper/tsconfig.json --typeRoots ./node_modules/@types",
+    "check": "bun run test && bun run typecheck && git diff --check"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.14",
+    "typescript": "6.0.3"
+  }
+}
