@@ -132,16 +132,22 @@ them; `/rice-models reload` re-reads the file.
 
 ## Codex retries and account admission
 
-A Codex step retries transient stream failures, early WebSocket closes (including code 1000),
-and HTTP 408, 429 and 5xx failures, up to **three total attempts**. Known authentication,
-permission, request, billing and policy errors are permanent. Unknown provider codes are not
-assumed transient. An anonymous `response.failed` or `error` event is transient.
+A Codex step retries ordinary transient stream failures, early WebSocket closes (including
+code 1000), and HTTP 408, 429 and 5xx failures, up to **three total attempts**. Ordinary
+backoff starts at 500 ms, doubles between attempts, and adds up to 100 percent jitter:
+about 0.5 to 2 seconds per wait. An anonymous `response.failed` or `error` event is transient.
 
-Backoff starts at 500 ms, doubles between attempts, and adds up to 100 percent jitter.
-`Retry-After` seconds or an HTTP date is a minimum wait. Each wait is bounded at 30 seconds:
-a larger provider wait ends the step rather than retrying before it permits. Cancellation
-interrupts admission, connection setup and retry waits. The existing one-time HTTP 401 login
-renewal remains separate from transient retries.
+Provider overload gets **up to six total attempts**: overload/capacity/unavailable codes or
+messages, and HTTP 503/529. Its exponential schedule is about 2, 4, 8, 16 and 30 seconds,
+with jitter and each wait capped at 30 seconds. Known authentication, permission, request,
+billing and policy error codes are permanent and never retry, even when the status or
+message otherwise looks transient or overloaded. Other unknown provider codes are not
+assumed transient.
+
+`Retry-After` seconds or an HTTP date is a minimum wait. A value above 30 seconds fails
+fast rather than retrying before the provider permits. Cancellation interrupts admission,
+connection setup and retry waits. The existing one-time HTTP 401 login renewal remains
+separate from transient retries.
 
 No attempt is replayed after it emits a whole tool call. Before that boundary, text, reasoning
 and signatures are buffered until completion or the first tool call, then released in order.
