@@ -114,7 +114,17 @@ async function openHttp(url: string, request: ResponsesRequest, authFile: string
   })
   if (!response.ok || !response.body) throw await httpFailure(response)
 
-  return response.body as unknown as AsyncIterable<Uint8Array>
+  return httpStream(response.body as unknown as AsyncIterable<Uint8Array>)
+}
+
+/** Only iterator failures are transport faults; decoder errors occur outside this wrapper. */
+async function* httpStream(stream: AsyncIterable<Uint8Array>): AsyncGenerator<Uint8Array> {
+  try {
+    yield* stream
+  } catch (error) {
+    const code = error && typeof error === 'object' && 'code' in error && typeof error.code === 'string' ? error.code : 'stream-reset'
+    throw new ProviderFailure('the Codex HTTP response connection failed before completion', { event: 'http.stream', code, transient: true })
+  }
 }
 
 /** Maps the translator's Anthropic stream events onto step events. */

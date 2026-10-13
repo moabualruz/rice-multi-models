@@ -10,7 +10,7 @@ import { MAX_RETRY_WAIT_MS, ProviderFailure, retryAfterMs, retryDelay, waitForRe
 const req: StepRequest = { target: 'codex/test', system: 'Test', tools: [{ name: 'echo', description: 'Echo', schema: { type: 'object' } }], transcript: [{ role: 'user', content: 'Hi' }], who: 'main', session: 'retry-test' }
 const created = { type: 'response.created', response: { id: 'resp_test' } }
 const success = [created, { type: 'response.completed', response: { id: 'resp_test', status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: 'OK' }] }], usage: { input_tokens: 1, output_tokens: 1 } } }]
-type Reply = { status?: number; headers?: Record<string, string>; events?: unknown[]; close?: number; body?: unknown }
+type Reply = { status?: number; headers?: Record<string, string>; events?: unknown[]; close?: number; body?: unknown; rawSse?: string }
 
 async function fake(replies: Reply[], transport: 'sse' | 'ws' | 'auto' = 'sse') {
   const dir = mkdtempSync(join(tmpdir(), 'mm-retry-'))
@@ -31,7 +31,7 @@ async function fake(replies: Reply[], transport: 'sse' | 'ws' | 'auto' = 'sse') 
       }
       await request.json()
       const reply = respond()
-      return new Response(reply.body ? JSON.stringify(reply.body) : (reply.events ?? success).map(event => `data: ${JSON.stringify(event)}\n\n`).join(''), { status: reply.status ?? 200, headers: { 'content-type': 'text/event-stream', ...reply.headers } })
+      return new Response(reply.body ? JSON.stringify(reply.body) : reply.rawSse ?? (reply.events ?? success).map(event => `data: ${JSON.stringify(event)}\n\n`).join(''), { status: reply.status ?? 200, headers: { 'content-type': 'text/event-stream', ...reply.headers } })
     },
     websocket: {
       message(socket) {
@@ -115,6 +115,48 @@ for (const reply of [
     expect(result.events.some(event => event.type === 'error')).toBe(true)
   })
 }
+
+test('HTTP 429 with a permanent billing code does not retry', async () => {
+  for (const code of ['insufficient_quota', 'billing_hard_limit_reached']) {
+    const result = await fake([{ status: 429, body: { error: { code } } }])
+    expect(result.calls).toBe(1)
+  }
+})
+
+test('an abruptly reset HTTP body retries without treating malformed JSON as transient', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mm-reset-'))
+  const authFile = join(dir, 'auth.json')
+  writeFileSync(authFile, JSON.stringify({ auth_mode: 'chatgpt', tokens: { access_token: 'test-only', account_id: 'reset-test' } }))
+  let calls = 0
+  const server = Bun.listen<{ responded: boolean }>({
+    hostname: '127.0.0.1',
+    port: 0,
+    data: { responded: false },
+    socket: {
+      open(socket) { socket.data = { responded: false } },
+      data(socket) {
+        if (socket.data.responded) return
+        socket.data.responded = true
+        const reset = ++calls === 1
+        const body = (reset ? [created] : success).map(event => `data: ${JSON.stringify(event)}\n\n`).join('')
+        const length = reset ? 10000 : Buffer.byteLength(body)
+        socket.end(`HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: ${length}\r\nConnection: close\r\n\r\n${body}`)
+      },
+    },
+  })
+  try {
+    const events: StepEvent[] = []
+    for await (const event of codexStep({ ...req, transport: 'sse' }, 'test', new AbortController().signal, { authFile, httpUrl: `http://127.0.0.1:${server.port}` })) events.push(event)
+    expect(calls).toBe(2)
+    expect(events.some(event => event.type === 'stop')).toBe(true)
+    const malformed = await fake([{ rawSse: 'data: {invalid\n\n' }])
+    expect(malformed.calls).toBe(1)
+    expect(malformed.events.some(event => event.type === 'error')).toBe(true)
+  } finally {
+    server.stop(true)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
 
 test('HTTP 503 and a truncated SSE response are transient', async () => {
   for (const reply of [{ status: 503, body: { error: { type: 'server_error' } } }, { events: [created] }] satisfies Reply[]) {

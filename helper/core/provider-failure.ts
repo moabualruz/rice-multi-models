@@ -25,11 +25,11 @@ export class ProviderFailure extends Error {
   constructor(message: string, readonly info: FailureInfo) {
     super(oneLine(message, 300))
     const labels = [info.code, info.type].filter((value): value is string => !!value)
-    this.transient = info.status !== undefined
-      ? info.status === 408 || info.status === 429 || (info.status >= 500 && info.status <= 599)
-      : info.closeCode !== undefined
-        ? TRANSIENT_CLOSE.has(info.closeCode)
-        : labels.some(label => PERMANENT.has(label)) ? false
+    this.transient = labels.some(label => PERMANENT.has(label)) ? false
+      : info.status !== undefined
+        ? info.status === 408 || info.status === 429 || (info.status >= 500 && info.status <= 599)
+        : info.closeCode !== undefined
+          ? TRANSIENT_CLOSE.has(info.closeCode)
           : labels.some(label => TRANSIENT.has(label)) || (labels.length === 0 && (info.event === 'response.failed' || info.event === 'error')) || info.transient === true
   }
 
