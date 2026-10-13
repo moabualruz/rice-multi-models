@@ -23,9 +23,10 @@ jobs:
       - name: Bind native plugin test prerequisite
         shell: bash
         run: |
-          claude_bin=/home/mkh/.local/share/mise/installs/claude/2.1.296/claude
-          test -x "$claude_bin"
-          "$claude_bin" --version
+          df -Pk "$RUNNER_TEMP"
+          npm install --prefix "$RUNNER_TEMP/claude-native" --cache "$RUNNER_TEMP/npm-cache" --ignore-scripts=false --no-audit --no-fund @anthropic-ai/claude-code@2.1.296
+          claude_bin="$RUNNER_TEMP/claude-native/node_modules/.bin/claude"
+          test "$("$claude_bin" --version)" = '2.1.296 (Claude Code)'
           printf '%s\n' "${claude_bin%/*}" >> "$GITHUB_PATH"
       - run: bun run check
       - name: Reject typographic dashes in changed lines
