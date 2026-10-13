@@ -165,8 +165,8 @@ manually declared routes remain configuration, not discovered candidates.
 Reported context/input bounds constrain this mod's request sizing; output ceilings
 and unsupported capabilities constrain configured-provider requests without lifting
 user restrictions. The request estimate and 95% safety threshold are local policy,
-not exact tokenizer or available-output proof. The rejected custom summarizer has
-been removed. Routed compaction is temporarily unavailable: Claude Code 2.1.296's
+not exact tokenizer or available-output proof. Routed compaction is temporarily
+unavailable: Claude Code 2.1.296's
 public plugin API does not expose the actual native summary request on every path,
 so the mod refuses rather than inventing a replacement or falling back to another
 provider. The original transcript remains unchanged. Faithful native routed
@@ -371,13 +371,11 @@ Codex CLI on the same account. The session helper accepts up to 64 concurrent st
 
 ## Update
 
-Release **0.6.2** includes the shipped Node helper, automatic activation setup,
+Release **0.6.3** includes the shipped Node helper, automatic activation setup,
 native discovery, primary-window synchronization and temporary fail-closed routed
-compaction. The self-hosted Linux workflow installs the pinned Claude Code 2.1.296
-native test executable inside the job's temporary directory; no checks are skipped
-and no host-account executable path is required. The `rice-mods`
-marketplace tracks this repository's `main` without a tag pin. Update both the marketplace and your installed mod, then reload or
-restart the session:
+compaction. The `rice-mods` marketplace tracks this repository's `main` without a
+tag pin. Update both the marketplace and your installed mod, then reload or restart
+the session:
 
 ```bash
 claude plugin marketplace update rice-mods
@@ -395,9 +393,8 @@ are included in the plugin payload. No consumer dependency installation is neede
 The implementation handles macOS/Linux paths and Unix sockets, and Windows
 paths, npm shims and named pipes. Native Windows qualification must be performed
 on a Windows executor; portable code and simulated Windows tests are not a
-claim that Windows has been live-tested. See the verification notes for the
-actual tested environments rather than assuming every Node installation is
-qualified.
+claim that Windows has been live-tested. WSL uses the Linux runtime and does not
+qualify native Windows.
 
 **Contributors:** pinned npm development tools build and typecheck the Node
 helper. Bun is retained only for the existing contributor test suite, not for
@@ -423,60 +420,16 @@ that is release maintenance, not an installation step for every user.
   fake Responses/WebSocket failures, backoff, credential redaction, tool replay
   safety and account admission. `bun run check` includes the contributor tests,
   production typecheck and Git whitespace check.
-- Existing source CI is self-hosted Linux/Bun only. It is not evidence of the
-  Node clean-install or Windows qualification described above.
-- The mod itself must typecheck against the engine's laid types and pass native
+- GitHub Actions runs `bun run check` on Ubuntu 24.04 with pinned Node.js, Bun
+  and a job-local Claude Code test executable. The checks include Node runtime
+  tests, clean shipped-payload proof and isolated native lifecycle fixtures.
+- The mod itself must typecheck against the engine's plugin types and pass native
   validation. Helper typechecking alone does not establish activation, picker
   visibility, login, a live request or quota availability.
 
-### Verification notes (2026-10-13)
-
-| Environment | Verified scope |
-| --- | --- |
-| macOS, Node 22.22.3 and 24.18.0 | Node runtime tests and clean dist-only one-shot/session IPC |
-| macOS, Claude Code 2.1.296 | Native lifecycle fixtures, installed Git payload activation, automatic picker visibility, doctor and a live Codex request using the existing login |
-| macOS, Node 24.18.0 | Actual scoped Codex 0.162.1 installation into an empty home, without global installation or login |
-| Linux, Node 24.18.0 | Clean dist-only one-shot/session IPC, without development dependencies |
-| WSL2, Node 22.23.3, Claude Code 2.1.296 | Fresh-discovery local repair installed and reloaded; seven models freshly discovered. A separate clean session verified the primary-window correction: native usage and `/context` report 500000, override ownership survives hot reload, and a successful no-tools Codex turn refreshes the external status line to 500k |
-| Native Windows | Not executed; named-pipe and Windows command/path handling are not live qualification |
-
-The earlier runtime candidate passed 237 contributor tests, 20 Node tests,
-clean-payload proof and two native lifecycle fixtures. Those results are historical,
-not qualification of the fresh-discovery candidate. The live Mac request also used
-that prior bundle. The fresh-discovery candidate passes the canonical check: 332 contributor tests,
-21 Node tests, clean shipped-payload proof and three native lifecycle fixtures. It
-also passed strict native validation and hook API typechecking. The original
-large-session compaction completed after a connectivity interruption, but it was
-not authorized, and neither semantic preservation nor accepted delivery follows
-from that completion. It was not replayed. No further testing or repair was
-performed on that session during the primary-window correction.
-The raw-HTTP reset failure was reproduced before response headers and corrected
-with bounded transport retry, with focused Bun and compiled Node regression proof.
-WSL evidence does not qualify native Windows. The native primary-window integration
-uses the supported process-local override described above; numeric per-model
-registration and independent custom-subagent windows remain unsupported by the
-exposed Claude Code 2.1.296 plugin contract. The primary-window correction separately
-passed 346 contributor tests, three native lifecycle fixtures, strict validation
-and hook API typechecking, plus the isolated clean-session WSL checks above.
-The WSL test used a namespace-isolated copy, not a published or globally installed
-update. The custom compactor has since been removed; temporary fail-closed routed
-compaction and a fresh-known-bound switch guard are implemented separately. Normal
-native routed compaction and previous-model compaction before downsizing remain
-blocked on the host API, and the guard does not qualify unknown destination bounds.
-
-The fail-closed candidate passed the assembled canonical check: 341 contributor
-tests, 21 Node tests, clean shipped-payload proof and three native lifecycle
-fixtures, plus strict native validation and hook API typechecking. Independent
-review corrections cover tagged model routes and subagent model tracking. A new
-macOS tab with isolated settings and a namespace-isolated payload verified fresh
-discovery, successful no-tools Codex requests, native window changes from 500000
-to 272000 and back, and routed `/compact` refusal with the original test messages
-retained. Switching to native Claude restored its model-default window and released
-the plugin-owned override; switching back restored 500000 and a live request still
-succeeded. Shared settings were unchanged. Bound denial/equality and native Claude
-compaction passthrough are native-fixture evidence, not live oversized-context or
-live Anthropic compaction proof. The fail-closed candidate was not applied to WSL
-or any original session during these local checks.
+CI fixtures use local provider mocks and do not require personal accounts or
+provider credentials. They verify routing and lifecycle behavior, not live
+provider entitlement, quota or native Windows compatibility.
 
 ## Credits
 
