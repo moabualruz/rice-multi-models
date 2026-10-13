@@ -2,7 +2,7 @@ type Waiter = { grant: () => void; signal: AbortSignal; abort: () => void }
 type Account = { active: number; waiting: Waiter[] }
 
 export function codexStepLimit(env: Record<string, string | undefined> = process.env): number {
-  const value = env.RICE_CODEX_MAX_IN_FLIGHT ?? '6'
+  const value = env.RICE_CODEX_MAX_IN_FLIGHT ?? '0'
   if (!/^(?:[0-9]|1[0-5])$/.test(value)) throw new Error('RICE_CODEX_MAX_IN_FLIGHT must be 0 (disabled) or an integer from 1 to 15')
   return Number(value)
 }

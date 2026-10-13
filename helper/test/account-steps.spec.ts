@@ -35,14 +35,15 @@ test('account admission is FIFO, independent by account and cancellation-safe', 
   again()
 })
 
-test('limit defaults to six, supports opt-out, and rejects invalid configuration', () => {
-  expect(codexStepLimit({})).toBe(6)
+test('limit is off by default, configurable, and rejects invalid configuration', () => {
+  expect(codexStepLimit({})).toBe(0)
+  expect(codexStepLimit({ RICE_CODEX_MAX_IN_FLIGHT: '6' })).toBe(6)
   expect(codexStepLimit({ RICE_CODEX_MAX_IN_FLIGHT: '0' })).toBe(0)
   expect(codexStepLimit({ RICE_CODEX_MAX_IN_FLIGHT: '15' })).toBe(15)
   for (const value of ['-1', '16', 'six', '1.5', '']) expect(() => codexStepLimit({ RICE_CODEX_MAX_IN_FLIGHT: value })).toThrow()
 })
 
-test('eight real HTTP steps on one account queue at the default six without failing', async () => {
+test('eight real HTTP steps on one account queue at a configured limit of six without failing', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'mm-accounts-'))
   const authFile = join(dir, 'auth.json')
   writeFileSync(authFile, JSON.stringify({ auth_mode: 'chatgpt', tokens: { access_token: 'test-only', account_id: 'queue-test' } }))
@@ -73,7 +74,7 @@ test('eight real HTTP steps on one account queue at the default six without fail
   const abort = new AbortController()
   const pending = Array.from({ length: 8 }, async (_, index) => {
     const events: StepEvent[] = []
-    for await (const event of codexStep({ ...request, who: `agent-${index}` }, 'test', abort.signal, { authFile, env: {}, httpUrl: `http://127.0.0.1:${server.port}` })) events.push(event)
+    for await (const event of codexStep({ ...request, who: `agent-${index}` }, 'test', abort.signal, { authFile, env: { RICE_CODEX_MAX_IN_FLIGHT: '6' }, httpUrl: `http://127.0.0.1:${server.port}` })) events.push(event)
     return events
   })
   try {

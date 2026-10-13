@@ -158,7 +158,7 @@ HTTP status or headers of every refused WebSocket handshake: `auto` falls back t
 recover the structured rejection, while forced `ws` reports the transport error.
 
 `RICE_CODEX_MAX_IN_FLIGHT` configures FIFO admission **per ChatGPT account in each helper
-process**. Default: `6`; allowed: `1` through `15`; `0` disables it. Set it in the environment
+process**. Default: `0` (off: a queued step emits nothing, and Claude Code stops a subagent after 10 minutes without progress, so queueing behind long Codex steps killed agents); allowed: `1` through `15`. Set it in the environment
 before starting Claude Code. Waiting steps are cancellable and hold no provider connection.
 A slot is held through all attempts and released on success, failure or cancellation. Separate
 accounts have separate queues. This does not coordinate other Claude Code helpers or the
@@ -166,7 +166,7 @@ Codex CLI on the same account. The session helper's overall 16-step cap is uncha
 
 ## Update
 
-Version 0.5.2 is published from this repository's `main`, which the `rice-mods` marketplace
+Version 0.5.3 is published from this repository's `main`, which the `rice-mods` marketplace
 tracks without a tag pin. Update the marketplace and installed mod, then restart the session:
 
 ```bash
