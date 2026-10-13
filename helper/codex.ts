@@ -237,6 +237,20 @@ async function* closeAfter(stream: AsyncIterable<Uint8Array>, socket: CodexSocke
 
 export type CodexOptions = { authFile?: string; env?: Record<string, string | undefined>; httpUrl?: string; wsUrl?: string; pool?: SocketPool; maxInFlight?: number }
 
+/** Milliseconds an open Codex stream may send no bytes before the attempt is abandoned and retried; 0 disables. The default matches the Codex CLI stream_idle_timeout_ms. */
+export function streamIdleMs(env: Record<string, string | undefined> = process.env): number {
+  const value = env.RICE_CODEX_STREAM_IDLE_MS ?? '300000'
+  if (!/^\d{1,7}$/.test(value)) throw new Error('RICE_CODEX_STREAM_IDLE_MS must be 0 (disabled) or a whole number of milliseconds')
+  return Number(value)
+}
+
+async function* touching(stream: AsyncIterable<Uint8Array>, touch: () => void): AsyncGenerator<Uint8Array> {
+  for await (const chunk of stream) {
+    touch()
+    yield chunk
+  }
+}
+
 /** Answers one step with a Codex model: streamed text, reasoning and tool calls, then usage and the stop. */
 export async function* codexStep(req: StepRequest, model: string, signal: AbortSignal, options: CodexOptions = {}): AsyncGenerator<StepEvent> {
   const started = Date.now()
@@ -255,6 +269,9 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
   }
   const controller = new AbortController()
   signal = AbortSignal.any([signal, controller.signal])
+  // Each attempt gets its own signal so an idle stream can be abandoned without ending the step.
+  let attemptSignal = signal
+  const idleMs = streamIdleMs(options.env)
   const queue = new Channel<StepEvent>()
   const sessionId = `${req.session}:${req.who}`
   const choice: Transport = req.transport ?? 'auto'
@@ -280,26 +297,26 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
     const { stream: _stream, ...body } = request
     if (options.pool) {
       const account = createHash('sha256').update(auth['chatgpt-account-id']).digest('hex')
-      const taken = await options.pool.take(`${account}:${sessionId}`, url, headers, signal)
+      const taken = await options.pool.take(`${account}:${sessionId}`, url, headers, attemptSignal)
       transport = taken.reused ? 'ws reused' : 'ws'
-      const stream = taken.socket.response(body, signal, limitsOf, onLimits)
+      const stream = taken.socket.response(body, attemptSignal, limitsOf, onLimits)
 
       return options.pool.holds(taken.socket) ? stream : closeAfter(stream, taken.socket)
     }
-    const socket = await CodexSocket.open(url, headers, signal)
+    const socket = await CodexSocket.open(url, headers, attemptSignal)
     transport = 'ws'
 
-    return closeAfter(socket.response(body, signal, limitsOf, onLimits), socket)
+    return closeAfter(socket.response(body, attemptSignal, limitsOf, onLimits), socket)
   }
   const open = async (): Promise<AsyncIterable<Uint8Array>> => {
     if (choice !== 'sse') {
       try {
         return await openSocket()
       } catch (error) {
-        if (choice === 'ws' || signal.aborted || error instanceof CodexAuthError) throw error
+        if (choice === 'ws' || attemptSignal.aborted || error instanceof CodexAuthError) throw error
       }
     }
-    const stream = await openHttp(options.httpUrl ?? HTTP_URL, request, authFile, sessionId, signal, onAuth)
+    const stream = await openHttp(options.httpUrl ?? HTTP_URL, request, authFile, sessionId, attemptSignal, onAuth)
     transport = 'sse'
 
     return stream
@@ -322,6 +339,15 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
           for (const event of pending) queue.push(event)
           pending = []
         }
+        const attemptControl = new AbortController()
+        attemptSignal = AbortSignal.any([signal, attemptControl.signal])
+        let idleTimer: ReturnType<typeof setTimeout> | undefined
+        const arm = () => {
+          if (idleMs <= 0) return
+          if (idleTimer) clearTimeout(idleTimer)
+          idleTimer = setTimeout(() => attemptControl.abort(new ProviderFailure(`the Codex stream sent nothing for ${idleMs} ms`, { event: 'stream.idle', code: 'stream-idle', transient: true })), idleMs)
+        }
+        arm()
         const mapper = eventMapper(event => {
           ttfb ??= Date.now() - started
           if (event.type === 'tool_use') {
@@ -333,10 +359,11 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
         })
         try {
           signal.throwIfAborted()
-          const response = await fromResponses(await open(), req.target, mapper.emit, {
+          const response = await fromResponses(touching(await open(), arm), req.target, mapper.emit, {
             toolNames: originalToolNames(body),
             inputTokens: estimateInputTokens(request),
           })
+          clearTimeout(idleTimer)
           flush()
           const usage = response.usage
           queue.push({
@@ -350,7 +377,10 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
           queue.push({ type: 'stop', reason: stopOf(response, mapper.toolCalls()) })
           return
         } catch (error) {
-          const failure = error instanceof ProviderFailure ? error : new ProviderFailure(
+          clearTimeout(idleTimer)
+          const idleReason = attemptControl.signal.reason
+          const idled = !signal.aborted && attemptControl.signal.aborted && idleReason instanceof ProviderFailure
+          const failure = idled ? idleReason : error instanceof ProviderFailure ? error : new ProviderFailure(
             error instanceof CodexAuthError ? error.message : signal.aborted ? 'step aborted' : oneLine(error instanceof Error ? error.message : String(error)),
             { event: signal.aborted ? 'request.aborted' : error instanceof CodexAuthError ? 'auth.error' : 'response.decode', code: error instanceof CodexAuthError ? 'codex-auth' : 'stream-error' },
           )

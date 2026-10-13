@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import type { StepEvent, StepRequest } from '../../hooks/protocol.ts'
-import { codexStep } from '../codex.ts'
+import { codexStep, streamIdleMs } from '../codex.ts'
 import { MAX_ATTEMPTS, MAX_RETRY_WAIT_MS, maxAttempts, OVERLOAD_MAX_ATTEMPTS, ProviderFailure, retryAfterMs, retryDelay, waitForRetry } from '../core/provider-failure.ts'
 
 const req: StepRequest = { target: 'codex/test', system: 'Test', tools: [{ name: 'echo', description: 'Echo', schema: { type: 'object' } }], transcript: [{ role: 'user', content: 'Hi' }], who: 'main', session: 'retry-test' }
@@ -249,4 +249,45 @@ test('provider overload is transient with a longer, capped schedule', () => {
   const permanent = new ProviderFailure('model unavailable for this account', { event: 'error', code: 'model_not_found' })
   expect(permanent.overloaded).toBe(false)
   expect(permanent.transient).toBe(false)
+})
+
+test('stream idle timeout parses its setting and rejects invalid values', () => {
+  expect(streamIdleMs({})).toBe(300_000)
+  expect(streamIdleMs({ RICE_CODEX_STREAM_IDLE_MS: '0' })).toBe(0)
+  expect(streamIdleMs({ RICE_CODEX_STREAM_IDLE_MS: '200' })).toBe(200)
+  for (const value of ['-1', 'soon', '1.5', '', '99999999']) expect(() => streamIdleMs({ RICE_CODEX_STREAM_IDLE_MS: value })).toThrow()
+})
+
+test('a stream that goes silent is abandoned and the step retried', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mm-idle-'))
+  const authFile = join(dir, 'auth.json')
+  writeFileSync(authFile, JSON.stringify({ auth_mode: 'chatgpt', tokens: { access_token: 'test-only', account_id: 'idle-test' } }))
+  const encoder = new TextEncoder()
+  let calls = 0
+  let cancelled = 0
+  const server = Bun.serve({
+    port: 0,
+    async fetch(request) {
+      await request.json()
+      if (calls++ === 0) {
+        return new Response(new ReadableStream<Uint8Array>({
+          start(sink) { sink.enqueue(encoder.encode(`data: ${JSON.stringify(created)}\n\n`)) },
+          cancel() { cancelled++ },
+        }), { headers: { 'content-type': 'text/event-stream' } })
+      }
+      return new Response(success.map(event => `data: ${JSON.stringify(event)}\n\n`).join(''), { headers: { 'content-type': 'text/event-stream' } })
+    },
+  })
+  try {
+    const events: StepEvent[] = []
+    for await (const event of codexStep({ ...req, transport: 'sse' }, 'test', new AbortController().signal, { authFile, env: { RICE_CODEX_STREAM_IDLE_MS: '200' }, httpUrl: `http://127.0.0.1:${server.port}/responses` })) events.push(event)
+    expect(calls).toBe(2)
+    expect(events.find(event => event.type === 'stop')).toEqual({ type: 'stop', reason: 'end_turn' })
+    expect(events.some(event => event.type === 'error')).toBe(false)
+    await Bun.sleep(50)
+    expect(cancelled).toBe(1)
+  } finally {
+    server.stop(true)
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

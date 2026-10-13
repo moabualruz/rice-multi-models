@@ -12,7 +12,8 @@ import { failedStep } from '../hooks/protocol.ts'
 import { runStep } from './run.ts'
 import { SocketPool } from './socket.ts'
 
-const MAX_IN_FLIGHT = 16
+// One orchestrator session can run a dozen routed subagents plus their helpers; 16 refused real work.
+const MAX_IN_FLIGHT = 64
 const encoder = new TextEncoder()
 
 function sameToken(given: unknown, token: string): boolean {

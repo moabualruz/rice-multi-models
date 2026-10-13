@@ -149,6 +149,11 @@ fast rather than retrying before the provider permits. Cancellation interrupts a
 connection setup and retry waits. The existing one-time HTTP 401 login renewal remains
 separate from transient retries.
 
+An attempt whose connection or stream sends no bytes for `RICE_CODEX_STREAM_IDLE_MS`
+(default `300000`, the Codex CLI stream idle default; `0` disables) is abandoned and retried as
+a transient `stream.idle` failure, under the same tool-call replay boundary. A silent stream
+no longer stalls a subagent until Claude Code stops it.
+
 No attempt is replayed after it emits a whole tool call. Before that boundary, text, reasoning
 and signatures are buffered until completion or the first tool call, then released in order.
 This prevents a failed attempt's partial answer from contaminating the next one. Final errors
@@ -162,11 +167,11 @@ process**. Default: `0` (off: a queued step emits nothing, and Claude Code stops
 before starting Claude Code. Waiting steps are cancellable and hold no provider connection.
 A slot is held through all attempts and released on success, failure or cancellation. Separate
 accounts have separate queues. This does not coordinate other Claude Code helpers or the
-Codex CLI on the same account. The session helper's overall 16-step cap is unchanged.
+Codex CLI on the same account. The session helper accepts up to 64 concurrent steps (16 refused real orchestrator fan-out); more fail fast with "too many steps at once".
 
 ## Update
 
-Version 0.5.3 is published from this repository's `main`, which the `rice-mods` marketplace
+Version 0.5.4 is published from this repository's `main`, which the `rice-mods` marketplace
 tracks without a tag pin. Update the marketplace and installed mod, then restart the session:
 
 ```bash
