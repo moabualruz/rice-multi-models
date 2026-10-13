@@ -93,10 +93,10 @@ export async function codexRequest(
   if (response.status !== 401) {
     return response;
   }
-  await response.body?.cancel();
   if (!(await savedAuth(authFile)).canRefresh) {
     return response;
   }
+  await response.body?.cancel();
   const renewed = await waitForAuth(renewAuth(authFile, headers, options), signal);
   signal.throwIfAborted();
   return send(renewed);

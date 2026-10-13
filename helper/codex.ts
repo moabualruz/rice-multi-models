@@ -14,6 +14,8 @@ import { CodexAuthError, codexRequest, readCodexAuth } from './openai/auth.ts'
 import type { CodexAuthHeaders } from './openai/auth.ts'
 import { openaiInstructions } from './openai/instructions.ts'
 import { CodexSocket, SocketPool } from './socket.ts'
+import { MAX_ATTEMPTS, ProviderFailure, retryAfterMs, retryDelay, waitForRetry } from './core/provider-failure.ts'
+import { oneLine } from './styx/errors.ts'
 
 const HTTP_URL = 'https://chatgpt.com/backend-api/codex/responses'
 const WS_URL = 'wss://chatgpt.com/backend-api/codex/responses'
@@ -22,12 +24,9 @@ export const ORIGINATOR = 'rice_multi_models'
 const WS_BETA = 'responses_websockets=2026-02-06'
 const SSE_BETA = 'responses=experimental'
 
-export class UpstreamError extends Error {
-  constructor(
-    message: string,
-    readonly status?: number,
-  ) {
-    super(message)
+export class UpstreamError extends ProviderFailure {
+  constructor(status: number, detail: ProviderFailure, retryAfter?: number) {
+    super(detail.message, { ...detail.info, event: 'http.response', status, retryAfterMs: retryAfter })
   }
 }
 
@@ -87,18 +86,17 @@ export function limitsOf(event: Record<string, unknown>): Limits | null {
   return { plan: typeof event.plan_type === 'string' ? event.plan_type : undefined, windows }
 }
 
-/** What a failed response says, kept short; provider error bodies hold no credentials. */
-async function failureText(response: Response): Promise<string> {
-  const text = (await response.text().catch(() => '')).slice(0, 2000)
+/** Only structured error metadata crosses this boundary; non-JSON bodies may echo login headers. */
+async function httpFailure(response: Response): Promise<UpstreamError> {
+  const text = (await response.text().catch(() => '')).slice(0, 4096)
+  let parsed: unknown
   try {
-    const parsed = JSON.parse(text) as { error?: { message?: string } | string; detail?: string; message?: string }
-    const said = typeof parsed.error === 'string' ? parsed.error : (parsed.error?.message ?? parsed.detail ?? parsed.message)
-    if (said) return said.slice(0, 300)
+    parsed = JSON.parse(text)
   } catch {
-    // not JSON: fall through
+    parsed = { message: 'provider returned no structured error' }
   }
-
-  return text.replace(/\s+/g, ' ').trim().slice(0, 300)
+  const detail = ProviderFailure.event(parsed)
+  return new UpstreamError(response.status, detail, retryAfterMs(response.headers.get('retry-after')))
 }
 
 /** One response over HTTP with server-sent events; a 401 renews the Codex login once. */
@@ -112,7 +110,7 @@ async function openHttp(url: string, request: ResponsesRequest, authFile: string
       redirect: 'error',
     }),
   )
-  if (!response.ok || !response.body) throw new UpstreamError(`Codex answered HTTP ${response.status}: ${await failureText(response)}`, response.status)
+  if (!response.ok || !response.body) throw await httpFailure(response)
 
   return response.body as unknown as AsyncIterable<Uint8Array>
 }
@@ -243,11 +241,9 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
 
     return
   }
+  const controller = new AbortController()
+  signal = AbortSignal.any([signal, controller.signal])
   const queue = new Channel<StepEvent>()
-  const mapper = eventMapper(event => {
-    ttfb ??= Date.now() - started
-    queue.push(event)
-  })
   const sessionId = `${req.session}:${req.who}`
   const choice: Transport = req.transport ?? 'auto'
   const onLimits = (limits: Limits) => queue.push({ type: 'limits', limits })
@@ -257,13 +253,14 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
     const url = options.wsUrl ?? WS_URL
     const { stream: _stream, ...body } = request
     if (options.pool) {
-      const taken = await options.pool.take(sessionId, url, headers)
+      const account = createHash('sha256').update(auth['chatgpt-account-id']).digest('hex')
+      const taken = await options.pool.take(`${account}:${sessionId}`, url, headers, signal)
       transport = taken.reused ? 'ws reused' : 'ws'
       const stream = taken.socket.response(body, signal, limitsOf, onLimits)
 
       return options.pool.holds(taken.socket) ? stream : closeAfter(stream, taken.socket)
     }
-    const socket = await CodexSocket.open(url, headers)
+    const socket = await CodexSocket.open(url, headers, signal)
     transport = 'ws'
 
     return closeAfter(socket.response(body, signal, limitsOf, onLimits), socket)
@@ -281,29 +278,67 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
 
     return stream
   }
-  void (async () => {
+  const task = (async () => {
     try {
-      const response = await fromResponses(await open(), req.target, mapper.emit, {
-        toolNames: originalToolNames(body),
-        inputTokens: estimateInputTokens(request),
-      })
-      const usage = response.usage
-      queue.push({
-        type: 'usage',
-        in: usage.input_tokens,
-        out: usage.output_tokens,
-        cacheRead: usage.cache_read_input_tokens ?? 0,
-        cacheWrite: usage.cache_creation_input_tokens ?? 0,
-        reasoning: response.multi_usage?.reasoning_tokens,
-      })
-      queue.push({ type: 'stop', reason: stopOf(response, mapper.toolCalls()) })
-    } catch (error) {
-      const text = error instanceof Error ? error.message : String(error)
-      queue.push({ type: 'error', kind: error instanceof UpstreamError || error instanceof CodexAuthError ? 'request' : 'response', text: `codex: ${text}` })
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        let pending: StepEvent[] = []
+        let committed = false
+        const flush = () => {
+          for (const event of pending) queue.push(event)
+          pending = []
+        }
+        const mapper = eventMapper(event => {
+          ttfb ??= Date.now() - started
+          if (event.type === 'tool_use') {
+            committed = true
+            flush()
+          }
+          if (committed) queue.push(event)
+          else pending.push(event)
+        })
+        try {
+          signal.throwIfAborted()
+          const response = await fromResponses(await open(), req.target, mapper.emit, {
+            toolNames: originalToolNames(body),
+            inputTokens: estimateInputTokens(request),
+          })
+          flush()
+          const usage = response.usage
+          queue.push({
+            type: 'usage',
+            in: usage.input_tokens,
+            out: usage.output_tokens,
+            cacheRead: usage.cache_read_input_tokens ?? 0,
+            cacheWrite: usage.cache_creation_input_tokens ?? 0,
+            reasoning: response.multi_usage?.reasoning_tokens,
+          })
+          queue.push({ type: 'stop', reason: stopOf(response, mapper.toolCalls()) })
+          return
+        } catch (error) {
+          const failure = error instanceof ProviderFailure ? error : new ProviderFailure(
+            error instanceof CodexAuthError ? error.message : signal.aborted ? 'step aborted' : oneLine(error instanceof Error ? error.message : String(error)),
+            { event: signal.aborted ? 'request.aborted' : error instanceof CodexAuthError ? 'auth.error' : 'response.decode', code: error instanceof CodexAuthError ? 'codex-auth' : 'stream-error' },
+          )
+          const delay = retryDelay(failure, attempt)
+          if (!signal.aborted && failure.transient && !committed && attempt < MAX_ATTEMPTS && delay !== null) {
+            await waitForRetry(delay, signal)
+            continue
+          }
+          queue.push({ type: 'error', kind: error instanceof UpstreamError || error instanceof CodexAuthError ? 'request' : 'response', text: `codex: ${failure.finalText(attempt)}` })
+          return
+        }
+      }
+    } catch {
+      queue.push({ type: 'error', kind: 'request', text: 'codex: event=request.aborted, code=aborted, type=unknown; step aborted during retry wait' })
     } finally {
       queue.close()
     }
   })()
-  for await (const event of queue) yield event
-  yield { type: 'stats', ttfbMs: ttfb, totalMs: Date.now() - started, transport }
+  try {
+    for await (const event of queue) yield event
+    yield { type: 'stats', ttfbMs: ttfb, totalMs: Date.now() - started, transport }
+  } finally {
+    controller.abort()
+    await task
+  }
 }

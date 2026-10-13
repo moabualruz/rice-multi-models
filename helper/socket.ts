@@ -2,12 +2,17 @@
 // Codex CLI keeps its own. A pool keeps one per conversation for the session helper; the one-shot helper
 // opens one per request and closes it after.
 import type { Limits } from '../hooks/protocol.ts'
+import { ProviderFailure } from './core/provider-failure.ts'
 
 const OPEN_MS = 15_000
 const ENDS = new Set(['response.completed', 'response.failed', 'response.incomplete', 'error'])
 const encoder = new TextEncoder()
 
-export class SocketError extends Error {}
+export class SocketError extends ProviderFailure {
+  constructor(message: string, event = 'websocket.error', closeCode?: number, status?: number) {
+    super(message, { event, code: 'websocket-error', closeCode, status, transient: closeCode === undefined && status === undefined })
+  }
+}
 
 type Parsed = Record<string, unknown>
 
@@ -33,33 +38,49 @@ export class CodexSocket {
       }
       this.route?.(parsed, text)
     })
-    const lost = (why: string) => {
+    const lost = (error: SocketError) => {
       this.closed = true
-      this.drop?.(new SocketError(why))
+      this.drop?.(error)
     }
-    socket.addEventListener('close', event => lost(`the Codex WebSocket closed mid-response (${event.code})`))
-    socket.addEventListener('error', () => lost('the Codex WebSocket failed mid-response'))
+    socket.addEventListener('close', event => lost(new SocketError(`the Codex WebSocket closed mid-response (${event.code})`, 'websocket.close', event.code)))
+    socket.addEventListener('error', () => lost(new SocketError('the Codex WebSocket failed mid-response')))
   }
 
   /** A connection once the handshake is done; headers carry the login, which the backend checks here. */
-  static open(url: string, headers: Record<string, string>): Promise<CodexSocket> {
+  static open(url: string, headers: Record<string, string>, signal?: AbortSignal): Promise<CodexSocket> {
+    signal?.throwIfAborted()
     const socket = new WebSocket(url, { headers } as unknown as string[])
 
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        reject(new SocketError('the Codex WebSocket did not open in time'))
-        socket.close()
-      }, OPEN_MS)
-      const fail = (why: string) => {
+      const cleanup = () => {
         clearTimeout(timer)
-        reject(new SocketError(why))
+        signal?.removeEventListener('abort', abort)
+        socket.removeEventListener('open', opened)
+        socket.removeEventListener('error', refused)
+        socket.removeEventListener('close', closed)
       }
-      socket.addEventListener('open', () => {
-        clearTimeout(timer)
+      const fail = (error: unknown) => {
+        cleanup()
+        reject(error)
+        socket.close()
+      }
+      const abort = () => fail(signal?.reason)
+      const opened = () => {
+        cleanup()
         resolve(new CodexSocket(socket))
-      })
-      socket.addEventListener('error', () => fail('the Codex WebSocket was refused'))
-      socket.addEventListener('close', event => fail(`the Codex WebSocket closed before it opened (${event.code})`))
+      }
+      const refused = (event: Event) => {
+        const message = 'message' in event && typeof event.message === 'string' ? event.message : ''
+        const status = /(?:server response|HTTP)[^0-9]*(\d{3})/i.exec(message)?.[1]
+        fail(new SocketError('the Codex WebSocket was refused', 'websocket.open', undefined, status ? Number(status) : undefined))
+      }
+      const closed = (event: CloseEvent) => fail(new SocketError(`the Codex WebSocket closed before it opened (${event.code})`, 'websocket.close', event.code))
+      const timer = setTimeout(() => fail(new SocketError('the Codex WebSocket did not open in time', 'websocket.open')), OPEN_MS)
+      socket.addEventListener('open', opened)
+      socket.addEventListener('error', refused)
+      socket.addEventListener('close', closed)
+      signal?.addEventListener('abort', abort, { once: true })
+      if (signal?.aborted) abort()
     })
   }
 
@@ -78,6 +99,7 @@ export class CodexSocket {
    * since the backend would go on streaming it; a finished one leaves it open for the next.
    */
   response(body: Parsed, signal: AbortSignal, readLimits: LimitsReader, onLimits: (limits: Limits) => void): AsyncIterable<Uint8Array> {
+    signal.throwIfAborted()
     if (!this.isUsable) throw new SocketError('the Codex WebSocket is not open')
     this.busy = true
     const frames: Uint8Array[] = []
@@ -109,7 +131,7 @@ export class CodexSocket {
     }
     this.drop = error => finish(error)
     const abort = () => {
-      finish(new SocketError('aborted'))
+      finish(new SocketError('aborted', 'request.aborted', 1008))
       this.close()
     }
     signal.addEventListener('abort', abort, { once: true })
@@ -152,10 +174,10 @@ export class SocketPool {
   constructor(private readonly idleMs = 5 * 60_000) {}
 
   /** The conversation's open, idle connection, or a new one (kept for next time unless the old one is busy). */
-  async take(key: string, url: string, headers: Record<string, string>): Promise<{ socket: CodexSocket; reused: boolean }> {
+  async take(key: string, url: string, headers: Record<string, string>, signal?: AbortSignal): Promise<{ socket: CodexSocket; reused: boolean }> {
     const kept = this.sockets.get(key)
     if (kept?.isUsable) return { socket: kept, reused: true }
-    const socket = await CodexSocket.open(url, headers)
+    const socket = await CodexSocket.open(url, headers, signal)
     if (!kept || kept.closed) this.sockets.set(key, socket)
 
     return { socket, reused: false }

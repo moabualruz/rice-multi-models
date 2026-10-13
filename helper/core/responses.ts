@@ -1,4 +1,4 @@
-// Copied unchanged from greenpolo/cc-multi-cli-plugin plugins/multi-core/src/gateway/responses.ts at 3dcb057
+// Adapted from greenpolo/cc-multi-cli-plugin plugins/multi-core/src/gateway/responses.ts at 3dcb057
 // (Apache-2.0, Copyright 2026 greenpolo; see LICENSES/cc-multi-cli-plugin.Apache-2.0.txt and its NOTICE).
 import { isDeepStrictEqual } from 'node:util';
 import { type NormalizedContent, normalizeConversation, textContent } from './conversation.ts';
@@ -11,6 +11,7 @@ import type {
   StopReason,
 } from './messages.ts';
 import { isRecord } from './record.ts';
+import { ProviderFailure } from './provider-failure.ts';
 import { type SafeguardProvider, safeguardResults } from './safeguards.ts';
 import { callId, toolName } from './tools.ts';
 
@@ -620,7 +621,7 @@ class ResponseStream {
         return;
       case 'response.failed':
       case 'error':
-        throw new Error(event.message ?? event.response?.error?.message ?? 'OpenAI stream failed');
+        throw ProviderFailure.event(event);
       case 'response.completed':
       case 'response.done':
       case 'response.incomplete':
