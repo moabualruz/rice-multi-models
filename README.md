@@ -2,9 +2,10 @@
 
 A Claude Code mod that runs non-Anthropic models as ordinary session and
 subagent models, with Claude Code's own tools, permissions and transcript.
-Native routed compaction is temporarily unavailable (see below). No proxy: Claude Code keeps talking to Anthropic for Claude models,
-and requests for a routed model never leave the session except to the
-provider itself.
+Main turns, native compaction, tool-internal inference and evaluators use each
+conversation's selected provider. The native adapter runs inside the official
+Claude executable and calls providers directly. It opens no inference listener,
+proxy or gateway. Start with `rice-claude` to activate it before native startup.
 
 Providers:
 
@@ -26,7 +27,7 @@ Providers:
 /plugin install rice-multi-models --marketplace moabualruz/rice-mods
 ```
 
-Install in a terminal session using Claude Code 2.1.296 and Node.js 22 or newer.
+Install in a terminal session using Claude Code 2.1.299 and Node.js 22 or newer.
 The mod ships its compiled helper and runtime dependencies: **Bun, a TypeScript
 compiler, curl, jq and a manual package install are not consumer requirements.**
 
@@ -46,6 +47,30 @@ installing a mod cannot grant a subscription, credit, API key or model entitleme
 Use `/rice-models setup` to recheck and repair setup, or `/rice-models doctor` for
 read-only diagnostics. Neither changes your selected session model.
 
+For full native inference, run `/rice-models setup native` once, then start a new
+terminal session with `rice-claude`. This installs an owned launcher in
+`~/.local/bin`; it preserves the official `claude` executable and updater. The
+launcher finds the current installed plugin on every invocation, validates native
+adapter activation, and refuses an unverified host version. An already running
+process needs a new launch to load the adapter.
+
+`rice-claude` accepts Claude's normal arguments, including
+`rice-claude --model codex/gpt-6.1-sol` and `rice-claude --resume <session-id>`.
+An explicit model takes precedence. UUID resumes from adapter sessions retain
+their saved primary selection before startup compaction runs. When resuming an
+older session or using an interactive resume picker, pass `--model <id>` to bind
+its provider before startup inference. Provider approvals are stored in the
+native inline plugin scope used by the launcher. Approve declared providers in
+that session with `/rice-models approve <provider>`.
+
+Native WebSearch uses a SearXNG JSON search endpoint supplied through
+`RICE_MULTI_MODELS_SEARCH_URL`, for example `https://search.example/search`.
+That service retrieves source records; the selected conversation provider makes
+all inference calls. WebFetch keeps native page retrieval and routes its native
+summarizer through the same owner. Missing retrieval configuration is reported
+without switching providers. `/rice-models doctor` reports adapter activation
+and whether search is configured.
+
 ### First-run checklist
 
 1. Make Node.js 22 or newer available to the process that starts Claude Code.
@@ -59,7 +84,8 @@ read-only diagnostics. Neither changes your selected session model.
    all downloaded or installed globally on your behalf.
 4. Run `/rice-models setup` after changing runtime/login/configuration, then
    `/rice-models models` or `/model`. A listed candidate is not a live access check.
-5. Select an exact model id with `/model <id>`. A provider's authentication,
+5. Run `/rice-models setup native`, start a new session with `rice-claude`, and
+   select an exact model id with `/model <id>`. A provider's authentication,
    approval, subscription or quota refusal is reported; the mod never silently
    switches to another provider.
 
@@ -126,17 +152,18 @@ actually resolves; do not reinstall Codex when its login is already present.
 
 | Where | How |
 | --- | --- |
-| Main session | `/model codex/gpt-6.1-sol` (or any id from `/rice-models models`), `claude --model codex/...` |
+| Main session | `/model codex/gpt-6.1-sol` (or any id from `/rice-models models`), `rice-claude --model codex/...` |
 | A subagent type of yours | `model: codex/gpt-6.1-sol` in its agent file (`.claude/agents/*.md`) |
 | Ad hoc | the agent types `rice-multi-models:codex` and `rice-multi-models:codex-explore` |
 | Mixed | a Claude session with Codex subagents, or a Codex session with Claude subagents (`model: haiku`) |
 
-`/effort` and `--effort` reach the Codex request. Reasoning streams as thinking
-and is carried back (encrypted) across tool calls. `/compact`, automatic and
-precomputed compaction on routed models explicitly refuse without custom summaries,
-provider fallback or transcript replacement. Native Claude compaction is unchanged
-when its model is known. A subagent whose active model is unknown after reload also
-refuses compaction until its next observed turn, rather than guessing a provider.
+`/effort` and `--effort` reach the selected provider. Reasoning and tool calls
+retain their native stream shapes. With the adapter active, manual and automatic
+compaction use the host's actual prompt, transcript selection and bookkeeping.
+Temporary skill aliases, background model aliases, and auxiliary requests keep
+the selected owner. An explicitly different child model owns its own provider.
+Without the adapter, legacy main-turn routing remains available and routed
+compaction refuses with a launcher instruction.
 
 `/rice-models` shows the helper, transport, effort, ChatGPT rate limits and
 the last step. `/rice-models effort <level>`, `/rice-models transport auto|ws|sse`
@@ -168,23 +195,20 @@ removes their obsolete `behavesAs: claude-sonnet-4-6` alias, which otherwise mak
 the native engine enforce Sonnet's context window for a routed model. Custom rows,
 rows with extra fields and rows marked edited in the ownership record are retained.
 
-In a routed session, exposed auxiliary completions and classification requests
-use the selected provider, including callers that request the host's small Claude
-model. Explicit routed targets still select that exact route. An unreadable fork
-transcript or a provider failure cannot fall back to native Claude. These hooks
-cover the exposed plugin operations; they do not establish interception of every
-internal inference path in the host.
+The adapter correlates native Worker instances, dispatch IDs and operation ports,
+then retains immutable ownership across asynchronous continuations. It routes
+native Messages requests inside the host process using the existing direct
+clients. Concurrent children keep distinct owners; child completions,
+classification and transcript forks do not borrow the parent's provider.
+Unknown ownership and failed providers never select a different provider.
 
-Reported context/input bounds constrain this mod's request sizing; output ceilings
-and unsupported capabilities constrain configured-provider requests without lifting
-user restrictions. The request estimate and 95% safety threshold are local policy,
-not exact tokenizer or available-output proof. Routed compaction is temporarily
-unavailable: Claude Code 2.1.296's
-public plugin API does not expose the actual native summary request on every path,
-so the mod refuses rather than inventing a replacement or falling back to another
-provider. The original transcript remains unchanged. Faithful native routed
-compaction, preferably using the previous model when its discovered window is
-larger, remains a tracked host-API blocker, not completed delivery.
+Native request caps, named tool choice, structured output, domain restrictions,
+cancellation and exact stop strings are preserved across protocol families.
+Configured ceilings remain in force. Codex subscription inference has no server
+output-cap field; a reported overrun fails the native contract, while local stop
+handling cancels the owned stream. This cannot guarantee a cap on billed server
+generation. Model capabilities and provider entitlement still depend on the
+actual selected model. Local input estimates remain estimates.
 
 Before a model switch, the mod denies a switch whose native `context_tokens` exceed
 fresh exact destination metadata: the minimum of reported input limit and active
@@ -196,7 +220,7 @@ new instructions and output also need room). Server-side search/fetch transcript
 blocks are retained as historical data rather than rerun as client tools.
 
 **Native primary-window integration:** For the main routed native-provider model,
-the mod synchronizes Claude Code 2.1.296's supported process-local
+the mod synchronizes Claude Code 2.1.299's supported process-local
 `CLAUDE_CODE_MAX_CONTEXT_TOKENS` override from fresh metadata for the exact active
 model, using `contextWindow ?? maxContextWindow`. This sets the native context
 meter's window and automatic compaction threshold, not provider entitlement or
@@ -384,10 +408,11 @@ Codex CLI on the same account. The session helper accepts up to 64 concurrent st
 
 ## Update
 
-Release **0.6.4** adds legacy picker migration and auxiliary completion and
-classification routing without native provider fallback. It retains the shipped
-Node helper, native discovery, primary-window synchronization and temporary
-fail-closed routed compaction. The `rice-mods` marketplace tracks this repository's `main` without a
+Release **0.7.0** adds the native adapter and verified launcher, direct native
+compaction, web inference, prompt/agent evaluators, concurrent child ownership,
+temporary skill aliases, startup approvals and UUID resume binding. The shipped
+Node helper, discovery, legacy picker migration and primary-window integration
+remain available. The `rice-mods` marketplace tracks this repository's `main` without a
 tag pin. Update both the marketplace and your installed mod, then reload or restart
 the session:
 
@@ -398,14 +423,19 @@ claude plugin update rice-multi-models@rice-mods
 
 ## Requirements and platform scope
 
-**Consumers:** Claude Code 2.1.296 and Node.js 22 or newer. Optional provider CLIs,
+**Consumers:** The full native adapter is qualified for the official compiled
+Claude Code **2.1.299** executable on macOS and Linux (including WSL), with
+Node.js 22 or newer. Other host versions refuse until their compatibility proof
+is added. Launch through `rice-claude`; IDE, desktop and SDK clients must use this
+verified entry point rather than an unmodified launch path. Optional provider CLIs,
 account access and credentials depend on the providers you actually use; Codex
 login is not a requirement for using a declared local endpoint. The compiled
 helper, authenticated WebSocket implementation and provider instruction asset
 are included in the plugin payload. No consumer dependency installation is needed.
 
-The implementation handles macOS/Linux paths and Unix sockets, and Windows
-paths, npm shims and named pipes. Native Windows qualification must be performed
+The legacy Node helper handles macOS/Linux paths and Unix sockets, and Windows
+paths, npm shims and named pipes. The native preload launcher supports macOS and
+Linux only. Native Windows qualification must be performed
 on a Windows executor; portable code and simulated Windows tests are not a
 claim that Windows has been live-tested. WSL uses the Linux runtime and does not
 qualify native Windows.
@@ -423,7 +453,7 @@ that is release maintenance, not an installation step for every user.
 - `npm run build` regenerates the shipped helper. Commit the artifact with its
   source changes so a Git-backed marketplace install includes executable code.
 - `npm run build:check` verifies the committed artifact matches its source.
-- `npm run typecheck` checks production helper source against Node types.
+- `npm run typecheck` checks production helper and adapter source against Node types.
 - `npm run test:node` exercises the Node helper and runtime-specific behavior.
 - `npm run test:native` runs lifecycle fixtures through `claude plugin test` in
   an isolated temporary plugin payload, separate from Bun's test files.
@@ -432,6 +462,12 @@ that is release maintenance, not an installation step for every user.
   completions and classifications route without native provider calls. Its
   metadata and provider events are deterministic fixtures, not live entitlement
   or discovery evidence.
+- `npm run test:adapter` runs actual native main/child loops, mixed-provider
+  auxiliary calls, skills, web tools, auto classifiers, prompt and agent hooks,
+  manual/automatic compaction, UUID resume and partial-stream failure. Anthropic
+  inference is denied; direct local providers exercise all five API protocols.
+- `npm run test:launcher` installs only in an isolated home and verifies path
+  spaces, unrelated-file protection and normal plugin-cache updates.
 - `node scripts/proof-clean-runtime.mjs` copies only the shipped artifact into
   an empty home/path with spaces and tests a local provider through one-shot and
   session-helper IPC, without Bun, curl, jq or development dependencies.

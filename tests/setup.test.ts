@@ -171,8 +171,8 @@ test('startup notice has no invented default and includes fresh source status an
   expect(summary).toContain('process-global override does not establish independent custom-subagent windows')
   expect(summary).toContain('mixed custom models and restoration on plugin unload remain limitations')
   expect(summary).not.toContain('200k fallback')
-  expect(summary).toContain('Native routed compaction is unavailable')
-  expect(summary).toContain('Native Claude compaction is unchanged')
+  expect(summary).toContain('Start with rice-claude for direct native inference')
+  expect(summary).toContain('/rice-models setup native explicitly installs the launcher')
   const state = new Map<string, unknown>()
   const logs: string[] = []
   const port = { get: async (key: string) => state.get(key), set: async (key: string, value: unknown) => { state.set(key, value) }, log: (text: string) => { logs.push(text) } }

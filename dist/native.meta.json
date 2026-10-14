@@ -1,0 +1,12 @@
+{
+  "format": 1,
+  "adapter": 1,
+  "hosts": [
+    "2.1.299"
+  ],
+  "platforms": [
+    "darwin",
+    "linux"
+  ],
+  "sha256": "989a642bc6c79c4b5e431c9da65bb443a106df833d94863e592a627ec847ddc2"
+}

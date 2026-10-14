@@ -27,9 +27,9 @@ jobs:
         shell: bash
         run: |
           df -Pk "$RUNNER_TEMP"
-          npm install --prefix "$RUNNER_TEMP/claude-native" --cache "$RUNNER_TEMP/npm-cache" --ignore-scripts=false --no-audit --no-fund @anthropic-ai/claude-code@2.1.296
+          npm install --prefix "$RUNNER_TEMP/claude-native" --cache "$RUNNER_TEMP/npm-cache" --ignore-scripts=false --no-audit --no-fund @anthropic-ai/claude-code@2.1.299
           claude_bin="$RUNNER_TEMP/claude-native/node_modules/.bin/claude"
-          test "$("$claude_bin" --version)" = '2.1.296 (Claude Code)'
+          test "$("$claude_bin" --version)" = '2.1.299 (Claude Code)'
           printf '%s\n' "${claude_bin%/*}" >> "$GITHUB_PATH"
       - run: bun run check
       - name: Reject typographic dashes in changed lines

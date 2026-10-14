@@ -49,6 +49,10 @@ export function messagesBody(req: StepRequest, model: string): MessagesRequest {
       ...(tool.deferred ? { defer_loading: true } : {}),
     })),
     stream: true,
+    ...(req.native?.maxTokens !== undefined ? { max_tokens: req.native.maxTokens } : {}),
+    ...(req.native?.stopSequences ? { stop_sequences: req.native.stopSequences } : {}),
+    ...(req.native?.toolChoice ? { tool_choice: req.native.toolChoice } : {}),
+    ...(req.native?.outputSchema ? { output_format: { type: 'json_schema', schema: req.native.outputSchema } } : {}),
   }
   if (typeof req.effort === 'string') body.output_config = { effort: req.effort }
   else if (typeof req.effort === 'number') body.thinking = { type: 'enabled', budget_tokens: req.effort }
@@ -62,6 +66,7 @@ export function responsesRequest(req: StepRequest, model: string, body: Messages
 
   return {
     ...translated,
+    ...(req.native?.outputSchema && translated.text ? { text: { format: { ...translated.text.format, strict: false } } } : {}),
     instructions: openaiInstructions(translated.instructions),
     prompt_cache_key: createHash('sha256').update(JSON.stringify(['codex', req.session, req.who, model])).digest('hex'),
   }

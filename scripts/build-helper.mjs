@@ -11,8 +11,9 @@ const wsPackage = JSON.parse(await readFile(join(root, 'node_modules/ws/package.
 if (packageJson.dependencies.ws !== wsPackage.version) throw new Error('installed ws does not match the pinned package version')
 const result = await build({
   absWorkingDir: root,
-  entryPoints: ['helper/main.ts'],
-  outfile: 'dist/helper.mjs',
+  entryPoints: { helper: 'helper/main.ts', native: 'helper/native/preload.ts', launch: 'helper/native/launch.ts', entry: 'helper/native/entry.ts' },
+  outdir: 'dist',
+  outExtension: { '.js': '.mjs' },
   tsconfig: 'helper/tsconfig.node.json',
   bundle: true,
   platform: 'node',
@@ -36,17 +37,20 @@ const result = await build({
     },
   }],
 })
-const output = result.outputFiles[0].contents
+const bundles = Object.fromEntries(result.outputFiles.map(file => [file.path.split('/').at(-1), file.contents]))
+bundles['entry.mjs'] = Buffer.concat([Buffer.from('#!/usr/bin/env node\n// rice-multi-models installed launcher\n'), bundles['entry.mjs']])
+const output = bundles['helper.mjs']
 const metadata = Buffer.from(`${JSON.stringify({ format: 1, node: '>=22', websocket: { name: 'ws', version: wsPackage.version, license: 'MIT' }, sha256: createHash('sha256').update(output).digest('hex') }, null, 2)}\n`)
-const files = [['helper.mjs', output], ['helper.meta.json', metadata]]
+const nativeMetadata = Buffer.from(`${JSON.stringify({ format: 1, adapter: 1, hosts: ['2.1.299'], platforms: ['darwin', 'linux'], sha256: createHash('sha256').update(bundles['native.mjs']).digest('hex') }, null, 2)}\n`)
+const files = [...Object.entries(bundles), ['helper.meta.json', metadata], ['native.meta.json', nativeMetadata]]
 if (process.argv.includes('--check')) {
   for (const [filename, bytes] of files) {
     const current = await readFile(join(root, 'dist', filename)).catch(() => undefined)
     if (!current || !Buffer.from(bytes).equals(current)) throw new Error(`dist/${filename} is stale; run npm run build`)
   }
-  process.stdout.write('Helper bundle is current\n')
+  process.stdout.write('Direct helper, native adapter and launcher bundles are current\n')
 } else {
   await mkdir(join(root, 'dist'), { recursive: true })
   for (const [filename, bytes] of files) await writeFile(join(root, 'dist', filename), bytes)
-  process.stdout.write('Built dist/helper.mjs for Node 22+\n')
+  process.stdout.write('Built direct helper, native adapter and launcher for Node 22+ and native Bun\n')
 }

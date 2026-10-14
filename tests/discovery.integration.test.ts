@@ -266,7 +266,7 @@ test('fresh discovered input and context bounds refuse oversized routed turns be
       const refused = await step(type, model.model)
       expect(refused.nextCalls).toBe(0)
       expect(JSON.stringify(refused.result)).toContain('512 token input bound')
-      expect(JSON.stringify(refused.result)).toContain('native routed compaction is unavailable')
+      expect(JSON.stringify(refused.result)).toContain('compact the conversation')
       expect(wires.length).toBe(beforeWires)
       expect(discoveries.length).toBe(refreshes)
     }
@@ -449,7 +449,7 @@ test('model switch denies context exceeding fresh exact destination bounds witho
       const denied = await hook('classic.PreModelSwitch')(host, switchInput(model.model, bound + 1), next)
       expect(denied.permissionDecision).toBe('deny')
       expect(denied.permissionDecisionReason).toContain(`${bound} token`)
-      expect(denied.permissionDecisionReason).toContain('native routed compaction is unavailable')
+      expect(denied.permissionDecisionReason).toContain('Compact the current conversation')
       expect(nativeCalls).toBe(0)
       const allowed = await hook('classic.PreModelSwitch')(host, switchInput(model.model, bound), next)
       expect(allowed.permissionDecision).toBe('allow')

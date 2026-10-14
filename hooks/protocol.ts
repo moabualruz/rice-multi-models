@@ -36,6 +36,13 @@ export type StepRequest = {
   resume?: string
   /** Whether a worker CLI may edit files (accept-edits) or only read and plan. */
   workerWrite?: boolean
+  /** Authentic native request constraints, preserved by the in-process adapter. */
+  native?: {
+    maxTokens?: number
+    stopSequences?: string[]
+    toolChoice?: { type: 'auto' | 'any' | 'none' | 'tool'; name?: string; disable_parallel_tool_use?: boolean }
+    outputSchema?: Record<string, unknown>
+  }
 }
 
 export type StopReason = 'end_turn' | 'max_tokens' | 'refusal' | 'tool_use' | 'stop_sequence'
@@ -56,6 +63,8 @@ export type StepEvent =
   | { type: 'thinking'; text: string }
   | { type: 'signature'; thinking: string; signature: string }
   | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
+  /** Server-tool blocks executed by the direct native adapter, within the same owner. */
+  | { type: 'native_block'; block: Record<string, unknown> }
   | ({ type: 'usage' } & Usage)
   | { type: 'limits'; limits: Limits }
   | { type: 'resume'; key: string }

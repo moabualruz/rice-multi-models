@@ -6028,7 +6028,11 @@ function messagesBody(req, model2) {
       input_schema: tool.schema,
       ...tool.deferred ? { defer_loading: true } : {}
     })),
-    stream: true
+    stream: true,
+    ...req.native?.maxTokens !== void 0 ? { max_tokens: req.native.maxTokens } : {},
+    ...req.native?.stopSequences ? { stop_sequences: req.native.stopSequences } : {},
+    ...req.native?.toolChoice ? { tool_choice: req.native.toolChoice } : {},
+    ...req.native?.outputSchema ? { output_format: { type: "json_schema", schema: req.native.outputSchema } } : {}
   };
   if (typeof req.effort === "string") body.output_config = { effort: req.effort };
   else if (typeof req.effort === "number") body.thinking = { type: "enabled", budget_tokens: req.effort };
@@ -6038,6 +6042,7 @@ function responsesRequest(req, model2, body) {
   const translated = toResponses(body, model2);
   return {
     ...translated,
+    ...req.native?.outputSchema && translated.text ? { text: { format: { ...translated.text.format, strict: false } } } : {},
     instructions: openaiInstructions(translated.instructions),
     prompt_cache_key: createHash2("sha256").update(JSON.stringify(["codex", req.session, req.who, model2])).digest("hex")
   };
@@ -7474,6 +7479,59 @@ function thinkingStore() {
   };
 }
 
+// helper/native/ownership.ts
+var record2 = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+var UNOWNED = Object.freeze({ unowned: true });
+
+// helper/native/constraints.ts
+var object = (value) => record2(value) ? value : {};
+function nativeConstraints(body, model2, native) {
+  if (!native) return body;
+  const sent = JSON.parse(body);
+  if (!record2(sent)) throw new Error("invalid native provider body");
+  const cap = (value) => Math.min(native.maxTokens ?? Infinity, typeof value === "number" ? value : model2.maxOutputTokens ?? Infinity);
+  const choice = native.toolChoice;
+  if (model2.kind === "anthropic") {
+    if (native.maxTokens !== void 0) sent.max_tokens = cap(sent.max_tokens);
+    if (native.maxTokens === 0) delete sent.thinking;
+    if (native.stopSequences?.length) sent.stop_sequences = native.stopSequences;
+    if (choice) sent.tool_choice = choice;
+    if (native.outputSchema) sent.output_config = { ...object(sent.output_config), format: { type: "json_schema", schema: native.outputSchema } };
+  } else if (model2.kind === "openai" || model2.kind === "responses") {
+    const responses2 = model2.kind === "responses";
+    const key = responses2 ? "max_output_tokens" : model2.maxTokensParam ?? "max_completion_tokens";
+    if (native.maxTokens) sent[key] = cap(sent[key]);
+    if (choice) {
+      sent.tool_choice = choice.type === "any" ? "required" : choice.type === "tool" ? responses2 ? { type: "function", name: choice.name } : { type: "function", function: { name: choice.name } } : choice.type;
+      if (choice.disable_parallel_tool_use) sent.parallel_tool_calls = false;
+    }
+    if (native.outputSchema) {
+      const format = { type: "json_schema", name: "native_result", schema: native.outputSchema, strict: false };
+      if (responses2) sent.text = { ...object(sent.text), format };
+      else sent.response_format = { type: "json_schema", json_schema: { name: "native_result", schema: native.outputSchema, strict: false } };
+    }
+  } else if (model2.kind === "gemini") {
+    const generation = { ...object(sent.generationConfig) };
+    if (native.maxTokens) generation.maxOutputTokens = cap(generation.maxOutputTokens);
+    if (native.stopSequences?.length) generation.stopSequences = native.stopSequences;
+    if (native.outputSchema) {
+      delete generation.responseSchema;
+      Object.assign(generation, { responseMimeType: "application/json", responseJsonSchema: native.outputSchema });
+    }
+    sent.generationConfig = generation;
+    if (choice) sent.toolConfig = { functionCallingConfig: { mode: choice.type === "auto" ? "AUTO" : choice.type === "none" ? "NONE" : "ANY", ...choice.type === "tool" ? { allowedFunctionNames: [choice.name] } : {} } };
+  } else if (model2.kind === "bedrock") {
+    const inference = { ...object(sent.inferenceConfig) };
+    if (native.maxTokens) inference.maxTokens = cap(inference.maxTokens);
+    if (native.stopSequences?.length) inference.stopSequences = native.stopSequences;
+    sent.inferenceConfig = inference;
+    if (choice && choice.type !== "none") sent.toolConfig = { ...object(sent.toolConfig), toolChoice: choice.type === "tool" ? { tool: { name: choice.name } } : { [choice.type]: {} } };
+    if (choice?.type === "none") delete sent.toolConfig;
+    if (native.outputSchema) sent.outputConfig = { textFormat: { type: "json_schema", structure: { jsonSchema: { schema: JSON.stringify(native.outputSchema) } } } };
+  }
+  return JSON.stringify(sent);
+}
+
 // helper/styx/step.ts
 var DEFAULT_TOTAL_S = 1800;
 var finishToken = (reason) => reason.toLowerCase().match(/^[a-z0-9_.-]{1,64}$/)?.[0] ?? "other";
@@ -7581,6 +7639,7 @@ function createStepper(env) {
     let enc;
     try {
       enc = codec.encode({ system: req.system, messages: normalize(req.transcript, m.vision, ids.of(p.id), thinking.sealed(owner)), tools: req.tools, ...req.effort === void 0 ? {} : { effort: req.effort }, cacheKey: conversationKey }, p, m);
+      enc.body = nativeConstraints(enc.body, m, req.native);
     } catch (error) {
       return yield* refuse(error instanceof Error ? error.message : "rice-multi-models: request policy could not be encoded");
     }
@@ -7714,10 +7773,10 @@ function loadedNames(transcript) {
   const names = /* @__PURE__ */ new Set();
   const visit = (block) => {
     if (!block || typeof block !== "object") return;
-    const record2 = block;
-    if (record2.type === "tool_use" && typeof record2.name === "string") names.add(record2.name);
-    if (record2.type === "tool_reference" && typeof record2.tool_name === "string") names.add(record2.tool_name);
-    if (Array.isArray(record2.content)) record2.content.forEach(visit);
+    const record3 = block;
+    if (record3.type === "tool_use" && typeof record3.name === "string") names.add(record3.name);
+    if (record3.type === "tool_reference" && typeof record3.tool_name === "string") names.add(record3.tool_name);
+    if (Array.isArray(record3.content)) record3.content.forEach(visit);
   };
   for (const message of transcript) if (Array.isArray(message.content)) message.content.forEach(visit);
   return names;
@@ -8058,10 +8117,10 @@ async function setupCodex(env = process.env) {
 import { mkdir as mkdir2, readFile as readFile3, rename, rm, writeFile } from "node:fs/promises";
 import path4 from "node:path";
 import { randomUUID as randomUUID2 } from "node:crypto";
-var object = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
-var canonical = (v) => JSON.stringify(v, (_key, value) => object(value) ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, value[key]])) : value);
+var object2 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+var canonical = (v) => JSON.stringify(v, (_key, value) => object2(value) ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, value[key]])) : value);
 function legacyGenerated(row) {
-  if (!object(row) || Object.keys(row).sort().join(",") !== "behavesAs,description,label,model" || row.behavesAs !== "claude-sonnet-4-6") return false;
+  if (!object2(row) || Object.keys(row).sort().join(",") !== "behavesAs,description,label,model" || row.behavesAs !== "claude-sonnet-4-6") return false;
   if (typeof row.model !== "string" || typeof row.label !== "string" || typeof row.description !== "string") return false;
   const slash = row.model.indexOf("/");
   if (slash < 1 || slash === row.model.length - 1) return false;
@@ -8075,7 +8134,7 @@ function legacyGenerated(row) {
 async function readJson(file, absent) {
   try {
     const parsed = JSON.parse(await readFile3(file, "utf8"));
-    if (!object(parsed)) throw new Error("not an object");
+    if (!object2(parsed)) throw new Error("not an object");
     return parsed;
   } catch (error) {
     if (error.code === "ENOENT") return absent;
@@ -8094,11 +8153,11 @@ async function atomicWrite(file, data) {
   }
 }
 async function syncPicker(input) {
-  if (!input || typeof input.configDir !== "string" || !path4.isAbsolute(input.configDir) || !Array.isArray(input.rows) || input.rows.some((row) => !object(row) || typeof row.model !== "string" || typeof row.label !== "string")) {
+  if (!input || typeof input.configDir !== "string" || !path4.isAbsolute(input.configDir) || !Array.isArray(input.rows) || input.rows.some((row) => !object2(row) || typeof row.model !== "string" || typeof row.label !== "string")) {
     return { ok: false, changed: false, count: 0, path: "", error: "sync-picker requires an absolute configDir and valid rows" };
   }
   const file = path4.join(input.configDir, "settings.json");
-  const record2 = path4.join(input.configDir, ".rice-multi-models-picker.json");
+  const record3 = path4.join(input.configDir, ".rice-multi-models-picker.json");
   const lock = path4.join(input.configDir, ".rice-multi-models-picker.lock");
   let locked = false;
   try {
@@ -8116,10 +8175,10 @@ async function syncPicker(input) {
       }
     } while (!locked);
     const settings = await readJson(file, {});
-    const ownedJson = await readJson(record2, { version: 1, rows: [], edited: [] });
-    if (ownedJson.version !== 1 || !Array.isArray(ownedJson.rows) || ownedJson.rows.some((row) => !object(row) || typeof row.model !== "string") || !Array.isArray(ownedJson.edited) || ownedJson.edited.some((id) => typeof id !== "string")) throw new Error("Picker ownership record is malformed; nothing was overwritten");
+    const ownedJson = await readJson(record3, { version: 1, rows: [], edited: [] });
+    if (ownedJson.version !== 1 || !Array.isArray(ownedJson.rows) || ownedJson.rows.some((row) => !object2(row) || typeof row.model !== "string") || !Array.isArray(ownedJson.edited) || ownedJson.edited.some((id) => typeof id !== "string")) throw new Error("Picker ownership record is malformed; nothing was overwritten");
     const ownership = ownedJson;
-    if (settings.modelPicker !== void 0 && !object(settings.modelPicker)) throw new Error("settings.json modelPicker is malformed; nothing was overwritten");
+    if (settings.modelPicker !== void 0 && !object2(settings.modelPicker)) throw new Error("settings.json modelPicker is malformed; nothing was overwritten");
     const picker = settings.modelPicker ?? {};
     if (picker.options !== void 0 && !Array.isArray(picker.options)) throw new Error("settings.json modelPicker.options is malformed; nothing was overwritten");
     const options = picker.options ?? [];
@@ -8130,7 +8189,7 @@ async function syncPicker(input) {
     }
     const retained = [];
     for (const row of options) {
-      const id = object(row) && typeof row.model === "string" ? row.model : void 0;
+      const id = object2(row) && typeof row.model === "string" ? row.model : void 0;
       const ours = id ? old.get(id) : void 0;
       if (id && ours && !edited.has(id)) {
         if (canonical(row) === canonical(ours)) continue;
@@ -8138,7 +8197,7 @@ async function syncPicker(input) {
       }
       retained.push(row);
     }
-    const occupied = new Set(retained.flatMap((row) => object(row) && typeof row.model === "string" ? [row.model] : []));
+    const occupied = new Set(retained.flatMap((row) => object2(row) && typeof row.model === "string" ? [row.model] : []));
     const added = [];
     for (const row of input.rows) {
       if (occupied.has(row.model) || edited.has(row.model)) continue;
@@ -8149,7 +8208,7 @@ async function syncPicker(input) {
     const nextOwned = { version: 1, rows: added, edited: [...edited].sort() };
     const changed = canonical(settings) !== canonical(next);
     if (changed) await atomicWrite(file, next);
-    if (canonical(ownership) !== canonical(nextOwned)) await atomicWrite(record2, nextOwned);
+    if (canonical(ownership) !== canonical(nextOwned)) await atomicWrite(record3, nextOwned);
     return { ok: true, changed, count: added.length, path: file, preserved: retained.length };
   } catch (error) {
     return { ok: false, changed: false, count: 0, path: file, error: error instanceof Error ? error.message : "Picker synchronization failed" };

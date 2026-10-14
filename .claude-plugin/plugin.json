@@ -1,6 +1,6 @@
 {
   "name": "rice-multi-models",
-  "version": "0.6.4",
+  "version": "0.7.0",
   "description": "Codex (ChatGPT subscription), OpenCode Zen and Go, any Chat Completions, Responses, Anthropic, Gemini or Bedrock endpoint, and Antigravity or Grok as workers: session and subagent models, no proxy",
   "types": "./types/index.d.ts",
   "license": "MIT AND Apache-2.0",

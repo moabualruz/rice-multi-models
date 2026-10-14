@@ -4,11 +4,11 @@
 // helper (`once`) instead. Either way the step goes in on standard input and its events come back one JSON
 // line at a time; leaving the loop, or the dispatch being abandoned, kills the process and so cancels the
 // provider request.
-import type { HookStream, ModelUsage, ProcessSpawnChunk, ProcessSpawnResult } from 'claude-code'
+import type { ModelUsage, ProcessSpawnChunk, ProcessSpawnResult } from 'claude-code'
 
 import type { StepEvent, StepWire } from './protocol'
 
-type Child = HookStream<ProcessSpawnChunk, ProcessSpawnResult>
+type Child = AsyncGenerator<ProcessSpawnChunk, ProcessSpawnResult, void>
 
 /** How the mod starts processes; register.ts builds it over `$.process.spawn`. */
 export type HelperPort = {

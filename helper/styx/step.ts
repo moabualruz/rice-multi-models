@@ -21,6 +21,7 @@ import { CODECS } from './codecs'
 import { cutText, ERROR_TEXT_MAX, errorDetail, httpErrorText, logJson, oneLine } from './errors'
 import type { Cut } from './errors'
 import { normalize, remoteIds, thinkingStore } from './history'
+import { nativeConstraints } from '../native/constraints.ts'
 import type { Placed } from './history'
 
 // A provider request as the transport sends it: the stall window and the whole-request bound in seconds.
@@ -154,6 +155,7 @@ export function createStepper(env: Env) {
     let enc: ReturnType<Codec['encode']>
     try {
       enc = codec.encode({ system: req.system, messages: normalize(req.transcript, m.vision, ids.of(p.id), thinking.sealed(owner)), tools: req.tools, ...(req.effort === undefined ? {} : { effort: req.effort }), cacheKey: conversationKey }, p, m)
+      enc.body = nativeConstraints(enc.body, m, req.native)
     } catch (error) {
       return yield* refuse(error instanceof Error ? error.message : 'rice-multi-models: request policy could not be encoded')
     }
