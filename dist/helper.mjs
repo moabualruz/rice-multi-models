@@ -8060,6 +8060,18 @@ import path4 from "node:path";
 import { randomUUID as randomUUID2 } from "node:crypto";
 var object = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 var canonical = (v) => JSON.stringify(v, (_key, value) => object(value) ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, value[key]])) : value);
+function legacyGenerated(row) {
+  if (!object(row) || Object.keys(row).sort().join(",") !== "behavesAs,description,label,model" || row.behavesAs !== "claude-sonnet-4-6") return false;
+  if (typeof row.model !== "string" || typeof row.label !== "string" || typeof row.description !== "string") return false;
+  const slash = row.model.indexOf("/");
+  if (slash < 1 || slash === row.model.length - 1) return false;
+  const provider2 = row.model.slice(0, slash);
+  const model2 = row.model.slice(slash + 1);
+  if (provider2 === "codex") return /^.+ \(Codex\)$/.test(row.label) && /^ChatGPT subscription via rice-multi-models(?:, \d+k context)?$/.test(row.description);
+  const worker = provider2 === "agy" ? "Antigravity" : provider2 === "grok" ? "Grok" : void 0;
+  if (worker && row.label === `${model2} (${worker})` && row.description === `${worker} CLI as a worker with its own tools, via rice-multi-models`) return true;
+  return row.label === `${model2} (${provider2})` && /^(?:openai|responses|anthropic|gemini|bedrock) endpoint https?:\/\/\S+ via rice-multi-models(?:, \d+k context)?$/.test(row.description);
+}
 async function readJson(file, absent) {
   try {
     const parsed = JSON.parse(await readFile3(file, "utf8"));
@@ -8113,6 +8125,9 @@ async function syncPicker(input) {
     const options = picker.options ?? [];
     const edited = new Set(ownership.edited);
     const old = new Map(ownership.rows.map((row) => [row.model, row]));
+    for (const row of options) {
+      if (legacyGenerated(row) && !old.has(row.model) && !edited.has(row.model)) old.set(row.model, row);
+    }
     const retained = [];
     for (const row of options) {
       const id = object(row) && typeof row.model === "string" ? row.model : void 0;

@@ -53,6 +53,37 @@ test('edited generated rows lose ownership permanently and survive repair and pr
   expect(JSON.parse(await readFile(path.join(configDir, '.rice-multi-models-picker.json'), 'utf8')).edited).toEqual(['codex/gpt-6.1-sol'])
 }))
 
+test('upgrades migrate exact pre-0.6 generated Sonnet aliases to the discovered catalogue', async () => temporary(async configDir => {
+  const legacy = [
+    { model: 'codex/gpt-6.1-sol', label: 'GPT-6.1-Sol (Codex)', description: 'ChatGPT subscription via rice-multi-models, 500k context', behavesAs: 'claude-sonnet-4-6' },
+    { model: 'local/qwen', label: 'qwen (local)', description: 'openai endpoint http://localhost:8080 via rice-multi-models, 128k context', behavesAs: 'claude-sonnet-4-6' },
+    { model: 'agy/gemini', label: 'gemini (Antigravity)', description: 'Antigravity CLI as a worker with its own tools, via rice-multi-models', behavesAs: 'claude-sonnet-4-6' },
+    { model: 'grok/grok-build', label: 'grok-build (Grok)', description: 'Grok CLI as a worker with its own tools, via rice-multi-models', behavesAs: 'claude-sonnet-4-6' },
+  ]
+  const custom = [
+    { ...legacy[0], model: 'codex/personal', label: 'My personal model' },
+    { ...legacy[1], model: 'local/edited', label: 'edited (local)', extra: true },
+    { ...legacy[2], model: 'agy/custom', label: 'custom (Antigravity)', description: 'My worker' },
+    { ...legacy[3], model: 'grok/other', label: 'other (Grok)', behavesAs: 'haiku' },
+  ]
+  const file = path.join(configDir, 'settings.json')
+  const settings = { permissions: { allow: ['Read'] }, modelPicker: { customOption: 42, options: [...legacy, ...custom] } }
+  await writeFile(file, JSON.stringify(settings))
+  expect(await syncPicker({ configDir, rows })).toMatchObject({ ok: true, changed: true, count: 2, preserved: 4 })
+  expect(JSON.parse(await readFile(file, 'utf8'))).toEqual({ ...settings, modelPicker: { ...settings.modelPicker, options: [...custom, ...rows] } })
+  expect(await syncPicker({ configDir, rows })).toMatchObject({ ok: true, changed: false })
+  await syncPicker({ configDir, rows: [] })
+  expect(JSON.parse(await readFile(file, 'utf8')).modelPicker.options).toEqual(custom)
+}))
+
+test('explicitly edited ownership prevents legacy migration', async () => temporary(async configDir => {
+  const legacy = { model: 'codex/gpt-6.1-sol', label: 'GPT-6.1-Sol (Codex)', description: 'ChatGPT subscription via rice-multi-models, 500k context', behavesAs: 'claude-sonnet-4-6' }
+  await writeFile(path.join(configDir, 'settings.json'), JSON.stringify({ modelPicker: { options: [legacy] } }))
+  await writeFile(path.join(configDir, '.rice-multi-models-picker.json'), JSON.stringify({ version: 1, rows: [], edited: [legacy.model] }))
+  expect(await syncPicker({ configDir, rows })).toMatchObject({ ok: true, preserved: 1 })
+  expect(JSON.parse(await readFile(path.join(configDir, 'settings.json'), 'utf8')).modelPicker.options[0]).toEqual(legacy)
+}))
+
 test('concurrent picker sessions serialize rereads and never duplicate or truncate rows', async () => temporary(async configDir => {
   await writeFile(path.join(configDir, 'settings.json'), JSON.stringify({ modelPicker: { options: [{ model: 'codex/personal', label: 'Personal' }] }, unrelated: 17 }))
   const results = await Promise.all(Array.from({ length: 20 }, () => syncPicker({ configDir, rows })))

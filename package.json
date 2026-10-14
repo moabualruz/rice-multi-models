@@ -10,7 +10,8 @@
     "test:node": "node --test helper/test/node-*.mjs",
     "test:install": "node scripts/proof-clean-runtime.mjs",
     "test:native": "node scripts/test-native.mjs",
-    "check": "bun run test && bun run typecheck && npm run build:check && npm run test:node && npm run test:install && npm run test:native && git diff --check"
+    "test:routing": "node scripts/proof-native-routing.mjs",
+    "check": "bun run test && bun run typecheck && npm run build:check && npm run test:node && npm run test:install && npm run test:native && npm run test:routing && git diff --check"
   },
   "devDependencies": {
     "@types/bun": "1.3.14",

@@ -162,6 +162,19 @@ owned picker rows; models/status tools only read the session snapshot, never que
 providers every turn. A configured default is selected only if discovered, and
 manually declared routes remain configuration, not discovered candidates.
 
+Setup also recognizes the complete generated picker-row format from releases
+before 0.6 and replaces those rows with the current discovered catalogue. This
+removes their obsolete `behavesAs: claude-sonnet-4-6` alias, which otherwise makes
+the native engine enforce Sonnet's context window for a routed model. Custom rows,
+rows with extra fields and rows marked edited in the ownership record are retained.
+
+In a routed session, exposed auxiliary completions and classification requests
+use the selected provider, including callers that request the host's small Claude
+model. Explicit routed targets still select that exact route. An unreadable fork
+transcript or a provider failure cannot fall back to native Claude. These hooks
+cover the exposed plugin operations; they do not establish interception of every
+internal inference path in the host.
+
 Reported context/input bounds constrain this mod's request sizing; output ceilings
 and unsupported capabilities constrain configured-provider requests without lifting
 user restrictions. The request estimate and 95% safety threshold are local policy,
@@ -371,9 +384,10 @@ Codex CLI on the same account. The session helper accepts up to 64 concurrent st
 
 ## Update
 
-Release **0.6.3** includes the shipped Node helper, automatic activation setup,
-native discovery, primary-window synchronization and temporary fail-closed routed
-compaction. The `rice-mods` marketplace tracks this repository's `main` without a
+Release **0.6.4** adds legacy picker migration and auxiliary completion and
+classification routing without native provider fallback. It retains the shipped
+Node helper, native discovery, primary-window synchronization and temporary
+fail-closed routed compaction. The `rice-mods` marketplace tracks this repository's `main` without a
 tag pin. Update both the marketplace and your installed mod, then reload or restart
 the session:
 
@@ -413,6 +427,11 @@ that is release maintenance, not an installation step for every user.
 - `npm run test:node` exercises the Node helper and runtime-specific behavior.
 - `npm run test:native` runs lifecycle fixtures through `claude plugin test` in
   an isolated temporary plugin payload, separate from Bun's test files.
+- `npm run test:routing` uses the real engine to verify that migrated picker
+  rows allow a supplied 500k context override and that exposed auxiliary
+  completions and classifications route without native provider calls. Its
+  metadata and provider events are deterministic fixtures, not live entitlement
+  or discovery evidence.
 - `node scripts/proof-clean-runtime.mjs` copies only the shipped artifact into
   an empty home/path with spaces and tests a local provider through one-shot and
   session-helper IPC, without Bun, curl, jq or development dependencies.

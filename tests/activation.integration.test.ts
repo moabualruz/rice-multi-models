@@ -196,6 +196,66 @@ function contextFixture(contextWindow: number | null = 500000, maxContextWindow:
   return f
 }
 const startContext = (f: ReturnType<typeof fixture>) => callbacks.get('session.start')!(f.host, { isInteractive: false }, async () => ({ started: true }))
+
+test('auxiliary Claude completions use the selected routed session provider without native fallback', async () => {
+  const f = contextFixture()
+  await startContext(f)
+  const requests: any[] = []
+  f.host.process.spawn = async function* (input: any) {
+    requests.push(JSON.parse(input.input).req)
+    yield { stream: 'stdout', text: JSON.stringify({ type: 'text', text: 'routed completion' }) + '\n' + JSON.stringify({ type: 'stop', reason: 'end_turn' }) + '\n' }
+    return { code: 0 }
+  }
+  let nativeCalls = 0
+  const complete = callbacks.get('model.complete')!
+  const result = await complete(f.host, { model: 'haiku', prompt: 'Classify this request', system: 'Preserve this instruction' }, async () => { nativeCalls++; return { value: { isAnswered: true, text: 'native' } } })
+  expect(result.value).toMatchObject({ isAnswered: true, text: 'routed completion' })
+  expect(requests[0]).toMatchObject({ target: 'codex/fresh', system: 'Preserve this instruction', who: 'complete' })
+  expect(nativeCalls).toBe(0)
+  f.host.process.spawn = async function* () {
+    yield { stream: 'stdout', text: JSON.stringify({ type: 'error', kind: 'request', text: 'fixture provider unavailable' }) + '\n' }
+    return { code: 1 }
+  }
+  expect((await complete(f.host, { model: 'haiku', prompt: 'Again' }, async () => { nativeCalls++; return {} })).value.isAnswered).toBe(false)
+  expect(nativeCalls).toBe(0)
+  f.selection.model = 'sonnet'
+  await complete(f.host, { model: 'haiku', prompt: 'Native session' }, async () => { nativeCalls++; return {} })
+  expect(nativeCalls).toBe(1)
+})
+
+test('unreadable routed fork transcript cannot fall back to the native provider', async () => {
+  const f = contextFixture()
+  await startContext(f)
+  f.host.session.messages = async () => ({ deny: 'fixture-unreadable' })
+  let nativeCalls = 0
+  const result = await callbacks.get('model.fork')!(f.host, { prompt: 'Summarize' }, async () => { nativeCalls++; return {} })
+  expect(result.value.isAnswered).toBe(false)
+  expect(nativeCalls).toBe(0)
+})
+
+test('classification uses the selected routed provider and accepts only a supplied label', async () => {
+  const f = contextFixture()
+  await startContext(f)
+  const requests: any[] = []
+  let answer = 'bug'
+  f.host.process.spawn = async function* (input: any) {
+    requests.push(JSON.parse(input.input).req)
+    yield { stream: 'stdout', text: JSON.stringify({ type: 'text', text: answer }) + '\n' + JSON.stringify({ type: 'stop', reason: 'end_turn' }) + '\n' }
+    return { code: 0 }
+  }
+  let nativeCalls = 0
+  const classify = callbacks.get('model.classify')!
+  const input = { text: 'An error', labels: ['bug', 'question'] }
+  const next = async () => { nativeCalls++; return { value: 'native' } }
+  expect(await classify(f.host, input, next)).toEqual({ value: 'bug' })
+  expect(requests[0].target).toBe('codex/fresh')
+  answer = 'invented label'
+  expect(await classify(f.host, input, next)).toEqual({ value: undefined })
+  expect(nativeCalls).toBe(0)
+  f.selection.model = 'sonnet'
+  expect(await classify(f.host, input, next)).toEqual({ value: 'native' })
+  expect(nativeCalls).toBe(1)
+})
 const switchContext = (f: ReturnType<typeof fixture>, model: string) => {
   const from_model = f.selection.model
   f.selection.model = model

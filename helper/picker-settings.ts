@@ -9,6 +9,21 @@ type Ownership = { version: 1; rows: Json[]; edited: string[] }
 const object = (v: unknown): v is Json => typeof v === 'object' && v !== null && !Array.isArray(v)
 const canonical = (v: unknown): string => JSON.stringify(v, (_key, value) => object(value) ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])) : value)
 
+/** Pre-0.6 had no ownership file. Recognize its complete generated signature,
+ * rather than treating a provider prefix or a Sonnet alias as ownership. */
+function legacyGenerated(row: unknown): row is Json {
+  if (!object(row) || Object.keys(row).sort().join(',') !== 'behavesAs,description,label,model' || row.behavesAs !== 'claude-sonnet-4-6') return false
+  if (typeof row.model !== 'string' || typeof row.label !== 'string' || typeof row.description !== 'string') return false
+  const slash = row.model.indexOf('/')
+  if (slash < 1 || slash === row.model.length - 1) return false
+  const provider = row.model.slice(0, slash)
+  const model = row.model.slice(slash + 1)
+  if (provider === 'codex') return /^.+ \(Codex\)$/.test(row.label) && /^ChatGPT subscription via rice-multi-models(?:, \d+k context)?$/.test(row.description)
+  const worker = provider === 'agy' ? 'Antigravity' : provider === 'grok' ? 'Grok' : undefined
+  if (worker && row.label === `${model} (${worker})` && row.description === `${worker} CLI as a worker with its own tools, via rice-multi-models`) return true
+  return row.label === `${model} (${provider})` && /^(?:openai|responses|anthropic|gemini|bedrock) endpoint https?:\/\/\S+ via rice-multi-models(?:, \d+k context)?$/.test(row.description)
+}
+
 async function readJson(file: string, absent: Json): Promise<Json> {
   try {
     const parsed: unknown = JSON.parse(await readFile(file, 'utf8'))
@@ -57,6 +72,9 @@ export async function syncPicker(input: PickerSyncInput): Promise<PickerSyncResu
     const options = (picker.options ?? []) as unknown[]
     const edited = new Set(ownership.edited)
     const old = new Map(ownership.rows.map(row => [row.model as string, row]))
+    for (const row of options) {
+      if (legacyGenerated(row) && !old.has(row.model as string) && !edited.has(row.model as string)) old.set(row.model as string, row)
+    }
     const retained: unknown[] = []
     for (const row of options) {
       const id = object(row) && typeof row.model === 'string' ? row.model : undefined
