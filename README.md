@@ -1,11 +1,19 @@
 # rice-multi-models
 
-A Claude Code mod that runs non-Anthropic models as ordinary session and
-subagent models, with Claude Code's own tools, permissions and transcript.
+A Claude Code mod that adds models from other subscriptions, APIs and local
+servers as ordinary session and subagent models, with Claude Code's own tools,
+permissions and transcript.
 Main turns, native compaction, tool-internal inference and evaluators use each
 conversation's selected provider. The native adapter runs inside the official
 Claude executable and calls providers directly. It opens no inference listener,
 proxy or gateway. Start with `rice-claude` to activate it before native startup.
+
+Use this mod for ChatGPT/Codex, API keys, local models and provider configuration.
+For switching Anthropic OAuth accounts, use
+[rice-session-accounts](https://github.com/moabualruz/rice-session-accounts), whose
+account picker shows saved account names, emails and subscription tiers. Both
+mods use your existing Claude configuration; extra account login folders are
+only for authentication.
 
 Providers:
 
@@ -21,15 +29,76 @@ Providers:
   tools. Model ids `agy/<model>` and `grok/<model>`; agent types `rice-multi-models:agy`,
   `agy-write`, `grok`, `grok-write` (registered when the CLI is installed).
 
-## Install
+## Install and start
 
-```text
-/plugin install rice-multi-models --marketplace moabualruz/rice-mods
+Release **0.7.0** supports the official compiled **Claude Code 2.1.299** on macOS
+and Linux, including WSL, with **Node.js 22 or newer**. Its native adapter refuses
+other Claude versions, including 2.1.300, until they are qualified. Check
+`claude --version` and `node --version` before starting.
+
+Run this one command in a terminal on the machine where Claude runs:
+
+```sh
+claude plugin install rice-multi-models --marketplace moabualruz/rice-mods
 ```
 
-Install in a terminal session using Claude Code 2.1.299 and Node.js 22 or newer.
-The mod ships its compiled helper and runtime dependencies: **Bun, a TypeScript
-compiler, curl, jq and a manual package install are not consumer requirements.**
+The command adds the Rice marketplace if needed and installs the mod. Its helper
+and dependencies are bundled. **No build, Bun, TypeScript compiler, curl, jq,
+`npm install` or `bun install` is needed to use the installed plugin.**
+
+1. Start a Claude Code session with `claude`, approve the mod's requested
+   capabilities when prompted, then run:
+
+   ```text
+   /rice-models setup
+   ```
+
+   Setup checks the runtime, reports login requirements, refreshes model
+   discovery and synchronizes `/model`. For ChatGPT/Codex, reuse your existing
+   Codex login. If you need to sign in, run the exact login command setup prints
+   in a terminal. If Codex is missing, `/rice-models setup codex` installs a
+   private copy and prints its login command. For another provider, follow the
+   [provider setup table](#provider-specific-setup) below.
+
+2. In that Claude session, install the native launcher:
+
+   ```text
+   /rice-models setup native
+   ```
+
+   This creates the managed `rice-claude` command in `~/.local/bin`. It keeps the
+   official `claude` executable and updater intact.
+
+3. Start a **new** terminal session with:
+
+   ```sh
+   rice-claude
+   ```
+
+   If the command is not on PATH, use `"$HOME/.local/bin/rice-claude"`. An already
+   running Claude process cannot load the native adapter. For a declared API or
+   local provider, run `/rice-models providers` in this new session, then
+   `/rice-models approve <provider>` with its configured provider name. Next run:
+
+   ```text
+   /rice-models setup
+   /rice-models models
+   ```
+
+4. Choose an exact model ID returned by that catalogue and enter
+   `/model <id>`. Run `/rice-models doctor` to confirm
+   `nativeAdapter.active: true`, then make an ordinary coding request. With a
+   native provider model, keep using Claude's ordinary tools, permissions,
+   subagents and native compaction. Each conversation uses its selected provider;
+   an explicitly different subagent model uses its own provider. CLI workers
+   retain their own tool loops, as described below.
+
+Use `rice-claude` for later sessions too. `/model` changes the model within the
+current session. When you already know an available model ID, you can start with
+`rice-claude --model <id>`. Discovery lists candidates; a live request establishes
+whether your account currently has access.
+
+### What setup does
 
 Fresh installation activates the function hooks in the current terminal session.
 On every session startup, the mod checks Node and the bundled helper, fetches
@@ -70,24 +139,6 @@ all inference calls. WebFetch keeps native page retrieval and routes its native
 summarizer through the same owner. Missing retrieval configuration is reported
 without switching providers. `/rice-models doctor` reports adapter activation
 and whether search is configured.
-
-### First-run checklist
-
-1. Make Node.js 22 or newer available to the process that starts Claude Code.
-   `node --version` verifies your terminal's version. Desktop applications may
-   have a different PATH; set `RICE_MULTI_MODELS_NODE` to an absolute Node
-   executable path when needed, then restart the host.
-2. Install the mod with the command above. Its own runtime dependencies are
-   bundled; do not run `bun install` or `npm install` in the installed plugin.
-3. Choose the provider you want and complete its login below. Already-installed
-   CLIs and existing login/configuration are reused. Optional worker CLIs are not
-   all downloaded or installed globally on your behalf.
-4. Run `/rice-models setup` after changing runtime/login/configuration, then
-   `/rice-models models` or `/model`. A listed candidate is not a live access check.
-5. Run `/rice-models setup native`, start a new session with `rice-claude`, and
-   select an exact model id with `/model <id>`. A provider's authentication,
-   approval, subscription or quota refusal is reported; the mod never silently
-   switches to another provider.
 
 ### Provider-specific setup
 
@@ -133,6 +184,10 @@ quota remain unknown until the provider supplies that evidence.
 - **An update appears inactive:** update the marketplace and plugin, then run
   `/reload-plugins` or restart. Editing a source checkout does not update an
   already-installed Git-backed copy.
+- **The launcher refuses your Claude version:** release 0.7.0's full native path
+  is qualified for 2.1.299. Reloading the plugin does not add support for another
+  host version. Check the release's supported version before changing your
+  installed Claude build.
 - **You are using headless mode:** startup remains deterministic and does not
   open interactive setup/login prompts. Inspect setup status and complete login
   in an interactive terminal before retrying.
