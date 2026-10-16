@@ -37,8 +37,7 @@ try {
       if ($rule.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and ($rule.FileSystemRights -band $write) -ne 0 -and $writer -notin @($sid, 'S-1-5-18', 'S-1-5-32-544')) { throw 'unsafe bootstrap writer' }
     }
   }
-  $stage = 'short-path-api'
-  Add-Type -TypeDefinition @'
+  $shortPathSource = @'
 using System.Text;
 using System.Runtime.InteropServices;
 public static class RiceNativeBootstrapPath {
@@ -63,9 +62,12 @@ public static class RiceNativeBootstrapPath {
     $plain = $directory
     if ($plain -match '\s') {
       $stage = 'shorten-directory'
-      $buffer = New-Object System.Text.StringBuilder(32768)
-      $length = [RiceNativeBootstrapPath]::GetShortPathName($directory, $buffer, [uint32]$buffer.Capacity)
-      if ($length -gt 0 -and $length -lt $buffer.Capacity -and [System.IO.Directory]::Exists($buffer.ToString())) { $plain = $buffer.ToString() }
+      try {
+        Add-Type -TypeDefinition $shortPathSource
+        $buffer = New-Object System.Text.StringBuilder(32768)
+        $length = [RiceNativeBootstrapPath]::GetShortPathName($directory, $buffer, [uint32]$buffer.Capacity)
+        if ($length -gt 0 -and $length -lt $buffer.Capacity -and [System.IO.Directory]::Exists($buffer.ToString())) { $plain = $buffer.ToString() }
+      } catch { <# A plain fallback base does not require the optional short-path API. #> }
     }
     if ($plain -match '\s') {
       if (-not $existed -and [System.IO.Directory]::GetFileSystemEntries($directory).Length -eq 0) { [System.IO.Directory]::Delete($directory) }
