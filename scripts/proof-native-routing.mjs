@@ -45,7 +45,8 @@ try {
       completion: completion.isAnswered ? completion.text : completion.reason,
       classification, auxiliaryTargets: proofTargets, nativeCompletions: proofNative })
     } catch (error) {
-      answer = JSON.stringify({ fixtureError: error instanceof Error ? error.message : String(error), auxiliaryTargets: proofTargets, nativeCompletions: proofNative })
+      answer = JSON.stringify({ fixtureError: error instanceof Error ? error.message : String(error), auxiliaryTargets: proofTargets, nativeCompletions: proofNative,
+        runtime: { executable: runtime.executable ?? null, version: runtime.version ?? null, error: runtime.error ?? null, home: runtime.info?.home ? "set" : null }, helper: (await read($, prefsAtom)).helper })
     }
     yield { kind: 'text', index: 0, text: answer }
     yield { kind: 'stop', stopReason: 'end_turn', usage: null }
