@@ -93,13 +93,19 @@ export function nativeFetch(original: typeof fetch, ownership: NativeOwnership, 
     } catch (error) {
       if (request.signal.aborted) throw request.signal.reason
       const message = error instanceof Error ? error.message : ''
-      const reason = /^(native inference has no verified conversation owner|invalid native [a-z ]+|unsupported native [a-z ]+|native provider configuration [a-z ]+|native server tool requires a direct implementation)$/.test(message) ? message : 'adapter-request-failed'
+      const reason = /^(native inference has no verified conversation owner|native tool addition has no verified definition|invalid native [a-z ]+|unsupported native [a-z ]+|native provider configuration [a-z ]+|native server tool requires a direct implementation)$/.test(message) ? message : 'adapter-request-failed'
       observe?.({ phase: 'refused', reason, ownerKnown: !owner.unowned && !!owner.model, scoped: scope !== undefined, nativeState: state !== undefined,
         fields: record(body) ? Object.keys(body).filter(key => /^[a-z_]+$/.test(key)) : [],
         messages: record(body) && Array.isArray(body.messages) ? body.messages.slice(0, 20).map(message => record(message) ? {
           role: ['user', 'assistant', 'system', 'developer'].includes(String(message.role)) ? message.role : 'unknown',
           contentKind: Array.isArray(message.content) ? 'array' : typeof message.content,
           blocks: Array.isArray(message.content) ? message.content.slice(0, 12).map(block => record(block) ? typeof block.type === 'string' && /^[a-z_0-9]+$/.test(block.type) ? block.type : Object.keys(block).filter(key => /^[a-z_]+$/.test(key)) : typeof block) : [],
+          toolChanges: Array.isArray(message.content) ? message.content.filter(block => record(block) && ['tool_addition', 'tool_removal'].includes(String(block.type))).slice(0, 12).map(block => {
+            const tool = record(block.tool) ? block.tool : undefined
+            return { kind: tool?.type === 'tool_reference' || tool?.type === 'tool_definition' ? tool.type : 'unknown',
+              schemaInRequest: record(body) && Array.isArray(body.tools) && body.tools.some(value => record(value) && value.name === tool?.name),
+              inlineSchema: record(tool?.definition) && record(tool.definition.input_schema) }
+          }) : [],
         } : { kind: typeof message }) : [] })
       return nativeFailure()
     }

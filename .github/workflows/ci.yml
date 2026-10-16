@@ -40,3 +40,32 @@ jobs:
             exit 1
           fi
           rm patch.txt
+  windows-native:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.3
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Bind official native Windows prerequisite
+        shell: pwsh
+        run: |
+          Get-PSDrive C | Select-Object Name, Free, Used
+          $nativePrefix = Join-Path $env:RUNNER_TEMP 'claude-native'
+          npm install --prefix $nativePrefix --ignore-scripts=false --no-audit --no-fund '@anthropic-ai/claude-code@2.1.299'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $nativeExecutable = Join-Path $nativePrefix 'node_modules/@anthropic-ai/claude-code/bin/claude.exe'
+          $version = & $nativeExecutable --version
+          if ($LASTEXITCODE -ne 0 -or $version -ne '2.1.299 (Claude Code)') { throw 'Native prerequisite unavailable' }
+          "RICE_CLAUDE_EXECUTABLE=$nativeExecutable" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - run: npm run build:check
+      - name: Check private native Windows bootstrap
+        shell: pwsh
+        run: |
+          node --input-type=module -e "import {build} from 'esbuild'; await build({entryPoints:['helper/native/windows-bootstrap.ts'],outfile:process.env.RUNNER_TEMP+'/windows-bootstrap.mjs',bundle:true,platform:'node',target:'node22',format:'esm'});"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/proof-windows-bootstrap.mjs "$env:RUNNER_TEMP/windows-bootstrap.mjs"
+      - run: node scripts/proof-windows-native-launcher.mjs
+      - run: node scripts/proof-native-adapter.mjs protocols

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, isAbsolute, join } from 'node:path'
+import { dirname, isAbsolute, join, win32 } from 'node:path'
 
 export const SUPPORTED_NATIVE_VERSIONS = new Set(['2.1.299'])
 export type NativeSelection = { format: 1; executable: string; claudeVersion: string }
@@ -13,8 +13,12 @@ export function selectionPath(configDir: string): string {
   return join(configDir, 'rice-multi-models', 'native-launcher.json')
 }
 
-export function absoluteNativePath(value: string): boolean {
-  return isAbsolute(value) && !/[\0\r\n]/.test(value)
+export function absoluteNativePath(value: string, platform = process.platform): boolean {
+  if (/[\0\r\n]/.test(value)) return false
+  // A rooted Windows path such as \\runtime is relative to the current drive.
+  return platform === 'win32'
+    ? win32.isAbsolute(value) && (/^[A-Za-z]:[\\/]/.test(value) || /^\\\\[^\\]+\\[^\\]+/.test(value))
+    : isAbsolute(value)
 }
 
 function regularSelection(path: string): void {

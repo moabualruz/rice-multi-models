@@ -8017,40 +8017,80 @@ async function* runStep(wire, signal, options = {}) {
 
 // helper/native/requests.ts
 var string2 = (value) => typeof value === "string";
-function system(value) {
-  if (value === void 0) return "";
-  if (string2(value)) return value;
-  if (Array.isArray(value) && value.every((block) => record(block) && block.type === "text" && string2(block.text))) return value.map((block) => block.text).join("\n\n");
-  throw new Error("unsupported native system blocks");
+function nativeTools(initial) {
+  const definitions = /* @__PURE__ */ new Map();
+  const active = /* @__PURE__ */ new Map();
+  function definition(value) {
+    if (!record(value) || !string2(value.name) || !value.name) throw new Error("invalid native tool");
+    if ((!string2(value.type) || value.type === "custom") && !record(value.input_schema)) throw new Error("invalid native tool schema");
+    return value;
+  }
+  if (initial !== void 0) {
+    if (!Array.isArray(initial)) throw new Error("invalid native tools");
+    for (const value of initial) {
+      const tool = definition(value);
+      definitions.set(tool.name, tool);
+      active.set(tool.name, tool);
+    }
+  }
+  function system(value) {
+    if (value === void 0) return "";
+    if (string2(value)) return value;
+    if (!Array.isArray(value)) throw new Error("unsupported native system blocks");
+    return value.map((block) => {
+      if (!record(block)) throw new Error("unsupported native system blocks");
+      if (block.type === "text" && string2(block.text)) return block.text;
+      if (!["tool_addition", "tool_removal"].includes(String(block.type)) || !record(block.tool)) throw new Error("unsupported native system blocks");
+      const update = block.tool;
+      if (block.type === "tool_removal") {
+        if (update.type !== "tool_reference" || !string2(update.name) || !update.name) throw new Error("invalid native tool removal");
+        active.delete(update.name);
+        return `Tool removed: ${JSON.stringify(update.name)}`;
+      }
+      let name, tool;
+      if (update.type === "tool_definition") {
+        tool = definition(update.definition);
+        name = tool.name;
+        definitions.set(name, tool);
+      } else if (update.type === "tool_reference" && string2(update.name) && update.name) {
+        name = update.name;
+        tool = definitions.get(name);
+      } else throw new Error("invalid native tool addition");
+      active.set(name, tool);
+      return `Tool made available: ${JSON.stringify(name)}`;
+    }).join("\n\n");
+  }
+  return { system, current: () => [...active.values()].map((tool) => {
+    if (!tool) throw new Error("native tool addition has no verified definition");
+    return tool;
+  }) };
 }
 function nativeRequest(body, owner) {
   if (owner.unowned || !owner.model) throw new Error("native inference has no verified conversation owner");
   if (!record(body) || !string2(body.model) || !Array.isArray(body.messages) || !body.messages.length) throw new Error("invalid native Messages request");
+  const available = nativeTools(body.tools);
+  const system = available.system(body.system);
   const transcript = body.messages.map((message) => {
     if (!record(message) || !["user", "assistant", "system", "developer"].includes(String(message.role)) || !(string2(message.content) || Array.isArray(message.content) && message.content.every((block) => record(block) && string2(block.type)))) throw new Error("invalid native transcript");
     if (message.role === "system" || message.role === "developer") {
       return { role: "user", content: `<system-reminder>
-${system(message.content)}
+${available.system(message.content)}
 </system-reminder>` };
     }
     return { role: message.role, content: message.content };
   });
   const tools = [], serverTools = [];
-  if (body.tools !== void 0) {
-    if (!Array.isArray(body.tools)) throw new Error("invalid native tools");
-    for (const tool of body.tools) {
-      if (!record(tool) || !string2(tool.name)) throw new Error("invalid native tool");
-      if (string2(tool.type) && tool.type.startsWith("tool_search_tool_") && tool.name === "ToolSearch") {
-        tools.push({ name: "ToolSearch", description: "Find deferred tools by query before calling them.", schema: { type: "object", properties: { query: { type: "string" }, max_results: { type: "number" } }, required: ["query"] } });
-        continue;
-      }
-      if (string2(tool.type) && tool.type !== "custom") {
-        serverTools.push(tool);
-        continue;
-      }
-      if (!record(tool.input_schema)) throw new Error("invalid native tool schema");
-      tools.push({ name: tool.name, description: string2(tool.description) ? tool.description : "", schema: tool.input_schema, ...tool.defer_loading === true ? { deferred: true } : {} });
+  for (const tool of available.current()) {
+    if (string2(tool.type) && tool.type.startsWith("tool_search_tool_") && tool.name === "ToolSearch") {
+      tools.push({ name: "ToolSearch", description: "Find deferred tools by query before calling them.", schema: { type: "object", properties: { query: { type: "string" }, max_results: { type: "number" } }, required: ["query"] } });
+      continue;
     }
+    if (string2(tool.type) && tool.type !== "custom") {
+      serverTools.push(tool);
+      continue;
+    }
+    if (!record(tool.input_schema)) throw new Error("invalid native tool schema");
+    tools.push({ name: tool.name, description: string2(tool.description) ? tool.description : "", schema: tool.input_schema, ...tool.defer_loading === true ? { deferred: true } : {} });
   }
   if (body.max_tokens !== void 0 && (!Number.isSafeInteger(body.max_tokens) || Number(body.max_tokens) < 0)) throw new Error("invalid native output cap");
   const config = record(body.output_config) ? body.output_config : void 0;
@@ -8067,7 +8107,7 @@ ${system(message.content)}
     serverTools,
     req: {
       target: owner.model,
-      system: system(body.system),
+      system,
       transcript,
       tools,
       who: owner.agentId ?? "main",
@@ -8942,7 +8982,7 @@ function nativeFetch(original, ownership, direct = runStep, observe) {
     } catch (error2) {
       if (request.signal.aborted) throw request.signal.reason;
       const message = error2 instanceof Error ? error2.message : "";
-      const reason = /^(native inference has no verified conversation owner|invalid native [a-z ]+|unsupported native [a-z ]+|native provider configuration [a-z ]+|native server tool requires a direct implementation)$/.test(message) ? message : "adapter-request-failed";
+      const reason = /^(native inference has no verified conversation owner|native tool addition has no verified definition|invalid native [a-z ]+|unsupported native [a-z ]+|native provider configuration [a-z ]+|native server tool requires a direct implementation)$/.test(message) ? message : "adapter-request-failed";
       observe?.({
         phase: "refused",
         reason,
@@ -8953,7 +8993,15 @@ function nativeFetch(original, ownership, direct = runStep, observe) {
         messages: record(body) && Array.isArray(body.messages) ? body.messages.slice(0, 20).map((message2) => record(message2) ? {
           role: ["user", "assistant", "system", "developer"].includes(String(message2.role)) ? message2.role : "unknown",
           contentKind: Array.isArray(message2.content) ? "array" : typeof message2.content,
-          blocks: Array.isArray(message2.content) ? message2.content.slice(0, 12).map((block) => record(block) ? typeof block.type === "string" && /^[a-z_0-9]+$/.test(block.type) ? block.type : Object.keys(block).filter((key2) => /^[a-z_]+$/.test(key2)) : typeof block) : []
+          blocks: Array.isArray(message2.content) ? message2.content.slice(0, 12).map((block) => record(block) ? typeof block.type === "string" && /^[a-z_0-9]+$/.test(block.type) ? block.type : Object.keys(block).filter((key2) => /^[a-z_]+$/.test(key2)) : typeof block) : [],
+          toolChanges: Array.isArray(message2.content) ? message2.content.filter((block) => record(block) && ["tool_addition", "tool_removal"].includes(String(block.type))).slice(0, 12).map((block) => {
+            const tool = record(block.tool) ? block.tool : void 0;
+            return {
+              kind: tool?.type === "tool_reference" || tool?.type === "tool_definition" ? tool.type : "unknown",
+              schemaInRequest: record(body) && Array.isArray(body.tools) && body.tools.some((value) => record(value) && value.name === tool?.name),
+              inlineSchema: record(tool?.definition) && record(tool.definition.input_schema)
+            };
+          }) : []
         } : { kind: typeof message2 }) : []
       });
       return nativeFailure();

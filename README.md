@@ -31,8 +31,8 @@ Providers:
 
 ## Install and start
 
-Release **0.7.1** runs its native adapter in the official compiled **Claude Code
-2.1.299** on macOS and Linux, including WSL, with **Node.js 22 or newer**. Your
+Release **0.8.0** runs its native adapter in the official compiled **Claude Code
+2.1.299** on macOS, Linux (including WSL), and native Windows, with **Node.js 22 or newer**. Your
 usual `claude` command can stay on another version. Setup saves a separate
 qualified executable for `rice-claude`; it does not upgrade or downgrade your
 normal Claude installation. Other versions, including 2.1.300, are not qualified
@@ -90,7 +90,8 @@ dependency installation inside the plugin cache is needed.**
    rice-claude
    ```
 
-   If the command is not on PATH, use `"$HOME/.local/bin/rice-claude"`. An already
+   If the command is not on PATH, use `"$HOME/.local/bin/rice-claude"` on macOS/Linux,
+   or `& "$HOME/.local/bin/rice-claude.cmd"` in Windows PowerShell. An already
    running Claude process cannot load the native adapter. For a declared API or
    local provider, run `/rice-models providers` in this new session, then
    `/rice-models approve <provider>` with its configured provider name. Next run:
@@ -130,6 +131,19 @@ The first command installs the pinned official package into that private prefix.
 It is not a global CLI installation. The second prints a setup command with your
 actual absolute path. Copy that printed command into Claude Code. On WSL, run
 the terminal commands inside the same Linux distribution as your Claude session.
+
+On native Windows, use PowerShell instead:
+
+```powershell
+$nativePrefix = Join-Path $HOME '.claude/rice-multi-models/runtimes/claude-2.1.299'
+npm install --prefix $nativePrefix '@anthropic-ai/claude-code@2.1.299' --no-audit --no-fund
+$nativeExecutable = Join-Path $nativePrefix 'node_modules/@anthropic-ai/claude-code/bin/claude.exe'
+Write-Output ('/rice-models setup native "' + $nativeExecutable + '"')
+```
+
+Copy the printed slash command into Claude. Setup creates the managed pair
+`rice-claude.cmd` and `rice-claude.mjs` in `$HOME/.local/bin`. Keep both files.
+The launcher uses your verified Node executable and handles native Windows paths.
 
 The verified selection lives in
 `~/.claude/rice-multi-models/native-launcher.json`, or under your active
@@ -173,6 +187,19 @@ older session or using an interactive resume picker, pass `--model <id>` to bind
 its provider before startup inference. Provider approvals are stored in the
 native inline plugin scope used by the launcher. Approve declared providers in
 that session with `/rice-models approve <provider>`.
+
+With Rice Accounts 0.3 or newer installed, the same launcher also accepts:
+
+```sh
+rice-claude --account personal-live --resume <session-id> --model <provider/model>
+```
+
+Use a saved browser OAuth account name. Its credential folder is selected before
+resume or startup compaction; the machine's settings, MCP configuration and model
+providers still apply. Ordinary independent launches start with the machine login.
+Within a running session, `/rice-account <name>` changes that session and its
+descendants. `/reload-plugins` updates function hooks; a process that lacks the
+native cache hook needs a launcher restart to update account usage reporting.
 
 Native WebSearch uses a SearXNG JSON search endpoint supplied through
 `RICE_MULTI_MODELS_SEARCH_URL`, for example `https://search.example/search`.
@@ -505,14 +532,14 @@ Codex CLI on the same account. The session helper accepts up to 64 concurrent st
 
 ## Update
 
-Release **0.7.1** saves the verified native executable during launcher setup, so
-plain `rice-claude` can use a private qualified 2.1.299 copy while the machine's
-ordinary Claude command keeps its version. Missing or invalid saved selections
-fail with a repair instruction. The native adapter, direct compaction, web
-inference, prompt/agent evaluators, concurrent child ownership, temporary skill
-aliases, startup approvals and UUID resume binding from 0.7.0 remain available. The shipped
-Node helper, discovery, legacy picker migration and primary-window integration
-remain available. The `rice-mods` marketplace tracks this repository's `main` without a
+Release **0.8.0** adds the native Windows launcher, translates Claude's positional
+tool additions and removals, and composes Rice Accounts' native cache and explicit
+startup account selection. Launcher setup still saves the verified native
+executable, so plain `rice-claude` reuses a private qualified 2.1.299 copy while the
+machine's ordinary Claude command keeps its version. The native adapter, direct
+compaction, web inference, prompt/agent evaluators, concurrent child ownership,
+temporary skill aliases, startup approvals and UUID resume binding remain available.
+The `rice-mods` marketplace tracks this repository's `main` without a
 tag pin. Update both the marketplace and your installed mod, then reload or restart
 the session:
 
@@ -524,7 +551,7 @@ claude plugin update rice-multi-models@rice-mods
 ## Requirements and platform scope
 
 **Consumers:** The full native adapter is qualified for the official compiled
-Claude Code **2.1.299** executable on macOS and Linux (including WSL), with
+Claude Code **2.1.299** executable on macOS, Linux (including WSL), and native Windows, with
 Node.js 22 or newer. Other host versions refuse until their compatibility proof
 is added. Launch through `rice-claude`; IDE, desktop and SDK clients must use this
 verified entry point rather than an unmodified launch path. Optional provider CLIs,
@@ -533,12 +560,13 @@ login is not a requirement for using a declared local endpoint. The compiled
 helper, authenticated WebSocket implementation and provider instruction asset
 are included in the plugin payload. No consumer dependency installation is needed.
 
-The legacy Node helper handles macOS/Linux paths and Unix sockets, and Windows
-paths, npm shims and named pipes. The native preload launcher supports macOS and
-Linux only. Native Windows qualification must be performed
-on a Windows executor; portable code and simulated Windows tests are not a
-claim that Windows has been live-tested. WSL uses the Linux runtime and does not
-qualify native Windows.
+The Node helper handles macOS/Linux paths and Unix sockets, and Windows paths,
+npm shims and named pipes. Native Windows uses an owned `.cmd`/`.mjs` launcher
+pair and a private bootstrap directory protected by Windows ACLs. Its actual
+native executor checks cover path spaces, fallback transport and normal plugin
+updates. WSL uses the Linux runtime. Claude's Chrome integration remains subject
+to its native browser-login and OS requirements; WSL Chrome control is outside
+this mod's scope.
 
 **Contributors:** pinned npm development tools build and typecheck the Node
 helper. Bun is retained only for the existing contributor test suite, not for

@@ -6,7 +6,8 @@
   ],
   "platforms": [
     "darwin",
-    "linux"
+    "linux",
+    "win32"
   ],
-  "sha256": "989a642bc6c79c4b5e431c9da65bb443a106df833d94863e592a627ec847ddc2"
+  "sha256": "4cdf829ce4e85fa9815770ee0d3e2fccc90bd73f4b81156e0716c071fced876b"
 }

@@ -1,7 +1,7 @@
 // Reproducible, offline build after npm install. --check compares without writing generated files.
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
 
@@ -37,11 +37,11 @@ const result = await build({
     },
   }],
 })
-const bundles = Object.fromEntries(result.outputFiles.map(file => [file.path.split('/').at(-1), file.contents]))
+const bundles = Object.fromEntries(result.outputFiles.map(file => [basename(file.path), file.contents]))
 bundles['entry.mjs'] = Buffer.concat([Buffer.from('#!/usr/bin/env node\n// rice-multi-models installed launcher\n'), bundles['entry.mjs']])
 const output = bundles['helper.mjs']
 const metadata = Buffer.from(`${JSON.stringify({ format: 1, node: '>=22', websocket: { name: 'ws', version: wsPackage.version, license: 'MIT' }, sha256: createHash('sha256').update(output).digest('hex') }, null, 2)}\n`)
-const nativeMetadata = Buffer.from(`${JSON.stringify({ format: 1, adapter: 1, hosts: ['2.1.299'], platforms: ['darwin', 'linux'], sha256: createHash('sha256').update(bundles['native.mjs']).digest('hex') }, null, 2)}\n`)
+const nativeMetadata = Buffer.from(`${JSON.stringify({ format: 1, adapter: 1, hosts: ['2.1.299'], platforms: ['darwin', 'linux', 'win32'], sha256: createHash('sha256').update(bundles['native.mjs']).digest('hex') }, null, 2)}\n`)
 const files = [...Object.entries(bundles), ['helper.meta.json', metadata], ['native.meta.json', nativeMetadata]]
 if (process.argv.includes('--check')) {
   for (const [filename, bytes] of files) {

@@ -345,12 +345,14 @@ export async function resolveType(io: PromptsPort, s: Session, type: string | un
 
 // --- the prompt of a step ------------------------------------------------------------------------------------
 
-// The platform as `uname -s` names it, lowercased (darwin, linux); undefined when it cannot be read.
+// The installed helper already requires Node; its platform is portable to native Windows.
 async function platformOf(io: Pick<PromptsPort, 'run'>, s: Session): Promise<string | undefined> {
   if (s.platform === undefined) {
-    const r = await io.run(['/usr/bin/uname', '-s'])
-    const name = r.stdout.trim().toLowerCase()
-    s.platform = r.exitCode === 0 && /^[a-z0-9_-]{1,32}$/.test(name) ? name : null
+    try {
+      const r = await io.run(['node', '-p', 'process.platform'])
+      const name = r.stdout.trim()
+      s.platform = r.exitCode === 0 && ['darwin', 'linux', 'win32'].includes(name) ? name : null
+    } catch { s.platform = null }
   }
   return s.platform ?? undefined
 }

@@ -208,14 +208,22 @@ export function pluginRoot(plugins: InstalledPlugins, plugin: string, cwd: strin
   if (keys.length > 1) return { error: `plugin ${plugin} is installed from more than one marketplace (${keys.join(', ')})` }
   const key = keys[0] as string
   const installs = (plugins[key] ?? []).filter(isObject)
+  const comparable = (path: string) => {
+    const normalized = path.replace(/\\/g, '/').replace(/\/+$/, '')
+    return /^[A-Za-z]:\//.test(normalized) || normalized.startsWith('//') ? normalized.toLowerCase() : normalized
+  }
+  const current = comparable(cwd)
   const covering = installs.flatMap(i => {
     const path = i['projectPath']
-    return typeof path === 'string' && (cwd === path || cwd.startsWith(`${path}/`)) ? [{ install: i, path }] : []
+    const parent = typeof path === 'string' ? comparable(path) : undefined
+    return parent !== undefined && (current === parent || current.startsWith(`${parent}/`)) ? [{ install: i, path: parent }] : []
   })
   const deepest = covering.sort((a, b) => b.path.length - a.path.length)[0]
   const install = deepest?.install ?? installs.find(i => i['projectPath'] === undefined)
   const root = install?.['installPath']
-  return typeof root === 'string' && root.startsWith('/') ? { root: root.replace(/\/+$/, '') } : { error: `plugin ${key} has no install for ${cwd}` }
+  return typeof root === 'string' && !/[\0\r\n]/.test(root) && (root.startsWith('/') || /^[A-Za-z]:[\\/]/.test(root) || /^\\\\[^\\]+\\[^\\]+/.test(root))
+    ? { root: root.replace(/[\\/]+$/, '') }
+    : { error: `plugin ${key} has no install for ${cwd}` }
 }
 
 // Whether a definition lets its agent call `tool`: listed in `tools` (or `tools` left out, or `*`), and not

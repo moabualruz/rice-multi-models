@@ -19,6 +19,56 @@ test('native compactor positional system reminders retain their text and orderin
   expect(result.req.transcript[1].content).toBe('<system-reminder>\nKeep the original constraint\n</system-reminder>')
 })
 
+test('native tool availability changes preserve positional text and the final callable schemas', () => {
+  const read = { name: 'Read', description: 'Read a file', input_schema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } }
+  const added = { name: 'mcp__example__lookup', description: 'Look up an entry', input_schema: { type: 'object', properties: { key: { type: 'string' } }, required: ['key'] } }
+  const result = nativeRequest({ model: 'native-alias', tools: [read], messages: [
+    { role: 'user', content: 'Earlier' },
+    { role: 'system', content: [
+      { type: 'text', text: 'Tools changed' },
+      { type: 'tool_addition', tool: { type: 'tool_reference', name: 'Read' } },
+      { type: 'tool_addition', tool: { type: 'tool_definition', definition: added }, cache_control: { type: 'ephemeral' } },
+      { type: 'tool_removal', tool: { type: 'tool_reference', name: 'Read' } },
+    ] },
+    { role: 'assistant', content: 'Later' },
+  ], tool_choice: { type: 'tool', name: added.name } }, { model: 'codex/selected' })
+  expect(result.req.tools).toEqual([{ name: added.name, description: added.description, schema: added.input_schema }])
+  expect(result.req.transcript.map(message => message.role)).toEqual(['user', 'user', 'assistant'])
+  expect(result.req.transcript[1].content).toBe('<system-reminder>\nTools changed\n\nTool made available: "Read"\n\nTool made available: "mcp__example__lookup"\n\nTool removed: "Read"\n</system-reminder>')
+})
+
+test('native tool definitions retain revisions and can be referenced again after removal', () => {
+  const definition = { name: 'Check', input_schema: { type: 'object', properties: { revision: { const: 2 } } } }
+  const result = nativeRequest({ model: 'alias', system: [{ type: 'tool_addition', tool: { type: 'tool_definition', definition } }], messages: [
+    { role: 'developer', content: [{ type: 'tool_removal', tool: { type: 'tool_reference', name: 'Check' } }] },
+    { role: 'system', content: [{ type: 'tool_addition', tool: { type: 'tool_reference', name: 'Check' } }] },
+    { role: 'user', content: 'Run the current check' },
+  ] }, { model: 'other/selected' })
+  expect(result.req.tools).toEqual([{ name: 'Check', description: '', schema: definition.input_schema }])
+})
+
+test('native tool changes fail closed on missing definitions, malformed updates and removed forced choices', () => {
+  const body = { model: 'alias', tools: [{ name: 'Check', input_schema: { type: 'object' } }], messages: [{ role: 'system', content: [{ type: 'tool_removal', tool: { type: 'tool_reference', name: 'Check' } }] }] }
+  expect(() => nativeRequest({ ...body, tool_choice: { type: 'tool', name: 'Check' } }, { model: 'codex/selected' })).toThrow('tool choice')
+  for (const block of [
+    { type: 'tool_addition', tool: { type: 'tool_reference', name: 'Unknown' } },
+    { type: 'tool_addition', tool: { type: 'tool_definition', definition: { name: 'Bad' } } },
+    { type: 'tool_removal', tool: { type: 'tool_reference' } },
+    { type: 'future_system_block' },
+  ]) expect(() => nativeRequest({ ...body, messages: [{ role: 'system', content: [block] }] }, { model: 'codex/selected' })).toThrow()
+})
+
+test('removed historical tool references do not require schemas at the current request boundary', () => {
+  const result = nativeRequest({ model: 'alias', messages: [
+    { role: 'system', content: [{ type: 'tool_addition', tool: { type: 'tool_reference', name: 'OldTool' } }] },
+    { role: 'system', content: [{ type: 'tool_removal', tool: { type: 'tool_reference', name: 'OldTool' } }] },
+    { role: 'user', content: 'Continue without the removed tool' },
+  ] }, { model: 'codex/selected' })
+  expect(result.req.tools).toEqual([])
+  expect(result.req.transcript[0].content).toContain('Tool made available: "OldTool"')
+  expect(result.req.transcript[1].content).toContain('Tool removed: "OldTool"')
+})
+
 test('native SSE closes every block and preserves signed reasoning, tools, usage and stop', () => {
   const response = new NativeResponse('native-alias')
   const events: StepEvent[] = [{ type: 'thinking', text: 'Reason' }, { type: 'signature', thinking: 'Reason', signature: 'sealed' },
