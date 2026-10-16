@@ -74,7 +74,7 @@ import { join as join2 } from "node:path";
 
 // hooks/config.ts
 var REQUEST_KEYS = ["params", "effort", "cache", "headers"];
-var MODEL_KEYS = ["kind", "contextWindow", "maxInputTokens", "maxOutputTokens", "tools", "vision", ...REQUEST_KEYS];
+var MODEL_KEYS = ["kind", "contextWindow", "maxInputTokens", "maxOutputTokens", "tools", "vision", "webSearch", ...REQUEST_KEYS];
 var MAX_TIMEOUT_MS = 2 ** 31 - 1;
 
 // helper/native/ownership.ts
@@ -168,32 +168,37 @@ import { join as join4 } from "node:path";
 var WINDOWS_BOOTSTRAP_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-$stage = 'identity'
+function Set-BootstrapStage([string]$value) {
+  $script:stage = $value
+  # Captured by the parent only. Preserve the final phase if PowerShell hangs.
+  [Console]::Error.WriteLine('rice-bootstrap-stage=' + $value)
+}
+Set-BootstrapStage 'identity'
 try {
   $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
   $sid = $identity.User.Value
   function Assert-PrivatePath([string]$path, [bool]$directory) {
-    $script:stage = 'inspect-private-path'
+    Set-BootstrapStage 'inspect-private-path'
     $item = Get-Item -Force -LiteralPath $path
-    $script:stage = 'private-path-type'
+    Set-BootstrapStage 'private-path-type'
     if ($item.PSIsContainer -ne $directory) { throw 'unsafe bootstrap type' }
-    $script:stage = 'private-path-reparse'
+    Set-BootstrapStage 'private-path-reparse'
     if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'unsafe bootstrap reparse point' }
-    $script:stage = 'read-private-acl'
+    Set-BootstrapStage 'read-private-acl'
     $sections = [System.Security.AccessControl.AccessControlSections]'Access,Owner'
     $acl = if ($directory) { [System.IO.Directory]::GetAccessControl($path, $sections) } else { [System.IO.File]::GetAccessControl($path, $sections) }
-    $script:stage = 'private-path-owner'
+    Set-BootstrapStage 'private-path-owner'
     $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
     # Elevated Windows tokens can create files owned by their TokenOwner group.
     # Directories have our explicit user owner; files still require the private DACL.
     $owners = @($sid)
     if (-not $directory) { $owners += $identity.Owner.Value }
     if ($owner -notin $owners) { throw 'unsafe bootstrap owner' }
-    $script:stage = 'private-directory-inheritance'
+    Set-BootstrapStage 'private-directory-inheritance'
     if ($directory -and -not $acl.AreAccessRulesProtected) { throw 'unsafe bootstrap inheritance' }
     $write = [System.Security.AccessControl.FileSystemRights]::Write -bor [System.Security.AccessControl.FileSystemRights]::Delete -bor [System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor [System.Security.AccessControl.FileSystemRights]::TakeOwnership
     foreach ($rule in $acl.Access) {
-      $script:stage = 'private-path-writers'
+      Set-BootstrapStage 'private-path-writers'
       $writer = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
       if ($rule.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and ($rule.FileSystemRights -band $write) -ne 0 -and $writer -notin @($sid, 'S-1-5-18', 'S-1-5-32-544')) { throw 'unsafe bootstrap writer' }
     }
@@ -217,12 +222,12 @@ public static class RiceNativeBootstrapPath {
     if (-not $base) { continue }
     $directory = Join-Path $base ('rice-multi-models-' + $sid)
     $existed = [System.IO.Directory]::Exists($directory)
-    $stage = 'create-private-directory'
+    Set-BootstrapStage 'create-private-directory'
     try { [void][System.IO.Directory]::CreateDirectory($directory, $security) } catch { continue }
     Assert-PrivatePath $directory $true
     $plain = $directory
     if ($plain -match '\s') {
-      $stage = 'shorten-directory'
+      Set-BootstrapStage 'shorten-directory'
       try {
         Add-Type -TypeDefinition $shortPathSource
         $buffer = New-Object System.Text.StringBuilder(32768)
@@ -236,7 +241,7 @@ public static class RiceNativeBootstrapPath {
     }
     $file = Join-Path $directory $env:RICE_NATIVE_BOOTSTRAP_FILE
     if (Test-Path -LiteralPath $file) { Assert-PrivatePath $file $false }
-    $stage = 'return-private-path'
+    Set-BootstrapStage 'return-private-path'
     [pscustomobject]@{directory=$plain} | ConvertTo-Json -Compress
     exit 0
   }
@@ -264,8 +269,9 @@ function windowsBootstrapDirectory(filename, options = {}) {
     } catch {
     }
   }
-  const stage = result.stderr?.match(/stage=([a-z-]+)/)?.[1];
-  throw new NativeSelectionError(`Windows native bootstrap needs a private, space-free temporary path${stage ? ` (stage=${stage})` : ""}. Check your user TEMP permissions, then run /rice-models setup native again.`);
+  const stage = Array.from(result.stderr?.matchAll(/stage=([a-z-]+)/g) ?? []).at(-1)?.[1];
+  const timeout = result.error !== void 0 && "code" in result.error && result.error.code === "ETIMEDOUT";
+  throw new NativeSelectionError(`Windows native bootstrap ${timeout ? "timed out establishing" : "needs"} a private, space-free temporary path${stage ? ` (stage=${stage})` : ""}. Check your user TEMP permissions, then run /rice-models setup native again.`);
 }
 
 // helper/native/launch.ts
@@ -366,6 +372,7 @@ async function launch(args) {
     }
     if (!version || !SUPPORTED_NATIVE_VERSIONS.has(version)) throw new NativeSelectionError(`Claude ${version ?? "unknown"} has not passed the native adapter compatibility proof; supported: ${[...SUPPORTED_NATIVE_VERSIONS].join(", ")}. ${NATIVE_SELECTION_REPAIR}`);
     environment.RICE_MULTI_MODELS_NATIVE_EXECUTABLE = ready.executable;
+    environment.RICE_MULTI_MODELS_NATIVE_VERSION = version;
     selection = { format: 1, executable: ready.executable, claudeVersion: version };
   } finally {
     rmSync2(verification, { recursive: true, force: true });

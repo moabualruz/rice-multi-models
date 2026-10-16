@@ -101,6 +101,7 @@ export async function launch(args: string[]): Promise<number> {
     }
     if (!version || !SUPPORTED_NATIVE_VERSIONS.has(version)) throw new NativeSelectionError(`Claude ${version ?? 'unknown'} has not passed the native adapter compatibility proof; supported: ${[...SUPPORTED_NATIVE_VERSIONS].join(', ')}. ${NATIVE_SELECTION_REPAIR}`)
     environment.RICE_MULTI_MODELS_NATIVE_EXECUTABLE = ready.executable
+    environment.RICE_MULTI_MODELS_NATIVE_VERSION = version
     selection = { format: 1, executable: ready.executable, claudeVersion: version }
   } finally { rmSync(verification, { recursive: true, force: true }) }
   if (installing) {

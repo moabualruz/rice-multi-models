@@ -132,13 +132,14 @@ try {
     RICE_MULTI_MODELS_SEARCH_URL: `http://127.0.0.1:${search.address().port}/search`, RICE_MULTI_MODELS_NATIVE_TRACE: join(fixture, 'native.jsonl'), ENABLE_TOOL_SEARCH: 'true', DISABLE_AUTOUPDATER: '1', DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1' })
   async function run(name, extra, prompt, permission = 'dontAsk', model = 'a/main') {
     phase = name; mainCalls = 0
+    const started = Date.now()
     const child = spawn(process.execPath, [join(plugin, 'dist/launch.mjs'), '-p', ...(model ? ['--model', model] : []), '--setting-sources', 'user', '--strict-mcp-config', '--permission-mode', permission, '--allowedTools', 'Skill,ToolSearch,WebFetch,WebSearch,Agent,SendMessage', '--output-format', 'json', ...extra, '--', prompt], { cwd: fixture, env: { ...env, RICE_OWNED_PHASE: name }, stdio: ['ignore', 'pipe', 'pipe'] })
     process.stdout.write(`${JSON.stringify({ phase: name, ownedPid: child.pid })}\n`)
     let stdout = '', stderr = ''; child.stdout.on('data', bytes => stdout += bytes); child.stderr.on('data', bytes => stderr += bytes)
     const timer = setTimeout(() => child.kill('SIGTERM'), 60000)
     const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', resolve) }); clearTimeout(timer)
     let result; try { result = JSON.parse(stdout) } catch {}
-    if (code !== 0 && !['partial-failure', 'budget'].includes(name)) process.stdout.write(`${JSON.stringify({ phase: name, observations, trace: (() => { try { return readFileSync(join(fixture, 'native.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line)) } catch { return [] } })(), setupErrors: stderr.match(/(?:Error|rice-multi-models)[^\n]{0,180}/g)?.slice(-3) ?? [], outputTail: stdout.slice(-300) })}\n`)
+    if (code !== 0 && !['partial-failure', 'budget'].includes(name)) process.stdout.write(`${JSON.stringify({ phase: name, elapsedMs: Date.now() - started, ...(stderr.includes('Windows native bootstrap') ? { bootstrap: { stage: stderr.match(/stage=([a-z-]+)/)?.[1] ?? 'no-phase-output', errorClass: stderr.includes('timed out establishing') ? 'ETIMEDOUT' : 'path-refused' } } : {}), observations, trace: (() => { try { return readFileSync(join(fixture, 'native.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line)) } catch { return [] } })(), setupErrors: stderr.match(/(?:Error|rice-multi-models)[^\n]{0,180}/g)?.slice(-3) ?? [], outputTail: stdout.slice(-300) })}\n`)
     assert.equal(code, ['partial-failure', 'budget'].includes(name) ? 1 : 0, `native ${name} exit; output type ${result?.type ?? 'missing'}, stderr present ${!!stderr}`)
     assert.ok(result, `native ${name} emitted its JSON result`)
     assert.equal(result.is_error, ['partial-failure', 'budget'].includes(name), `native ${name} result`)
