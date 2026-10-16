@@ -8,7 +8,9 @@ type Installation = { scope?: string; projectPath?: string; installPath?: string
 /** Resolve the actual native plugin installation on every invocation, including normal updates. */
 export function installedRoot(configDir: string, cwd: string): string {
   const ledger = JSON.parse(readFileSync(join(configDir, 'plugins/installed_plugins.json'), 'utf8')) as { plugins?: Record<string, Installation[]> }
-  const choices = Object.entries(ledger.plugins ?? {}).filter(([id]) => id.split('@')[0] === 'rice-multi-models').flatMap(([, installs]) => installs)
+  // The managed launcher belongs to the documented Rice marketplace install.
+  // Retired repair installs can remain in the ledger and must not win by order.
+  const choices = (ledger.plugins?.['rice-multi-models@rice-mods'] ?? [])
     .filter(install => typeof install.installPath === 'string' && isAbsolute(install.installPath)
       && (install.scope === 'user' || install.scope === 'local' || install.scope === 'project')
       && (!install.projectPath || cwd === resolve(install.projectPath) || cwd.startsWith(resolve(install.projectPath) + sep)))
@@ -21,7 +23,12 @@ try {
   const root = installedRoot(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), process.cwd())
   const { launch } = await import(pathToFileURL(join(root, 'dist/launch.mjs')).href) as { launch(args: string[]): Promise<number> }
   process.exitCode = await launch(process.argv.slice(2))
-} catch {
-  process.stderr.write('rice-multi-models: rice-claude could not start the installed native adapter; update the plugin and run /rice-models setup native\n')
+} catch (error) {
+  // Only our controlled selection errors cross this boundary, never raw native
+  // subprocess output, configuration documents or arbitrary parser failures.
+  const message = error instanceof Error && 'code' in error && error.code === 'RICE_NATIVE_SELECTION'
+    ? error.message
+    : 'rice-claude could not start the installed native adapter; update the plugin and run /rice-models setup native'
+  process.stderr.write(`rice-multi-models: ${message}\n`)
   process.exitCode = 1
 }

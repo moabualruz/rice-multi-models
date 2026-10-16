@@ -4,9 +4,9 @@ import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSyn
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { absoluteNativePath, NATIVE_SELECTION_REPAIR, NativeSelectionError, readSelection, saveSelection, selectionPath, SUPPORTED_NATIVE_VERSIONS } from './native-runtime.ts'
+import type { NativeSelection } from './native-runtime.ts'
 import { resumedModel } from './state.ts'
-
-const SUPPORTED = new Set(['2.1.299'])
 
 /** Bun does not parse quoted preload paths. A private plain-path bootstrap imports the actual file URL. */
 export function bootstrap(bundle: string): string {
@@ -33,23 +33,23 @@ export async function launch(args: string[]): Promise<number> {
   if (Number(process.versions.node.split('.')[0]) < 22) throw new Error('rice-multi-models launcher requires Node 22+')
   const dist = dirname(fileURLToPath(import.meta.url))
   const plugin = dirname(dist)
-  if (args.length === 1 && args[0] === '--install') {
+  const installing = args[0] === '--install'
+  const explicit = installing ? args[1] : undefined
+  if (installing && (args.length > 2 || explicit !== undefined && !absoluteNativePath(explicit))) {
+    throw new NativeSelectionError('Usage: --install [absolute path to a qualified Claude executable]')
+  }
+  const directory = join(homedir(), '.local/bin'), path = join(directory, 'rice-claude')
+  if (installing) {
     if (process.platform === 'win32') throw new Error('native adapter installation requires macOS or Linux')
-    const directory = join(homedir(), '.local/bin'), path = join(directory, 'rice-claude')
-    mkdirSync(directory, { recursive: true })
     try {
       const existing = lstatSync(path)
       if (!existing.isFile() || existing.isSymbolicLink() || !readFileSync(path, 'utf8').startsWith('#!/usr/bin/env node\n// rice-multi-models installed launcher\n')) throw new Error('rice-claude already exists and is not this mod\'s managed launcher')
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
-    const temporary = join(directory, `.rice-claude-${crypto.randomUUID()}`)
-    try {
-      writeFileSync(temporary, readFileSync(join(dist, 'entry.mjs')), { flag: 'wx', mode: 0o755 })
-      chmodSync(temporary, 0o755); renameSync(temporary, path)
-    } finally { rmSync(temporary, { force: true }) }
-    process.stdout.write(`Installed rice-claude in ${directory}. Start new sessions with rice-claude; the official Claude executable and updater remain intact.\n`)
-    return 0
   }
-  const native = process.env.RICE_CLAUDE_EXECUTABLE || 'claude'
+  const configDir = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')
+  const override = explicit ?? process.env.RICE_CLAUDE_EXECUTABLE
+  const saved = override ? undefined : readSelection(configDir)
+  const native = override || saved?.executable || 'claude'
   const preload = bootstrap(join(dist, 'native.mjs'))
   const environment: NodeJS.ProcessEnv = { ...process.env, BUN_OPTIONS: `${process.env.BUN_OPTIONS ?? ''} --preload ${preload}`.trim(),
     // This native flag emits request-class and caller headers. They are consumed
@@ -66,19 +66,34 @@ export async function launch(args: string[]): Promise<number> {
   }
   if (model) environment.RICE_MULTI_MODELS_INITIAL_MODEL = model
   else delete environment.RICE_MULTI_MODELS_INITIAL_MODEL
-  const directory = mkdtempSync(join(dirname(preload), 'verify-'))
-  const handshake = join(directory, 'ready.json')
+  const verification = mkdtempSync(join(dirname(preload), 'verify-'))
+  const handshake = join(verification, 'ready.json')
+  let selection: NativeSelection
   try {
     const probe = spawnSync(native, ['--version'], { env: { ...environment, RICE_MULTI_MODELS_HANDSHAKE: handshake }, encoding: 'utf8', timeout: 15_000 })
     const version = probe.stdout?.match(/^(\d+\.\d+\.\d+)\s/m)?.[1]
     let ready: { version?: string; pid?: number; native?: boolean; executable?: string } | undefined
     try { ready = JSON.parse(readFileSync(handshake, 'utf8')) } catch {}
-    if (probe.status !== 0 || ready?.version !== '1' || ready.native !== true || ready.pid !== probe.pid || !ready.executable) throw new Error('native adapter did not activate in the official Claude executable')
-    if (!version || !SUPPORTED.has(version)) throw new Error(`Claude ${version ?? 'unknown'} has not passed the native adapter compatibility proof; supported: ${[...SUPPORTED].join(', ')}`)
+    if (probe.status !== 0 || ready?.version !== '1' || ready.native !== true || ready.pid !== probe.pid || !ready.executable) {
+      throw new NativeSelectionError(`The selected native Claude executable is unavailable or its adapter could not activate. ${NATIVE_SELECTION_REPAIR}`)
+    }
+    if (!version || !SUPPORTED_NATIVE_VERSIONS.has(version)) throw new NativeSelectionError(`Claude ${version ?? 'unknown'} has not passed the native adapter compatibility proof; supported: ${[...SUPPORTED_NATIVE_VERSIONS].join(', ')}. ${NATIVE_SELECTION_REPAIR}`)
     environment.RICE_MULTI_MODELS_NATIVE_EXECUTABLE = ready.executable
-  } finally { rmSync(directory, { recursive: true, force: true }) }
+    selection = { format: 1, executable: ready.executable, claudeVersion: version }
+  } finally { rmSync(verification, { recursive: true, force: true }) }
+  if (installing) {
+    mkdirSync(directory, { recursive: true })
+    const temporary = join(directory, `.rice-claude-${crypto.randomUUID()}`)
+    try {
+      writeFileSync(temporary, readFileSync(join(dist, 'entry.mjs')), { flag: 'wx', mode: 0o755 })
+      chmodSync(temporary, 0o755); renameSync(temporary, path)
+    } finally { rmSync(temporary, { force: true }) }
+    saveSelection(configDir, selection)
+    process.stdout.write(`Installed rice-claude in ${directory}. Saved verified Claude ${selection.claudeVersion} at ${selection.executable} in ${selectionPath(configDir)}. Start new sessions with rice-claude; no executable override is needed. The official Claude executable and updater remain intact.\n`)
+    return 0
+  }
   // Explicit plugin loading makes terminal and SDK invocation independent of ambient plugin settings.
-  const child = spawn(native, ['--plugin-dir', plugin, ...args], { env: environment, stdio: 'inherit' })
+  const child = spawn(selection.executable, ['--plugin-dir', plugin, ...args], { env: environment, stdio: 'inherit' })
   const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const
   const forward = (signal: NodeJS.Signals) => child.kill(signal)
   const handlers = signals.map(signal => () => forward(signal))

@@ -31,10 +31,12 @@ Providers:
 
 ## Install and start
 
-Release **0.7.0** supports the official compiled **Claude Code 2.1.299** on macOS
-and Linux, including WSL, with **Node.js 22 or newer**. Its native adapter refuses
-other Claude versions, including 2.1.300, until they are qualified. Check
-`claude --version` and `node --version` before starting.
+Release **0.7.1** runs its native adapter in the official compiled **Claude Code
+2.1.299** on macOS and Linux, including WSL, with **Node.js 22 or newer**. Your
+usual `claude` command can stay on another version. Setup saves a separate
+qualified executable for `rice-claude`; it does not upgrade or downgrade your
+normal Claude installation. Other versions, including 2.1.300, are not qualified
+for the adapter. Check `node --version` before starting.
 
 Run this one command in a terminal on the machine where Claude runs:
 
@@ -43,8 +45,8 @@ claude plugin install rice-multi-models --marketplace moabualruz/rice-mods
 ```
 
 The command adds the Rice marketplace if needed and installs the mod. Its helper
-and dependencies are bundled. **No build, Bun, TypeScript compiler, curl, jq,
-`npm install` or `bun install` is needed to use the installed plugin.**
+and dependencies are bundled. **No build, Bun, TypeScript compiler, curl, jq or
+dependency installation inside the plugin cache is needed.**
 
 1. Start a Claude Code session with `claude`, approve the mod's requested
    capabilities when prompted, then run:
@@ -60,14 +62,27 @@ and dependencies are bundled. **No build, Bun, TypeScript compiler, curl, jq,
    private copy and prints its login command. For another provider, follow the
    [provider setup table](#provider-specific-setup) below.
 
-2. In that Claude session, install the native launcher:
+2. In that Claude session, install the native launcher. If your usual `claude`
+   command is already 2.1.299, run:
 
    ```text
    /rice-models setup native
    ```
 
-   This creates the managed `rice-claude` command in `~/.local/bin`. It keeps the
-   official `claude` executable and updater intact.
+   Otherwise, select an existing official 2.1.299 executable by its full path:
+
+   ```text
+   /rice-models setup native /absolute/path/to/claude-2.1.299
+   ```
+
+   See [private native runtime](#private-native-runtime) below if you need a
+   separate copy. Paths containing spaces may be quoted. Use the actual absolute
+   path: `$HOME` and `~` are not expanded in this slash command.
+
+   Setup verifies the native adapter before saving the choice and creates the
+   managed `rice-claude` command in `~/.local/bin`. Future plain `rice-claude`
+   launches reuse that choice. The official `claude` command and updater stay
+   intact.
 
 3. Start a **new** terminal session with:
 
@@ -98,6 +113,33 @@ current session. When you already know an available model ID, you can start with
 `rice-claude --model <id>`. Discovery lists candidates; a live request establishes
 whether your account currently has access.
 
+### Private native runtime
+
+You can select a retained official native executable, such as
+`/Users/your-name/.local/share/claude/versions/2.1.299`, without changing the
+normal Claude command. Verify the actual path exists on your machine.
+
+If you need a separate copy and have npm installed, run this in your terminal:
+
+```sh
+npm install --prefix "$HOME/.claude/rice-multi-models/runtimes/claude-2.1.299" @anthropic-ai/claude-code@2.1.299 --no-audit --no-fund
+printf '/rice-models setup native "%s"\n' "$HOME/.claude/rice-multi-models/runtimes/claude-2.1.299/node_modules/.bin/claude"
+```
+
+The first command installs the pinned official package into that private prefix.
+It is not a global CLI installation. The second prints a setup command with your
+actual absolute path. Copy that printed command into Claude Code. On WSL, run
+the terminal commands inside the same Linux distribution as your Claude session.
+
+The verified selection lives in
+`~/.claude/rice-multi-models/native-launcher.json`, or under your active
+`CLAUDE_CONFIG_DIR`. Setup without an executable argument preserves an existing
+valid selection. Every launch verifies it again; a missing, changed or invalid
+selection fails with a repair command. An explicit `RICE_CLAUDE_EXECUTABLE`
+environment override takes precedence, followed by the saved selection, then
+`claude` on PATH when no selection exists. No environment override is needed
+after setup saves your choice.
+
 ### What setup does
 
 Fresh installation activates the function hooks in the current terminal session.
@@ -116,8 +158,8 @@ installing a mod cannot grant a subscription, credit, API key or model entitleme
 Use `/rice-models setup` to recheck and repair setup, or `/rice-models doctor` for
 read-only diagnostics. Neither changes your selected session model.
 
-For full native inference, run `/rice-models setup native` once, then start a new
-terminal session with `rice-claude`. This installs an owned launcher in
+For full native inference, run `/rice-models setup native [absolute-executable]`
+once, then start a new terminal session with `rice-claude`. This installs an owned launcher in
 `~/.local/bin`; it preserves the official `claude` executable and updater. The
 launcher finds the current installed plugin on every invocation, validates native
 adapter activation, and refuses an unverified host version. An already running
@@ -184,10 +226,10 @@ quota remain unknown until the provider supplies that evidence.
 - **An update appears inactive:** update the marketplace and plugin, then run
   `/reload-plugins` or restart. Editing a source checkout does not update an
   already-installed Git-backed copy.
-- **The launcher refuses your Claude version:** release 0.7.0's full native path
-  is qualified for 2.1.299. Reloading the plugin does not add support for another
-  host version. Check the release's supported version before changing your
-  installed Claude build.
+- **The launcher refuses your Claude version or saved executable:** select a
+  qualified 2.1.299 copy with `/rice-models setup native <absolute-executable>`.
+  Your ordinary Claude command can keep its current version. Reloading does not
+  qualify another native version or repair a removed saved executable.
 - **You are using headless mode:** startup remains deterministic and does not
   open interactive setup/login prompts. Inspect setup status and complete login
   in an interactive terminal before retrying.
@@ -463,9 +505,12 @@ Codex CLI on the same account. The session helper accepts up to 64 concurrent st
 
 ## Update
 
-Release **0.7.0** adds the native adapter and verified launcher, direct native
-compaction, web inference, prompt/agent evaluators, concurrent child ownership,
-temporary skill aliases, startup approvals and UUID resume binding. The shipped
+Release **0.7.1** saves the verified native executable during launcher setup, so
+plain `rice-claude` can use a private qualified 2.1.299 copy while the machine's
+ordinary Claude command keeps its version. Missing or invalid saved selections
+fail with a repair instruction. The native adapter, direct compaction, web
+inference, prompt/agent evaluators, concurrent child ownership, temporary skill
+aliases, startup approvals and UUID resume binding from 0.7.0 remain available. The shipped
 Node helper, discovery, legacy picker migration and primary-window integration
 remain available. The `rice-mods` marketplace tracks this repository's `main` without a
 tag pin. Update both the marketplace and your installed mod, then reload or restart

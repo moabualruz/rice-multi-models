@@ -39,7 +39,7 @@ import type { PickerResult, Runtime } from './setup'
 
 const PLUGIN = 'rice-multi-models'
 /** Who the requests to declared providers say they come from (OpenCode Go asks each client to name itself). */
-const USER_AGENT = 'rice-multi-models/0.7.0 (claude-code)'
+const USER_AGENT = 'rice-multi-models/0.7.1 (claude-code)'
 const PROVIDERS: Readonly<Record<string, string>> = { codex: 'OpenAI Codex (ChatGPT subscription)', agy: 'Antigravity (agy CLI)', grok: 'Grok (grok CLI)' }
 /** Agent CLIs that run their own loop and tools: their label, default model, and what a user asks for to use them. */
 const WORKERS: Readonly<Record<string, { label: string; ask: string }>> = {
@@ -740,7 +740,7 @@ async function writePicker($: EngineInterface): Promise<string> {
   return result.ok ? `Synchronized ${result.count} owned rows into ${result.path}; custom and edited rows were kept. /model lists them in new sessions.` : `Picker not changed: ${result.error}`
 }
 
-async function setupCommand($: EngineInterface, action: string | undefined): Promise<string> {
+async function setupCommand($: EngineInterface, action: string | undefined, nativeExecutable?: string): Promise<string> {
   if (action && !['repair', 'codex', 'native'].includes(action)) return 'Usage: /rice-models setup [repair|codex|native]. Optional agy/grok CLIs require their vendor-supported installers; no global install is performed.'
   runtime = await detectRuntime($)
   if (runtime.error) {
@@ -749,8 +749,8 @@ async function setupCommand($: EngineInterface, action: string | undefined): Pro
   }
   if (action === 'native') {
     try {
-      const result = await $.process.run([runtime.executable!, `${$.plugin.root}/dist/launch.mjs`, '--install'], { timeoutMs: 15_000 })
-      return result.exitCode === 0 ? result.stdout.trim() : 'Native launcher installation failed; inspect /rice-models doctor. An unrelated rice-claude file is never replaced.'
+      const result = await $.process.run([runtime.executable!, `${$.plugin.root}/dist/launch.mjs`, '--install', ...(nativeExecutable ? [nativeExecutable] : [])], { timeoutMs: 25_000 })
+      return result.exitCode === 0 ? result.stdout.trim() : 'Native launcher setup could not verify or save its chosen Claude executable. Use /rice-models setup native <absolute path to a qualified Claude executable> (supported: 2.1.299). An unrelated rice-claude file is never replaced.'
     } catch { return 'Native launcher installation did not complete; Node 22+, macOS or Linux, and the current plugin payload are required.' }
   }
   if (action === 'codex') {
@@ -826,7 +826,13 @@ async function opencodeCommand($: EngineInterface, words: readonly string[]): Pr
 
 async function runCommand($: EngineInterface, args: string): Promise<string> {
   const [first, value] = args.trim().split(/\s+/)
-  if (first === 'setup') return setupCommand($, value)
+  if (first === 'setup') {
+    // The rest is one literal executable path, including spaces. It is never a
+    // shell command; optional matching quotes only delimit the pasted path.
+    let nativeExecutable = value === 'native' ? args.trim().replace(/^setup\s+native(?:\s+|$)/, '').trim() : undefined
+    if (nativeExecutable && (nativeExecutable.startsWith('"') && nativeExecutable.endsWith('"') || nativeExecutable.startsWith("'") && nativeExecutable.endsWith("'"))) nativeExecutable = nativeExecutable.slice(1, -1)
+    return setupCommand($, value, nativeExecutable || undefined)
+  }
   if (first === 'doctor') return doctorCommand($)
   if (first === 'opencode') return opencodeCommand($, args.trim().split(/\s+/).slice(1))
   if (!first || first === 'status') return statusText($)
