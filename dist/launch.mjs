@@ -74,7 +74,7 @@ import { join as join2 } from "node:path";
 
 // hooks/config.ts
 var REQUEST_KEYS = ["params", "effort", "cache", "headers"];
-var MODEL_KEYS = ["kind", "contextWindow", "maxInputTokens", "maxOutputTokens", "tools", "vision", "webSearch", ...REQUEST_KEYS];
+var MODEL_KEYS = ["kind", "contextWindow", "maxInputTokens", "maxOutputTokens", "tools", "vision", ...REQUEST_KEYS];
 var MAX_TIMEOUT_MS = 2 ** 31 - 1;
 
 // helper/native/ownership.ts
