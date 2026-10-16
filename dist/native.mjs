@@ -7744,7 +7744,7 @@ function decoder5() {
     if (items.some((it) => isObject(it) && (it["type"] === "web_search_call" || it["type"] === "message" && Array.isArray(it["content"]) && it["content"].some((part2) => isObject(part2) && Array.isArray(part2["annotations"]))))) {
       const evidence = responsesSearchEvidence(items);
       if (evidence.error) return s.fail(evidence.error);
-      s.out.push({ t: "search_sources", sources: evidence.sources, searched: evidence.searched });
+      if (evidence.searched) s.out.push({ t: "search_sources", sources: evidence.sources, searched: true });
     }
     const u = r["usage"];
     if (isObject(u) && isIndex(u["input_tokens"]) && isIndex(u["output_tokens"])) {
