@@ -1,6 +1,6 @@
 // Copied from Trosfy/claude-styx styxd/codecs/anthropic.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: import paths for this layout.
+// Modified by Mo Abualruz: import paths for this layout.
 // The `anthropic` kind (the Messages API): request bodies from the normalized transcript, and a decoder for
 // the provider's SSE stream. Pure. The key's header is the transport's, by the provider's `authHeader`.
 import { isObject } from '../../../hooks/config'

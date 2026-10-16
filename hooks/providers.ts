@@ -9,8 +9,12 @@ import { resolve } from './names'
 export const CONFIG_FILE = 'rice-multi-models.json'
 export const TRUST_PREFIX = 'trust:'
 
-/** The config as last read: its text (empty when there is none or it does not validate) and its errors. */
-export type Loaded = { path: string; text: string; config?: Config; errors: string[] }
+/**
+ * The config as last read: its text (empty when there is none or it does not validate) and its errors.
+ * `claimed` names the provider ids and aliases a file that does not validate still declares, so their
+ * models are refused rather than sent to Claude under a provider-prefixed id.
+ */
+export type Loaded = { path: string; text: string; config?: Config; errors: string[]; claimed?: readonly string[] }
 
 export function emptyLoaded(path: string): Loaded {
   return { path, text: '', errors: [] }
@@ -20,7 +24,18 @@ export function emptyLoaded(path: string): Loaded {
 export function loadText(path: string, text: string): Loaded {
   const parsed = parseConfig(text)
 
-  return parsed.config ? { path, text, config: parsed.config, errors: [] } : { path, text: '', errors: parsed.errors }
+  return parsed.config ? { path, text, config: parsed.config, errors: [] } : { path, text: '', errors: parsed.errors, claimed: claimedNames(text) }
+}
+
+function claimedNames(text: string): string[] {
+  try {
+    const raw: unknown = JSON.parse(text)
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return []
+    const names = (value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? Object.keys(value) : []
+    return [...names((raw as Record<string, unknown>).providers), ...names((raw as Record<string, unknown>).aliases)]
+  } catch {
+    return []
+  }
 }
 
 /** What a model name routes to among the declared providers, with the model's input budget. */

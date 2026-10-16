@@ -14,4 +14,4 @@ it; reversibility alone does not authorize an action.
 Respect an active Plan mode's restrictions and the harness's approval flow. For a
 summary or compaction request, return the requested summary instead of resuming
 the underlying task. Ordinary conversation and tool history remain context when
-models switch; provider-specific reasoning state is handled by the gateway.
+models switch; provider-specific reasoning state is handled by the direct provider client.

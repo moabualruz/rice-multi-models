@@ -1,6 +1,6 @@
 // Copied from Trosfy/claude-styx styxd/codec.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: import paths for this layout; Effort comes from hooks/protocol. A request carries the
+// Modified by Mo Abualruz: import paths for this layout; Effort comes from hooks/protocol. A request carries the
 // conversation's cache key; joinUrl.
 // What a codec is: one provider kind's request encoder and response decoder, and the pieces codecs share. Pure.
 import type { Effort } from '../../hooks/protocol'

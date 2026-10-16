@@ -15,16 +15,25 @@ mock.module(`${root}/helper/styx/step.ts`, () => ({ createStepper: () => ({ step
 const { register } = await import(`${root}/hooks/register.ts`)
 const { runStep, offeredTools } = await import(`${root}/helper/run.ts`)
 
-type Hook = { matcher?: Record<string, string>; callback: (...args: any[]) => any }
+type Hook = { matcher?: Record<string, unknown>; callback: (...args: any[]) => any }
 const hooks = new Map<string, Hook[]>()
 const on: any = (event: string, matcherOrCallback: any, callback?: any) => {
   const hook = callback ? { matcher: matcherOrCallback, callback } : { callback: matcherOrCallback }
   hooks.set(event, [...(hooks.get(event) ?? []), hook])
-  return { catch: (failed: (...args: any[]) => any) => { const callback = hook.callback; hook.callback = async (...args: any[]) => { try { return await callback(...args) } catch { return failed() } } } }
+  return { catch: (failed: (...args: any[]) => any) => {
+    const callback = hook.callback
+    // Like the host: a failed hook's catch receives next with called and error.
+    const failure = (next: any, error: unknown) => Object.assign(typeof next === 'function' ? next : () => undefined, { called: false, error: { kind: 'error', message: error instanceof Error ? error.message : String(error) } })
+    hook.callback = callback.constructor?.name === 'AsyncGeneratorFunction'
+      ? async function* (...args: any[]) { try { return yield* callback(...args) } catch (error) { return yield* failed(args[0], args[1], failure(args[2], error)) } }
+      : async (...args: any[]) => { try { const next = args[2]; if (next && !next.signal) next.signal = new AbortController().signal; return await callback(...args) } catch { return failed() } }
+  } }
 }
 register(on)
 const hook = (event: string, name?: string) => {
-  const found = hooks.get(event)?.find(item => name === undefined || item.matcher?.tool === name || item.matcher?.command === name)
+  // This fixture targets the unfiltered routing callback. Other modules can
+  // register an earlier, filtered callback for the same native event.
+  const found = hooks.get(event)?.find(item => name === undefined ? item.matcher === undefined : item.matcher?.tool === name || item.matcher?.command === name)
   if (!found) throw new Error(`Missing hook ${event} ${name ?? ''}`)
   return found.callback
 }
@@ -57,8 +66,8 @@ const freshCatalogue = (configText: string): ModelCatalogue => {
 let approvalAskCount = 0
 let agyInstalled = false
 let emitLimits = false
+let completionStop = 'end_turn'
 const reportedLimits = { plan: 'fixture-subscription', windows: [{ label: 'weekly', usedPercent: 97, resetsAt: 1_800_000_100_000 }] }
-const modelRefs = ['mcp__rice-multi-models__models', 'mcp__rice-multi-models__agent_type']
 const environment = new Map<string, string>([['HOME', '/fixture-home']])
 const sessionState = new Map<string, unknown>()
 const host: any = {
@@ -94,7 +103,7 @@ const host: any = {
       if (!options.input) throw new Error('Fixture forbids helper startup')
       wires.push(JSON.parse(options.input))
       if (emitLimits) yield { stream: 'stdout', text: JSON.stringify({ type: 'limits', limits: reportedLimits }) + '\n' }
-      yield { stream: 'stdout', text: JSON.stringify({ type: 'text', text: 'fixture response' }) + '\n' + JSON.stringify({ type: 'stop', reason: 'end_turn' }) + '\n' }
+      yield { stream: 'stdout', text: JSON.stringify({ type: 'text', text: 'fixture response' }) + '\n' + JSON.stringify({ type: 'stop', reason: completionStop }) + '\n' }
       return { code: 0 }
     },
   },
@@ -126,13 +135,19 @@ const host: any = {
     model: async () => 'codex/gpt-6.1-sol',
     usage: async () => ({ context: { window: Number(environment.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS') ?? 200000) } }),
     version: async () => ({ version: '2.1.296' }),
-    messages: async () => [{ role: 'user', content: modelRefs.map(tool_name => ({ type: 'tool_reference', tool_name })) }],
+    messages: async () => [{ role: 'user', content: 'fixture conversation' }],
   },
   prompt: { compose: async () => ({ sections: [{ id: 'base', scope: 'shared', text: 'fixture base' }] }) },
 }
-const tool = async (name: string, input: unknown) => (await hook('tool.call', name)(host, { tool: name, input })).result as string
-const registerType = (model: string, mode = 'write') => tool(modelRefs[1]!, { model, mode })
-const typeOf = (text: string) => /^type: (.+)$/m.exec(text)?.[1] ?? (() => { throw new Error(`No type in ${text}`) })()
+const command = async (args: string) => (await hook('command.run', 'rice-models')(host, { args })).text as string
+const models = async () => JSON.parse((await command('models')).split('\n\nUse a discovered candidate')[0]!)
+const spawnInput = (parentModel: string, subagentType: string, model?: string, parentAgentId?: string) => ({ tool_use_id: `toolu_spawn_${agents.length}`, prompt: 'Owned spawn fixture', description: 'owned spawn', subagentType, provider: { plugin: 'engine', tier: 'core' }, parentModel, fork: false, background: false, ...(model ? { model } : {}), ...(parentAgentId ? { parentAgentId } : {}) })
+const spawn = async (parentModel: string, subagentType: string, model?: string, parentAgentId?: string) => {
+  let received: any
+  const id = `spawned-agent-${agents.length}`
+  const result = await hook('agent.spawn')(host, spawnInput(parentModel, subagentType, model, parentAgentId), async (e: any) => { received = e; agents.push({ id, type: e.subagentType, description: e.description, status: 'running' }); return { model: e.model ?? 'native-resolved', agentId: id } })
+  return { received, result, id }
+}
 const reload = async (providers: Record<string, unknown>, aliases: Record<string, unknown> = {}) => {
   config = JSON.stringify({ providers, aliases })
   return hook('command.run', 'rice-models')(host, { args: 'reload' })
@@ -140,7 +155,8 @@ const reload = async (providers: Record<string, unknown>, aliases: Record<string
 const provider = (model: string, baseUrl = 'https://fixture.invalid/v1') => ({ kind: 'openai', baseUrl, auth: 'none', models: { [model]: { contextWindow: 128000, maxOutputTokens: 4096 } } })
 const step = async (type: string, model: string) => {
   const id = `fixture-agent-${agents.length}`
-  agents.push({ id, type, description: 'offline review control' })
+  const agent = { id, type, description: 'offline review control', status: 'running' }
+  agents.push(agent)
   let nextCalls = 0
   const generator = hook('turn.step')(host, { agentId: id, model, turnId: 'fixture-turn', index: 0 }, async function* () {
     nextCalls++
@@ -149,6 +165,7 @@ const step = async (type: string, model: string) => {
   let item = await generator.next()
   const chunks: any[] = []
   while (!item.done) { chunks.push(item.value); item = await generator.next() }
+  agent.status = 'completed'
   return { result: item.value, chunks, nextCalls, id }
 }
 const executeHelper = async (wire: any) => {
@@ -160,20 +177,17 @@ beforeAll(async () => { await hook('session.start')(host, {}, async () => ({})) 
 
 test('startup discovers once and models and status read that snapshot without another discovery', async () => {
   expect(discoveries).toEqual([{ argv: ['/fixture/node', `${root}/dist/helper.mjs`, 'discover'], input: { configText: JSON.stringify({ providers: {} }), approved: [] } }])
-  for (const action of ['models', 'status']) {
-    const report = await tool(modelRefs[0]!, { action })
-    expect(report).toContain('codex/gpt-6.1-sol')
-    await hook('command.run', 'rice-models')(host, { args: action })
-  }
+  expect(await command('models')).toContain('codex/gpt-6.1-sol')
+  expect(await command('status')).toContain('Codex session candidate: codex/gpt-6.1-sol')
   expect(discoveries.length).toBe(1)
-  const report = JSON.parse(await tool(modelRefs[0]!, { action: 'models' }))
+  const report = await models()
   expect(report.models[0]).toMatchObject({ metadata: unknownMetadata(), availability: 'candidate, not live-entitlement proof' })
 })
 
 test('explicit refresh replaces discovered IDs and metadata and forwards declared config and approvals', async () => {
   store.clear()
   await reload({})
-  const before = JSON.parse(await tool(modelRefs[0]!, { action: 'models' }))
+  const before = await models()
   expect(before.models[0].metadata.contextWindow).toBeNull()
   const model = discoveredModel('codex/gpt-6.1-sol')
   model.metadata = { ...unknownMetadata(), contextWindow: 64000, outputTokenLimit: 2048 }
@@ -185,11 +199,11 @@ test('explicit refresh replaces discovered IDs and metadata and forwards declare
     await hook('command.run', 'rice-models')(host, { args: 'refresh' })
     expect(discoveries.length).toBe(refreshes + 1)
     expect(discoveries.at(-1)?.input).toEqual({ configText: JSON.stringify({ providers: {}, aliases: {} }), approved: ['fixture-approved-fingerprint'] })
-    const report = JSON.parse(await tool(modelRefs[0]!, { action: 'models' }))
+    const report = await models()
     expect(report.models.map((entry: any) => entry.model)).toEqual(['codex/gpt-6.1-sol', 'codex/fresh-new-model'])
     expect(report.models[0]).toMatchObject({ metadata: { contextWindow: 64000, inputTokenLimit: null, outputTokenLimit: 2048, tools: null }, metadataSources: { contextWindow: 'fixture endpoint limit', outputTokenLimit: 'fixture endpoint limit' } })
     expect(report.models[1].metadata).toEqual(unknownMetadata())
-    await tool(modelRefs[0]!, { action: 'status' })
+    await command('status')
     expect(discoveries.length).toBe(refreshes + 1)
   } finally {
     store.delete('trust:fixture-approved-fingerprint')
@@ -203,17 +217,13 @@ test('empty or failed discovery removes all candidates without a default or cach
     for (const unavailable of [false, true]) {
       discoveryOverride = { models: [], providers: [{ provider: 'codex', status: 'unavailable', source: 'fixture endpoint', error: 'fixture-unavailable' }] }
       discoveryUnavailable = unavailable
-      await hook('command.run', 'rice-models')(host, { args: 'refresh' })
-      const report = JSON.parse(await tool(modelRefs[0]!, { action: 'models' }))
+      await command('refresh')
+      const report = await models()
       expect(report.models).toEqual([])
       expect(report.discovery[0].status).toBe('unavailable')
-      const registrations = defs.size
-      const beforeWires = wires.length
-      expect(await registerType('codex/gpt-6.1-sol')).toContain('not in the supplied model catalogue')
-      expect(defs.size).toBe(registrations)
-      expect(wires.length).toBe(beforeWires)
-      const status = await tool(modelRefs[0]!, { action: 'status' })
-      expect(status).not.toContain('"defaultCodexModel":')
+      expect(await command('status')).toContain('Codex session candidate: none discovered')
+      const compose = await hook('prompt.compose')(host, {}, async () => ({ sections: [] }))
+      expect(compose.sections).toEqual([])
     }
   } finally {
     discoveryUnavailable = false
@@ -222,28 +232,40 @@ test('empty or failed discovery removes all candidates without a default or cach
   }
 })
 
-test('a registered subscription route refuses a candidate removed by fresh discovery', async () => {
-  discoveryOverride = { models: [discoveredModel('codex/catalogue-only-model')], providers: [{ provider: 'codex', status: 'fresh', source: 'fixture endpoint', observedAt }] }
-  try {
-    await hook('command.run', 'rice-models')(host, { args: 'refresh' })
-    const type = typeOf(await registerType('codex/catalogue-only-model'))
-    discoveryOverride = { models: [discoveredModel('codex/replacement-model')], providers: [{ provider: 'codex', status: 'fresh', source: 'fixture endpoint', observedAt }] }
-    await hook('command.run', 'rice-models')(host, { args: 'refresh' })
-    const beforeWires = wires.length
-    const beforeApprovals = approvalAskCount
-    const refused = await step(type, 'codex/catalogue-only-model')
-    expect(refused.nextCalls).toBe(0)
-    expect(JSON.stringify(refused.result)).toContain('no longer current')
-    expect(wires.length).toBe(beforeWires)
-    expect(approvalAskCount).toBe(beforeApprovals)
-    const compacted = await hook('session.compact')(host, { agentId: refused.id, trigger: 'auto', instructions: '', messages: [] }, async () => ({ skip: 'fixture fallback' }))
-    expect(compacted.skip).toContain('no longer current')
-    expect(wires.length).toBe(beforeWires)
-    expect(await registerType('codex/catalogue-only-model')).toContain('not in the supplied model catalogue')
-  } finally {
-    discoveryOverride = undefined
-    await reload({})
-  }
+test('subagents of a routed parent stay in its family unless a family type chooses another', async () => {
+  await reload({})
+  const explore = await spawn('codex/gpt-6.1-sol', 'Explore', 'haiku')
+  expect(explore.received.model).toBe('codex/gpt-6.1-sol')
+  const plain = await spawn('codex/gpt-6.1-sol', 'general-purpose')
+  expect(plain.received.model).toBe('codex/gpt-6.1-sol')
+  const claude = await spawn('codex/gpt-6.1-sol', 'rice-multi-models:claude', 'opus')
+  expect(claude.received.model).toBe('opus')
+  expect(defs.get('rice-multi-models:claude')).toMatchObject({ model: 'sonnet' })
+  // A child of an explicitly placed Claude agent stays on Claude.
+  for await (const _chunk of hook('turn.step')(host, { agentId: claude.id, model: 'claude-opus-5-5', turnId: 'claude-parent', index: 0 }, async function* () { return { native: true } })) { /* drain */ }
+  const native = await spawn('sonnet', 'Explore', 'haiku', claude.id)
+  expect(native.received.model).toBe('haiku')
+  // The engine reports a remapped child's own alias as the parent model; its
+  // effective family decides its children.
+  for await (const _chunk of hook('turn.step')(host, { agentId: explore.id, model: 'haiku', turnId: 'explore-parent', index: 0 }, async function* () { throw new Error('unsafe native step') })) { /* drain */ }
+  const grandchild = await spawn('haiku', 'general-purpose', undefined, explore.id)
+  expect(grandchild.received.model).toBe('codex/gpt-6.1-sol')
+  const fork = await hook('agent.spawn')(host, { ...spawnInput('codex/gpt-6.1-sol', 'fork', 'haiku'), fork: true }, async (e: any) => ({ model: e.model, agentId: 'fork-agent' }))
+  expect(fork.model).toBe('haiku')
+})
+
+test('an explicitly placed Claude child runs natively while unspawned native aliases stay in the owner family', async () => {
+  const claude = await spawn('codex/gpt-6.1-sol', 'rice-multi-models:claude', 'opus')
+  const native = hook('turn.step')(host, { agentId: claude.id, model: 'claude-opus-5-5', turnId: 'claude-turn', index: 0 }, async function* () { return { native: true } })
+  expect(await native.next()).toEqual({ value: { native: true }, done: true })
+  const forkedSkill = `forked-skill-${agents.length}`
+  agents.push({ id: forkedSkill, type: 'general-purpose', description: 'forked skill', status: 'running' })
+  approvalAnswer = 'Allow'
+  const before = wires.length
+  const routed = hook('turn.step')(host, { agentId: forkedSkill, model: 'claude-haiku-4-5', turnId: 'fork-turn', index: 0 }, async function* () { throw new Error('unsafe native step') })
+  for await (const _chunk of routed) { /* drain */ }
+  expect(wires.length).toBe(before + 1)
+  expect(wires.at(-1).req.target).toBe('codex/gpt-6.1-sol')
 })
 
 test('fresh discovered input and context bounds refuse oversized routed turns before helper dispatch', async () => {
@@ -260,10 +282,9 @@ test('fresh discovered input and context bounds refuse oversized routed turns be
       model.metadata = { ...unknownMetadata(), ...bounds }
       discoveryOverride = { models: [model], providers: [{ provider: 'codex', status: 'fresh', source: 'fixture input bounds', observedAt }] }
       await reload({})
-      const type = typeOf(await registerType(model.model))
       const beforeWires = wires.length
       const refreshes = discoveries.length
-      const refused = await step(type, model.model)
+      const refused = await step('general-purpose', model.model)
       expect(refused.nextCalls).toBe(0)
       expect(JSON.stringify(refused.result)).toContain('512 token input bound')
       expect(JSON.stringify(refused.result)).toContain('compact the conversation')
@@ -277,7 +298,7 @@ test('fresh discovered input and context bounds refuse oversized routed turns be
   }
 })
 
-test('a smaller freshly refreshed bound applies to the same reusable routed Agent type', async () => {
+test('a smaller freshly refreshed bound applies to the next routed subagent turn', async () => {
   const messages = host.session.messages
   host.session.messages = async () => [{ role: 'user', content: 'same request '.repeat(500) }]
   const model = discoveredModel('codex/gpt-6.1-sol')
@@ -285,16 +306,14 @@ test('a smaller freshly refreshed bound applies to the same reusable routed Agen
   discoveryOverride = { models: [model], providers: [{ provider: 'codex', status: 'fresh', source: 'fixture input bounds', observedAt }] }
   try {
     await reload({})
-    const type = typeOf(await registerType(model.model))
     const before = wires.length
-    const accepted = await step(type, model.model)
+    const accepted = await step('general-purpose', model.model)
     expect(accepted.nextCalls).toBe(0)
     expect(wires.length).toBe(before + 1)
     expect(JSON.stringify(accepted.result)).toContain('fixture response')
     model.metadata = { ...unknownMetadata(), contextWindow: 32000, inputTokenLimit: 512 }
     await hook('command.run', 'rice-models')(host, { args: 'refresh' })
-    expect(typeOf(await registerType(model.model))).toBe(type)
-    const refused = await step(type, model.model)
+    const refused = await step('general-purpose', model.model)
     expect(refused.nextCalls).toBe(0)
     expect(JSON.stringify(refused.result)).toContain('512 token input bound')
     expect(wires.length).toBe(before + 1)
@@ -334,37 +353,41 @@ test('oversized complete and fork requests refuse without helper dispatch or nat
   }
 })
 
-test('routed compaction refuses every trigger without reading history, dispatching or native fallback', async () => {
-  const messages = host.session.messages
+test('routed compaction uses its selected provider for every native trigger and retains recent handles', async () => {
   const sessionModel = host.session.model
-  const transcript = [{ role: 'user', content: 'retain the original fixture transcript' }]
-  const beforeTranscript = JSON.stringify(transcript)
   host.session.model = async () => 'codex/gpt-6.1-sol'
-  host.session.messages = async () => { throw new Error('Compaction must not read history') }
+  const transcript = [{ role: 'user', text: 'Original goal and constraints', toolUses: [], handle: 'old-user' }, { role: 'assistant', text: 'Verified pending work', toolUses: [], handle: 'old-assistant' }, { role: 'user', text: 'Continue now', toolUses: [], handle: 'recent-user' }]
+  const snapshot = JSON.stringify(transcript)
   try {
-    for (const contextWindow of [null, 32000]) {
-      const model = discoveredModel('codex/gpt-6.1-sol')
-      model.metadata = { ...unknownMetadata(), contextWindow }
-      discoveryOverride = { models: [model], providers: [{ provider: 'codex', status: 'fresh', source: 'fixture bounds', observedAt }] }
-      await reload({})
-      const beforeWires = wires.length
-      let nativeCalls = 0
-      for (const trigger of ['manual', 'auto', 'precompute', 'plugin']) {
-        const result = await hook('session.compact')(host, { trigger, instructions: 'retain constraints', messages: transcript }, async () => { nativeCalls++; return { skip: 'unsafe native fallback' } })
-        expect(result.skip).toContain('native routed compaction is unavailable')
-        expect(result.skip).toContain('original transcript retained')
-        expect(result.messages).toBeUndefined()
-      }
-      expect(wires.length).toBe(beforeWires)
-      expect(nativeCalls).toBe(0)
-      expect(JSON.stringify(transcript)).toBe(beforeTranscript)
+    let nativeCalls = 0
+    for (const trigger of ['manual', 'auto', 'precompute', 'plugin']) {
+      const before = wires.length
+      const result = await hook('session.compact')(host, { trigger, instructions: 'retain constraints', messages: transcript }, async () => { nativeCalls++; throw new Error('unsafe native fallback') })
+      expect(result.messages[0].text).toContain('fixture response')
+      expect(result.messages[1]).toBe(transcript[2])
+      expect(wires.length).toBe(before + 1)
+      expect(wires.at(-1).req).toMatchObject({ target: 'codex/gpt-6.1-sol', tools: [], who: 'main', native: { maxTokens: 8192 } })
+      expect(wires.at(-1).req.transcript[0].content).toContain('retain constraints')
+      expect(wires.at(-1).req.transcript[0].content).not.toContain('old-user')
     }
-  } finally {
-    host.session.model = sessionModel
-    host.session.messages = messages
-    discoveryOverride = undefined
-    await reload({})
-  }
+    expect(nativeCalls).toBe(0)
+    expect(JSON.stringify(transcript)).toBe(snapshot)
+  } finally { host.session.model = sessionModel }
+})
+
+test('truncated or refused compaction never replaces history or falls back to Claude', async () => {
+  const transcript = [{ role: 'user', text: 'Approval still pending', toolUses: [], handle: 'original' }]
+  let nativeCalls = 0
+  try {
+    for (const reason of ['max_tokens', 'refusal', 'tool_use']) {
+      completionStop = reason
+      const result = await hook('session.compact')(host, { trigger: 'auto', messages: transcript }, async () => { nativeCalls++; return {} })
+      expect(result.messages).toBeUndefined()
+      expect(result.skip).toContain('original transcript retained')
+      expect(transcript[0].handle).toBe('original')
+    }
+    expect(nativeCalls).toBe(0)
+  } finally { completionStop = 'end_turn' }
 })
 
 test('native Claude compaction passes the original request and result through', async () => {
@@ -392,14 +415,16 @@ test('subagent compaction fails closed for unknown models and follows the last n
   expect(nativeCalls).toBe(0)
   expect(wires.length).toBe(beforeWires)
   const routed = await step('general-purpose', 'codex/gpt-6.1-sol')
-  const input = { agentId: routed.id, trigger: 'auto', messages: [] }
-  const refused = await hook('session.compact')(host, input, next)
-  expect(refused.skip).toContain('native routed compaction is unavailable')
-  const generator = hook('turn.step')(host, { agentId: routed.id, model: 'sonnet', turnId: 'native-turn', index: 0 }, async function* () { return { native: true } })
+  const input = { agentId: routed.id, trigger: 'auto', messages: [{ role: 'user', text: 'Child-only task', toolUses: [] }] }
+  const compacted = await hook('session.compact')(host, input, next)
+  expect(compacted.messages[0].text).toContain('fixture response')
+  expect(wires.at(-1).req.who).toBe(routed.id)
+  const claude = await spawn('codex/gpt-6.1-sol', 'rice-multi-models:claude', 'sonnet')
+  const generator = hook('turn.step')(host, { agentId: claude.id, model: 'sonnet', turnId: 'native-turn', index: 0 }, async function* () { return { native: true } })
   const result = await generator.next()
   expect(result.value).toEqual({ native: true })
   expect(result.done).toBe(true)
-  expect(await hook('session.compact')(host, input, next)).toBe(native)
+  expect(await hook('session.compact')(host, { ...input, agentId: claude.id }, next)).toBe(native)
   expect(nativeCalls).toBe(1)
 })
 
@@ -506,39 +531,35 @@ test('switch guard resolves aliases and fails closed if its hook fails', async (
   } finally { discoveryOverride = undefined; await reload({}) }
 })
 
-test('actual prompt hook is idempotent and discovery tool schemas survive native provider dispatch', async () => {
+test('the mod registers no tools and its family guidance is idempotent and native', async () => {
   const compose = hook('prompt.compose')
   const runs = processRunCount
   const base = { sections: [{ id: 'a', scope: 'shared', text: 'a' }] }
   const first = await compose(host, {}, async () => base)
   const second = await compose(host, {}, async () => first)
   expect(second).toEqual(first)
-  expect(first.sections.at(-1)).toMatchObject({ id: 'rice-multi-models:discovery', scope: 'session' })
+  const section = first.sections.at(-1)
+  expect(section).toMatchObject({ id: 'rice-multi-models:discovery', scope: 'session' })
+  expect(section.text).toContain('rice-multi-models:claude')
+  expect(section.text).toContain('rice-multi-models:codex')
+  expect(section.text).not.toContain('mcp__')
   expect(processRunCount).toBe(runs)
-  expect([...toolDefs.keys()]).toEqual(modelRefs)
-  for (const spec of toolDefs.values()) { expect(spec.isDeferred).toBe(true); expect(spec.inputSchema.additionalProperties).toBe(false) }
+  expect(toolDefs.size).toBe(0)
   await reload({})
-  const type = typeOf(await registerType('codex/gpt-6.1-sol'))
   approvalAnswer = 'Allow'
-  for (const name of modelRefs) {
-    const spec = toolDefs.get(name)
-    await hook('tool.describe')(host, { tool: name, description: spec.description, provider: { plugin: 'rice-multi-models', tier: 'user' }, isDeferred: true }, async () => ({ description: spec.description, isDeferred: true }))
-  }
-  await step(type, 'codex/gpt-6.1-sol')
+  await step('general-purpose', 'codex/gpt-6.1-sol')
   const offered = offeredTools(wires.at(-1).req)
-  for (const name of modelRefs) expect(offered.find((entry: any) => entry.name === name)?.schema).toEqual(toolDefs.get(name).inputSchema)
+  expect(offered.some((entry: any) => entry.name.startsWith('mcp__rice-multi-models__'))).toBe(false)
 })
 
 test('configured codex, agy and grok prefixes resolve before built-in helper branches', async () => {
   for (const [providerId, model] of [['codex', 'gpt-6.1-sol'], ['agy', 'review-model'], ['grok', 'review-model']]) {
     await reload({ [providerId!]: provider(model!) })
-    const report = JSON.parse(await tool(modelRefs[0]!, { action: 'models' }))
+    const report = await models()
     const candidate = report.models.find((item: any) => item.model === `${providerId}/${model}`)
     expect(candidate.execution).toBe('native provider')
-    const type = typeOf(await registerType(`${providerId}/${model}`))
-    expect(defs.get(type).description).toContain('native subagent')
     approvalAnswer = 'Allow'
-    const accepted = await step(type, `${providerId}/${model}`)
+    const accepted = await step('general-purpose', `${providerId}/${model}`)
     expect(accepted.nextCalls).toBe(0)
     const wire = wires.at(-1)
     expect(await executeHelper(wire)).toEqual([{ type: 'text', text: `fixture: configured ${providerId}/${model}` }])
@@ -546,52 +567,37 @@ test('configured codex, agy and grok prefixes resolve before built-in helper bra
   }
 })
 
-test('dynamic route bindings reject removal or retarget and register a new reusable type', async () => {
-  await reload({ codex: provider('gpt-6.1-sol') })
-  const oldType = typeOf(await registerType('codex/gpt-6.1-sol', 'read'))
-  const sameType = typeOf(await registerType('codex/gpt-6.1-sol', 'read'))
-  expect(sameType).toBe(oldType)
-  await reload({})
-  const beforeRemoved = wires.length
-  const removed = await step(oldType, 'codex/gpt-6.1-sol')
-  expect(removed.nextCalls).toBe(0)
-  expect(wires.length).toBe(beforeRemoved)
-  expect(JSON.stringify(removed.result)).toContain('no longer current')
-
-  await reload({ local: provider('qwen', 'https://first.fixture.invalid/v1') })
-  const first = typeOf(await registerType('local/qwen', 'write'))
-  await reload({ local: provider('qwen', 'https://second.fixture.invalid/v1') })
-  const secondRegistration = await registerType('local/qwen', 'write')
-  const second = typeOf(secondRegistration)
-  expect(second).not.toBe(first)
-  expect(secondRegistration).not.toContain('fixture.invalid')
-  const beforeRetarget = wires.length
-  const retargeted = await step(first, 'local/qwen')
-  expect(retargeted.nextCalls).toBe(0)
-  expect(wires.length).toBe(beforeRetarget)
+test('declared provider families get their own native agent type', async () => {
+  await reload({ local: provider('qwen') })
+  expect(defs.get('rice-multi-models:local')).toMatchObject({ model: 'local/qwen' })
+  const chosen = await spawn('codex/gpt-6.1-sol', 'rice-multi-models:local', 'haiku')
+  expect(chosen.received.model).toBe('local/qwen')
+  const inFamily = await spawn('local/qwen', 'Explore', 'haiku')
+  expect(inFamily.received.model).toBe('local/qwen')
 })
 
-test('registration does not approve providers or start workers and provider denial stays before helper', async () => {
+test('spawning a declared provider child does not approve it and denial stays before the helper', async () => {
   store.clear()
   await reload({ local: provider('qwen') })
   approvalAnswer = 'Keep it off'
   const asks = approvalAskCount
   const before = wires.length
   const refreshes = discoveries.length
-  const type = typeOf(await registerType('local/qwen'))
+  const chosen = await spawn('codex/gpt-6.1-sol', 'rice-multi-models:local')
+  expect(chosen.received.model).toBe('local/qwen')
   expect(approvalAskCount).toBe(asks)
   expect(store.size).toBe(0)
   expect(wires.length).toBe(before)
   expect(discoveries.length).toBe(refreshes)
-  const refused = await step(type, 'local/qwen')
-  expect(approvalAskCount).toBeGreaterThan(0)
+  const refused = await step('general-purpose', 'local/qwen')
+  expect(approvalAskCount).toBeGreaterThan(asks)
   expect(wires.length).toBe(before)
   expect(JSON.stringify(refused.result)).toContain('not approved')
 })
 
 test('configured Codex-prefix providers report explicit configured source', async () => {
   await reload({ codex: provider('gpt-6.1-sol') })
-  const report = JSON.parse(await tool(modelRefs[0]!, { action: 'models' }))
+  const report = await models()
   const entry = report.models.find((item: any) => item.model === 'codex/gpt-6.1-sol')
   expect(entry).toMatchObject({ source: 'configured provider', execution: 'native provider' })
 })
@@ -599,52 +605,49 @@ test('configured Codex-prefix providers report explicit configured source', asyn
 test('configured Codex-prefix providers do not inherit subscription quota', async () => {
   store.clear()
   await reload({})
-  const type = typeOf(await registerType('codex/gpt-6.1-sol'))
   approvalAnswer = 'Allow'
   emitLimits = true
-  await step(type, 'codex/gpt-6.1-sol')
+  await step('general-purpose', 'codex/gpt-6.1-sol')
   emitLimits = false
   await reload({ codex: provider('gpt-6.1-sol') })
-  const report = JSON.parse(await tool(modelRefs[0]!, { action: 'models' }))
+  const report = await models()
   const entry = report.models.find((item: any) => item.model === 'codex/gpt-6.1-sol')
   expect(report.codexLimits).toMatchObject({ status: 'reported', plan: 'fixture-subscription' })
   expect(entry.usageLimits).toEqual({ status: 'unavailable', windows: [] })
 })
 
-test('dynamic configured turns do not rediscover the installed worker catalogue', async () => {
+test('declared provider turns do not rediscover the installed worker catalogue', async () => {
   agyInstalled = true
   store.clear()
-  await hook('command.run', 'rice-models')(host, { args: 'setup repair' })
+  await command('setup repair')
   await reload({ local: provider('qwen') })
-  const type = typeOf(await registerType('local/qwen'))
   const beforeTurn = discoveries.length
   const beforeWires = wires.length
   approvalAnswer = 'Keep it off'
-  const refused = await step(type, 'local/qwen')
+  const refused = await step('general-purpose', 'local/qwen')
   expect(discoveries.length).toBe(beforeTurn)
   expect(processCalls.some(argv => argv[0] === '/fixture/agy')).toBe(false)
   expect(wires.length).toBe(beforeWires)
   expect(JSON.stringify(refused.result)).toContain('not approved')
 })
 
-test('retargeted dynamic route skips subagent compaction before provider work', async () => {
+test('a retargeted declared provider asks for approval again before compaction', async () => {
   store.clear()
   const first = provider('qwen')
   await reload({ local: first })
-  const type = typeOf(await registerType('local/qwen'))
   approvalAnswer = 'Allow'
-  const accepted = await step(type, 'local/qwen')
+  const accepted = await step('general-purpose', 'local/qwen')
   const beforeWires = wires.length
   const beforeApprovals = approvalAskCount
-  const second = { ...first, baseUrl: 'https://retarget.fixture.invalid/v1' }
-  await reload({ local: second })
-  const compacted = await hook('session.compact')(host, { agentId: accepted.id, trigger: 'auto', instructions: '', messages: [] }, async () => ({ skip: 'fixture fallback' }))
+  await reload({ local: { ...first, baseUrl: 'https://retarget.fixture.invalid/v1' } })
+  approvalAnswer = 'Keep it off'
+  const compacted = await hook('session.compact')(host, { agentId: accepted.id, trigger: 'auto', instructions: '', messages: [{ role: 'user', text: 'Child task', toolUses: [] }] }, async () => { throw new Error('unsafe native fallback') })
+  expect(approvalAskCount).toBe(beforeApprovals + 1)
   expect(wires.length).toBe(beforeWires)
-  expect(approvalAskCount).toBe(beforeApprovals)
-  expect(compacted.skip).toContain('no longer current')
+  expect(compacted.skip).toContain('original transcript retained')
 })
 
-test('model-callable status returns safe structured diagnostics only', async () => {
+test('status diagnostics never expose provider endpoints', async () => {
   await reload({})
   const directory = `${root}/.claude/agents`
   const name = 'diagnostic-source-review'
@@ -652,8 +655,39 @@ test('model-callable status returns safe structured diagnostics only', async () 
   fixtureDirs.set(directory, [{ name: `${name}.md`, kind: 'file' }])
   fixtureFiles.set(`${directory}/${name}.md`, `---\nname: ${name}\ndescription: &endpoint ${endpoint}\nmodel: codex/gpt-6.1-sol\n---\nReview source only.\n`)
   await step(name, 'codex/gpt-6.1-sol')
-  const status = await tool(modelRefs[0]!, { action: 'status' })
+  const status = await command('status')
   expect(status).not.toContain(endpoint)
-  expect(status).toContain('"count": 1')
-  expect(status).toContain('agent/configuration diagnostics')
+})
+
+test("the mod's own agent types keep their registered family under any parent", async () => {
+  await reload({ fixture: provider('model') })
+  try {
+    const explore = await spawn('fixture/model', 'rice-multi-models:codex-explore')
+    expect(explore.received.model).toBeUndefined()
+    const codex = await spawn('fixture/model', 'rice-multi-models:codex')
+    expect(codex.received.model).toBe('codex/gpt-6.1-sol')
+    const claude = await spawn('fixture/model', 'rice-multi-models:claude')
+    expect(claude.received.model).toBeUndefined()
+  } finally {
+    await reload({})
+  }
+})
+
+test('a declared model whose config does not validate is refused instead of sent to Claude', async () => {
+  config = JSON.stringify({ providers: { fixture: provider('model') }, tiers: { fixture: { default: 'gpt' } } })
+  await hook('command.run', 'rice-models')(host, { args: 'reload' })
+  const sessionModel = host.session.model
+  host.session.model = async () => 'fixture/model'
+  try {
+    let nativeCalls = 0
+    const chunks: any[] = []
+    const generator = hook('turn.step')(host, { model: 'fixture/model', turnId: 'invalid-config', index: 0 }, async function* () { nativeCalls++; return { native: true } })
+    let item = await generator.next()
+    while (!item.done) { chunks.push(item.value); item = await generator.next() }
+    expect(nativeCalls).toBe(0)
+    expect(JSON.stringify(chunks)).toContain('does not validate')
+  } finally {
+    host.session.model = sessionModel
+    await reload({})
+  }
 })

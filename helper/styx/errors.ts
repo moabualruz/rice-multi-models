@@ -1,6 +1,6 @@
 // Copied from Trosfy/claude-styx styxd/errors.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: import paths for this layout; Effort comes from hooks/protocol. A billing refusal (HTTP 402,
+// Modified by Mo Abualruz: import paths for this layout; Effort comes from hooks/protocol. A billing refusal (HTTP 402,
 // or a 403 that names a subscription or funds) says to add credit or a plan; a key read by another command than
 // the keychain's is named in place of the keychain fix.
 // The one-line texts of failed provider requests: what failed, why, and what to do. Every provider text in

@@ -1,6 +1,6 @@
 // Copied from Trosfy/claude-styx styxd/history.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: import paths for this layout; Effort comes from hooks/protocol.
+// Modified by Mo Abualruz: import paths for this layout; Effort comes from hooks/protocol.
 // The engine's transcript as every codec reads it: Messages-shaped, holding text, image, tool_use and
 // tool_result blocks only. The engine's thinking is dropped, and the signed thinking blocks styxd kept for
 // an assistant turn's tool calls are put back where they came in that turn; a tool_reference, document or

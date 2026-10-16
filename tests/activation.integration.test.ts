@@ -77,13 +77,15 @@ function fixture() {
     fs: { exists: async (path: string) => path.endsWith('/dist/helper.mjs') || files.has(path), read: async (path: string) => { const text = files.get(path); if (text === undefined) throw new Error('ENOENT'); return text }, list: async () => [], write: async () => { throw new Error('Hook must not write settings directly') } },
     command: { register: async (spec: any) => { commands.push(spec) } },
     tool: { register: async () => ({}) },
-    agent: { register: async () => ({}) },
+    agent: { register: async () => ({}), list: async () => [] },
     store: { keys: async () => [...store.keys()], get: async (key: string) => store.get(key), set: async (key: string, value: unknown) => { store.set(key, value) } },
     ui: { log: (text: string, options: any) => { if (options?.to !== 'debug') notices.push(text) }, ask: async () => { throw new Error('Onboarding must never ask') }, status: () => {}, toast: () => {} },
     clock: { now: async () => Date.now(), sleep: async () => {} },
     session: { id: async () => 'empty-session', model: async () => selection.model, usage: async () => ({ context: { window: Number(env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS') ?? 200000) } }), version: async () => ({ version: '2.1.296' }), isInteractive: async () => true },
   }
-  return { host, files, calls, notices, commands, store, syncs, info, discoveries, discovery, env, envWrites, state, selection }
+  return { host, files, calls, notices, commands, store, syncs, info, discoveries, discovery, env, envWrites, state, selection,
+    get contextWrites() { return envWrites.filter(write => write.key === 'CLAUDE_CODE_MAX_CONTEXT_TOKENS') },
+  }
 }
 
 test('actual session.start activates an empty Node-only picker and explains unavailable discovery without inventing a default', async () => {
@@ -266,7 +268,7 @@ test('native primary context uses the fresh active window, not maximum ceiling o
   const f = contextFixture()
   expect(await startContext(f)).toEqual({ started: true })
   expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('500000')
-  expect(f.envWrites).toEqual([{ key: 'CLAUDE_CODE_MAX_CONTEXT_TOKENS', value: '500000' }])
+  expect(f.contextWrites).toEqual([{ key: 'CLAUDE_CODE_MAX_CONTEXT_TOKENS', value: '500000' }])
   const report = await callbacks.get('command.run')!(f.host, { args: 'status' })
   expect(report.text).toContain('active context 500000')
   expect(report.text).toContain('maximum context 872000')
@@ -289,7 +291,7 @@ test('native context requires fresh native-provider metadata for the exact selec
     if (kind === 'worker') f.discovery.catalogue.models[0]!.execution = 'CLI worker'
     if (kind === 'unknown') f.selection.model = 'codex/undiscovered'
     await startContext(f)
-    expect(f.envWrites).toEqual([])
+    expect(f.contextWrites).toEqual([])
   }
 })
 
@@ -334,7 +336,7 @@ test('repeated startup preserves ownership state rather than capturing its appli
   const f = contextFixture()
   await startContext(f)
   await startContext(f)
-  expect(f.envWrites).toHaveLength(1)
+  expect(f.contextWrites).toHaveLength(1)
   expect(f.state.get('nativeContext')).toMatchObject({ original: null, applied: '500000' })
   await switchContext(f, 'sonnet')
   expect(f.env.has('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(false)
@@ -346,14 +348,14 @@ test('original owner override and subsequent external changes remain authoritati
   await startContext(f)
   await switchContext(f, 'sonnet')
   expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('123456')
-  expect(f.envWrites).toEqual([])
+  expect(f.contextWrites).toEqual([])
   const g = contextFixture()
   await startContext(g)
   g.env.set('CLAUDE_CODE_MAX_CONTEXT_TOKENS', '654321')
   await switchContext(g, 'sonnet')
   await switchContext(g, 'codex/fresh')
   expect(g.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('654321')
-  expect(g.envWrites).toHaveLength(1)
+  expect(g.contextWrites).toHaveLength(1)
 })
 
 test('an external override installed during model lookup is not overwritten', async () => {
@@ -364,7 +366,7 @@ test('an external override installed during model lookup is not overwritten', as
   }
   await startContext(f)
   expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('123456')
-  expect(f.envWrites).toEqual([])
+  expect(f.contextWrites).toEqual([])
   expect(f.state.get('nativeContext')).toMatchObject({ relinquished: true })
 })
 
@@ -387,7 +389,7 @@ test('disabled compaction prevents automatic native context management', async (
   const f = contextFixture()
   f.env.set('DISABLE_COMPACT', '1')
   await startContext(f)
-  expect(f.envWrites).toEqual([])
+  expect(f.contextWrites).toEqual([])
   f.env.delete('DISABLE_COMPACT')
   await switchContext(f, 'codex/fresh')
   expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('500000')
@@ -399,7 +401,11 @@ test('disabled compaction prevents automatic native context management', async (
 
 test('rejected context environment writes do not prevent startup or command registration', async () => {
   const f = contextFixture()
-  f.host.env.set = async () => { throw new Error('fixture environment write denied') }
+  const set = f.host.env.set
+  f.host.env.set = async (key: string, value: string | undefined) => {
+    if (key === 'CLAUDE_CODE_MAX_CONTEXT_TOKENS') throw new Error('fixture environment write denied')
+    return set(key, value)
+  }
   expect(await startContext(f)).toEqual({ started: true })
   expect(f.commands.map(spec => spec.name)).toContain('rice-models')
   expect(f.env.has('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(false)

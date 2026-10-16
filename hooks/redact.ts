@@ -1,6 +1,6 @@
 // Copied from Trosfy/claude-styx hooks/redact.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: header only.
+// Modified by Mo Abualruz: header only.
 // Masking of what looks like a credential, applied to every provider text styx logs or shows, and the first
 // line of a text. Pure, and shared: styxd imports it as the mod does.
 

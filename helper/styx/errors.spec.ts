@@ -1,6 +1,6 @@
 // Copied from Trosfy/claude-styx styxd/errors.spec.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: import paths for this layout; messages name rice-multi-models.
+// Modified by Mo Abualruz: import paths for this layout; messages name rice-multi-models.
 // The one-line texts of failed provider requests: each names what failed and the fix, redacted and short,
 // against the bodies providers and gateways answered with in live runs.
 import { expect, test } from 'bun:test'

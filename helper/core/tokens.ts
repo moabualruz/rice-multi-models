@@ -1,6 +1,6 @@
 // Copied from greenpolo/cc-multi-cli-plugin plugins/multi-core/src/gateway/tokens.ts at 3dcb057
 // (Apache-2.0, Copyright 2026 greenpolo; see LICENSES/cc-multi-cli-plugin.Apache-2.0.txt and its NOTICE).
-// Modified by mkh: a character-count estimate replaces js-tiktoken, so the helper has no dependencies.
+// Modified by Mo Abualruz: a character-count estimate replaces js-tiktoken, so the helper has no dependencies.
 import type { ResponsesInputContent, ResponsesRequest } from './responses.ts';
 
 /** Shared local text estimate; providers may use different tokenizers. */

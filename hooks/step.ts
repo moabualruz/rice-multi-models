@@ -1,6 +1,6 @@
 // Copied from Trosfy/claude-styx hooks/step.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: failure texts name rice-multi-models; mintToolId comes from ./protocol.
+// Modified by Mo Abualruz: failure texts name rice-multi-models; mintToolId comes from ./protocol.
 // A routed step's events as the engine's turn.step chunks: block indexes, coalesced deltas, tool calls,
 // and the end, which is one stop carrying the usage, or a failure answered as text or, for a subagent
 // offered SubagentHandback, as one call of it. Pure.

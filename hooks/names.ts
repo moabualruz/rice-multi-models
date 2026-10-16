@@ -1,6 +1,6 @@
 // Copied from Trosfy/claude-styx hooks/names.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: header only.
+// Modified by Mo Abualruz: header only.
 // What a model name names: a native model, an alias, or a declared `provider/model`. Pure.
 import { ALIAS_RE, NATIVE_MODELS, RESERVED_ALIASES, isObject, own, undeclared } from './config'
 import type { Alias, Config, ModelConfig, Target } from './config'

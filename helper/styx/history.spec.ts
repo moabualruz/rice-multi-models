@@ -1,6 +1,6 @@
 // Copied from Trosfy/claude-styx styxd/history.spec.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: import paths for this layout; messages name rice-multi-models.
+// Modified by Mo Abualruz: import paths for this layout; messages name rice-multi-models.
 // The engine transcript as every codec reads it: thinking dropped, other blocks named as text, orphan tool
 // results dropped, every field but the content's own stripped, images downgraded without vision; and the
 // provider's own tool-call ids, given back to that provider only and bounded to the latest 256.

@@ -5,6 +5,7 @@ for (const isInteractive of [true, false]) {
     const commands: string[] = []
     const notices: string[] = []
     mock.env(on, { HOME: '/empty-home' })
+    on('env.set', () => ({ value: undefined }))
     mock.store(on)
     mock.clock(on, { now: 1_800_000_000_000 })
     on('session.start', (_host, input) => ({ cwd: input.cwd }))
@@ -49,7 +50,7 @@ test('native startup refreshes catalogue and exposes factual metadata without a 
   on('classic.PreModelSwitch', () => ({ permissionDecision: 'allow' }))
   on('env.get', (_host, input) => ({ value: environment.get(input.name) }))
   on('env.set', (_host, input) => {
-    contextWrites.push(input.value)
+    if (input.name === 'CLAUDE_CODE_MAX_CONTEXT_TOKENS') contextWrites.push(input.value)
     if (input.value === undefined) environment.delete(input.name)
     else environment.set(input.name, input.value)
     return { value: undefined }
@@ -60,7 +61,9 @@ test('native startup refreshes catalogue and exposes factual metadata without a 
   mock.clock(on, { now: 1800000000000 })
   on('state.get', { plugin: 'rice-multi-models', key: 'prefs' }, () => ({ value: { value: { effort: null, transport: 'auto', helper: 'once', workers: 'read' }, version: 1 } }))
   on('session.start', (_host, input) => ({ cwd: input.cwd }))
-  on('fs.exists', (_host, input) => ({ value: input.path.endsWith('/dist/helper.mjs') }))
+  // Native Windows resolves fs event paths with backslashes, including this
+  // copied plugin's helper path. Only the synthetic file-matching oracle varies.
+  on('fs.exists', (_host, input) => ({ value: input.path.replaceAll('\\', '/').endsWith('/dist/helper.mjs') }))
   on('fs.read', () => { throw new Error('ENOENT fixture') })
   on('process.run', (_host, input) => {
     let value: unknown
@@ -80,16 +83,12 @@ test('native startup refreshes catalogue and exposes factual metadata without a 
   expect(synced[0].rows[0].description).toContain('reported context 500000')
   expect(synced[0].rows[0].behavesAs).toBeUndefined()
   expect(notices.join('\n')).toContain('codex: fresh')
-  const report = await $.tool.call({ tool: 'mcp__rice-multi-models__models', input: { action: 'models' } })
-  expect(String(report.result)).toContain('872000')
+  const report = await $.command.run({ command: 'rice-models', args: 'models' })
+  expect(String(report.text)).toContain('872000')
   expect(discoveries).toBe(1)
   expect(environment.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('500000')
   await $.session.start({ cwd: '/fixture', surface: 'terminal', isInteractive: true })
   expect(contextWrites).toEqual(['500000'])
-  const compacted = await $.session.compact({ trigger: 'plugin', instructions: 'retain fixture constraints', messages: [{ role: 'user', text: 'fixture history', toolUses: [] }] })
-  expect(compacted.skip).toContain('native routed compaction is unavailable')
-  expect(compacted.messages).toBeUndefined()
-  expect(nativeCompactions).toBe(0)
   const switchRequest = { from_model: 'sonnet', to_model: 'codex/fresh-native', requested_model: 'codex/fresh-native', source: 'sdk', context_tokens: 500001, prompt_cache_warm: false, cache_ttl: '1h', estimated_cache_write_usd: 0, pricing: 'default' } as const
   const denied = await $.classic.PreModelSwitch(switchRequest)
   expect(denied.permissionDecision).toBe('deny')

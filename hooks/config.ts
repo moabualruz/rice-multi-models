@@ -1,13 +1,16 @@
 // Copied from Trosfy/claude-styx hooks/config.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: Effort comes from ./protocol. A model's `tools` may also be a list of tool names: the only
+// Modified by Mo Abualruz: Effort comes from ./protocol. A model's `tools` may also be a list of tool names: the only
 // tools that model is sent (for small local models). A provider may name a `sessionHeader`, which the helper
 // sets to a hash of the conversation. Two more kinds, `responses` (the OpenAI Responses API) and `gemini` (Google's
 // generateContent); a model may name its own kind, so one gateway (OpenCode Zen and Go) serves each model in its
-// own protocol; `authHeader` is any provider's, defaulting by the model's kind.
+// own protocol; `authHeader` is any provider's, defaulting by the model's kind. An optional `tiers` block maps
+// native aliases to routed models of one provider family (see family.ts).
 // Styx's config (styx.json in Claude Code's config directory): parsing, all-or-nothing validation, model-name resolution, and the
 // pure texts and schemas derived from a config. No I/O.
 import type { Effort } from './protocol'
+import { parseTiers } from './family'
+import type { TierMap } from './family'
 
 export type JsonSchema = Readonly<Record<string, unknown>>
 type Json = Record<string, unknown>
@@ -60,7 +63,7 @@ export type ProviderConfig = {
   timeoutMs?: number
   streamUsage: boolean
   maxTools: number
-  // A header the helper sets to a stable hash of the conversation (OpenCode Go and Zen route by it). Added by mkh.
+  // A header the helper sets to a stable hash of the conversation (OpenCode Go and Zen route by it). Added by Mo Abualruz.
   sessionHeader?: string
   models: Readonly<Record<string, ModelConfig>>
 }
@@ -69,7 +72,7 @@ export type ProviderConfig = {
 // only to requests made through the alias.
 // An alias's `cache` key, when present, replaces its model's: absent `cache` there means the cache is off.
 export type Alias = { target: string; note?: string; params?: Json; effort?: ModelConfig['effort']; cache?: Cache; headers?: Record<string, string> }
-export type Config = { providers: Readonly<Record<string, ProviderConfig>>; aliases: Readonly<Record<string, Alias>> }
+export type Config = { providers: Readonly<Record<string, ProviderConfig>>; aliases: Readonly<Record<string, Alias>>; tiers?: TierMap }
 
 // What a model name names: a native model (passed to the engine) or a declared remote one. A remote
 // target's `label` is the name it was asked for (an alias or `provider/model`), which routes keep and steps
@@ -212,7 +215,7 @@ function headers(v: unknown, path: string, errors: string[]): Record<string, str
   return out
 }
 
-// `tools`: true (default), false (none), or the names of the only tools sent. Added by mkh.
+// `tools`: true (default), false (none), or the names of the only tools sent. Added by Mo Abualruz.
 function toolsOf(v: unknown, path: string, errors: string[]): boolean | readonly string[] {
   if (!Array.isArray(v)) return bool(v, true, path, errors)
   if (v.length > 0 && v.every(x => typeof x === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(x))) return v as string[]
@@ -392,7 +395,9 @@ export function parseConfig(text: string): { config?: Config; errors: string[] }
   }
   const errors: string[] = []
   if (!isObject(raw)) return { errors: ['the config must be a JSON object'] }
-  allowKeys(raw, ['$schema', 'version', 'providers', 'aliases'], '$', errors)
+  allowKeys(raw, ['$schema', 'version', 'providers', 'aliases', 'tiers'], '$', errors)
+  const parsedTiers = parseTiers(raw['tiers'])
+  errors.push(...parsedTiers.errors)
   if (raw['version'] !== undefined && raw['version'] !== 1) errors.push('version: unsupported (styx reads version 1)')
   const providers: Record<string, ProviderConfig> = {}
   if (raw['providers'] !== undefined && !isObject(raw['providers'])) errors.push('providers: must be an object')
@@ -432,7 +437,7 @@ export function parseConfig(text: string): { config?: Config; errors: string[] }
     const max = aimed?.maxOutputTokens ?? Infinity
     aliases[name] = { target, ...(typeof note === 'string' ? { note } : {}), ...(set && host !== undefined ? requests(alias as Json, aimed?.kind ?? host.kind, path, errors, max, true) : {}) }
   }
-  return errors.length > 0 ? { errors } : { config: { providers, aliases }, errors }
+  return errors.length > 0 ? { errors } : { config: { providers, aliases, ...(raw['tiers'] === undefined ? {} : { tiers: parsedTiers.tiers }) }, errors }
 }
 
 // Why `name` (`provider/model`) is not a declared target, or undefined when it is one.

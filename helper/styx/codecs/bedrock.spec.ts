@@ -1,6 +1,6 @@
 // Copied from Trosfy/claude-styx styxd/codecs/bedrock.spec.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: import paths for this layout; messages name rice-multi-models.
+// Modified by Mo Abualruz: import paths for this layout; messages name rice-multi-models.
 // The `bedrock` codec: the event-stream framing (CRC32, header types, frames split anywhere), the decoder's
 // events for each synthetic response in fixtures/bedrock (built here, checked in as bytes for the
 // conformance suite, and compared with what is built), how a response's end is read, and the ConverseStream

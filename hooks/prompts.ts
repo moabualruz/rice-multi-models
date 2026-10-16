@@ -1,6 +1,6 @@
 // Copied from Trosfy/claude-styx hooks/prompts.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: a small Memory and Route stand in for styx's Session and Route; imports from ./util.
+// Modified by Mo Abualruz: a small Memory and Route stand in for styx's Session and Route; imports from ./util.
 // The system prompt of a routed step, and the model identity its transcript states. Main gets the prompt
 // the engine composes for its own model, with the lines that name that model rewritten to name the routed
 // model and provider. A built-in agent type gets the prompt styx writes for it (hooks/agents.ts); the `claude`

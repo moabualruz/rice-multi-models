@@ -1,6 +1,6 @@
 // Copied from Trosfy/claude-styx styxd/upstream.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: import paths for this layout; Node TCP/fetch transport and cancellable connect probes.
+// Modified by Mo Abualruz: import paths for this layout; Node TCP/fetch transport and cancellable connect probes.
 // The provider transport: one POST per request over Node's keep-alive pool. https only (http too where the
 // provider allows it), no redirect followed, a TCP connect check bounded at 15 s, a stall window from the
 // request until the headers and between reads, and a bound on the whole request. Aborting `signal` (the

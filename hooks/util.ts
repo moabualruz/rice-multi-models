@@ -1,5 +1,5 @@
 // JSON helpers the copied claude-styx modules read; from Trosfy/claude-styx hooks/config.ts at 5072384
-// (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt). Modified by mkh: only these.
+// (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt). Modified by Mo Abualruz: only these.
 export type Json = { [key: string]: unknown }
 export type JsonSchema = Readonly<Record<string, unknown>>
 

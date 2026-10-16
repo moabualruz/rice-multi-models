@@ -1,1 +1,10 @@
 * text=auto eol=lf
+# Retain withdrawn startup integration in Git history, outside release archives.
+helper/native/ export-ignore
+dist/native.mjs export-ignore
+dist/native.meta.json export-ignore
+dist/launch.mjs export-ignore
+dist/entry.mjs export-ignore
+scripts/proof-native-launcher.mjs export-ignore
+scripts/proof-windows-bootstrap.mjs export-ignore
+scripts/proof-windows-native-launcher.mjs export-ignore

@@ -1,6 +1,6 @@
 // Copied from Trosfy/claude-styx styxd/auth.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: import paths for this layout; Effort comes from hooks/protocol.
+// Modified by Mo Abualruz: import paths for this layout; Effort comes from hooks/protocol.
 // A provider's key, from its credential helper only: run with no shell, for at most 10 s, and only while the
 // provider's fingerprint is among the approved ones a request carries. Steps that need a key at the same
 // moment share one helper run. A key is kept for its ttl; what a helper prints is never logged. Reading the

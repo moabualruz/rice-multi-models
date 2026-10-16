@@ -12,6 +12,8 @@ import { opencodeEntries, opencodeKey } from './opencode-auth.ts'
 import { discoverCodex } from './codex-catalog.ts'
 import { discover } from './discover.ts'
 import { searchConfiguration } from './search-config.ts'
+import { runToolSearch } from './search/tool-search.ts'
+import { runWebFetch } from './web-fetch.ts'
 
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = []
@@ -82,6 +84,20 @@ export async function main(lifetime?: AbortSignal): Promise<void> {
     const result = await searchConfiguration(JSON.parse(await readStdin()))
     process.stdout.write(`${JSON.stringify(result)}\n`)
     if (!result.ok) process.exitCode = 1
+  } else if (mode === 'tool-search' || mode === 'web-fetch') {
+    const controller = new AbortController()
+    const abort = () => controller.abort()
+    for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.on(signal, abort)
+    lifetime?.addEventListener('abort', abort, { once: true })
+    if (lifetime?.aborted) abort()
+    try {
+      const input = JSON.parse(await readStdin())
+      const result = mode === 'tool-search' ? await runToolSearch(input, controller.signal) : await runWebFetch(input, controller.signal)
+      process.stdout.write(`${JSON.stringify(result)}\n`)
+    } finally {
+      lifetime?.removeEventListener('abort', abort)
+      for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.off(signal, abort)
+    }
   } else if (mode === 'opencode-entries') {
     if (!process.argv[3]) throw new Error('opencode-entries requires an auth file')
     process.stdout.write(`${JSON.stringify(await opencodeEntries(process.argv[3]))}\n`)

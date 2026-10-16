@@ -38,6 +38,13 @@ test('picker sync owns exact generated rows, preserves custom prefixed rows and 
   expect(JSON.parse(await readFile(path.join(configDir, 'settings.json'), 'utf8')).modelPicker.options).toEqual(custom)
 }))
 
+test('picker sync never adds an empty picker block to settings that had none', async () => temporary(async configDir => {
+  const settings = { permissions: { allow: ['Read'] }, autoMode: { classifyAllShell: true } }
+  await writeFile(path.join(configDir, 'settings.json'), JSON.stringify(settings))
+  expect(await syncPicker({ configDir, rows: [] })).toMatchObject({ ok: true, changed: false, count: 0 })
+  expect(JSON.parse(await readFile(path.join(configDir, 'settings.json'), 'utf8'))).toEqual(settings)
+}))
+
 test('edited generated rows lose ownership permanently and survive repair and provider removal', async () => temporary(async configDir => {
   await syncPicker({ configDir, rows })
   const file = path.join(configDir, 'settings.json')
@@ -171,8 +178,9 @@ test('startup notice has no invented default and includes fresh source status an
   expect(summary).toContain('process-global override does not establish independent custom-subagent windows')
   expect(summary).toContain('mixed custom models and restoration on plugin unload remain limitations')
   expect(summary).not.toContain('200k fallback')
-  expect(summary).toContain('Start with rice-claude for direct native inference')
-  expect(summary).toContain('/rice-models setup native explicitly installs the launcher')
+  expect(summary).toContain('Start the normal claude command')
+  expect(summary).toContain('supported session.compact hook')
+  expect(summary).not.toContain('rice-claude')
   const state = new Map<string, unknown>()
   const logs: string[] = []
   const port = { get: async (key: string) => state.get(key), set: async (key: string, value: unknown) => { state.set(key, value) }, log: (text: string) => { logs.push(text) } }

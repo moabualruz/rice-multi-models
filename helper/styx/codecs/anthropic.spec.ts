@@ -1,6 +1,6 @@
 // Copied from Trosfy/claude-styx styxd/codecs/anthropic.spec.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: import paths for this layout; messages name rice-multi-models.
+// Modified by Mo Abualruz: import paths for this layout; messages name rice-multi-models.
 // The `anthropic` codec: request bodies from the normalized transcript, and its decoder read event by event
 // and through the step assembler, beside the conformance suite's recorded and synthetic streams.
 import { expect, test } from 'bun:test'

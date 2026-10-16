@@ -1,6 +1,6 @@
 // Copied from Trosfy/claude-styx hooks/agents.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: imports its JSON helpers from ./util.
+// Modified by Mo Abualruz: imports its JSON helpers from ./util.
 // Custom agent types as Claude Code defines them in agent files (`<name>.md`: a YAML frontmatter, then the
 // markdown body that is the agent's whole system prompt), the plugin directory installed_plugins.json
 // records, what a routed subagent is given (its tool filter and its system prompt), the prompts styx writes
@@ -78,6 +78,8 @@ export type AgentDef = {
   model?: string
   effort?: string
   isolation?: string
+  omitClaudeMd?: true
+  hooks?: Record<string, unknown>
   prompt: string
 }
 export type Parsed<T> = T | { error: string }

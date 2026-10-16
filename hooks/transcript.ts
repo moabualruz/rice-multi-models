@@ -1,6 +1,6 @@
 // Copied from Trosfy/claude-styx hooks/transcript.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: imports its JSON helpers from ./util.
+// Modified by Mo Abualruz: imports its JSON helpers from ./util.
 // Reading the engine's transcript where routing needs it: the first user text, a subagent's opening task,
 // whether the engine delivers its report through SubagentHandback or has refused a call of it, and the styx agent calls the engine ran as Agent calls; the
 // text of a value, and a message's blocks, which styxd reads the transcript by too. Pure.

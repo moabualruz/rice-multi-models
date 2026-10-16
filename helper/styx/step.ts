@@ -1,6 +1,6 @@
 // Copied from Trosfy/claude-styx styxd/step.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: import paths for this layout; Effort comes from hooks/protocol. A provider's sessionHeader
+// Modified by Mo Abualruz: import paths for this layout; Effort comes from hooks/protocol. A provider's sessionHeader
 // carries a hash of the conversation, which the codec also gets as a cache key. The codec and the key's header
 // follow the model's kind; the path joins its base with joinUrl.
 // One routed step inside styxd: the target resolved from the config the request carries, the key (whose

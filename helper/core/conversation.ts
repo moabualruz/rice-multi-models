@@ -1,6 +1,6 @@
 // Adapted from greenpolo/cc-multi-cli-plugin plugins/multi-core/src/gateway/conversation.ts at 3dcb057
 // (Apache-2.0, Copyright 2026 greenpolo; see LICENSES/cc-multi-cli-plugin.Apache-2.0.txt and its NOTICE).
-// Modified by mkh: preserve server-side search/fetch transcript blocks as historical text.
+// Modified by Mo Abualruz: preserve server-side search/fetch transcript blocks as historical text.
 import type { ContentBlock, RequestMessage } from './messages.ts';
 import { isRecord } from './record.ts';
 import { callId, toolName } from './tools.ts';

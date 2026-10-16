@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 
 import { catalogueRows, type PickerRow } from '../hooks/picker'
 import { unknownMetadata, type ModelCatalogue } from '../hooks/catalogue'
-import { agentTypeInput, candidates, DISCOVERY_GUIDANCE, DISCOVERY_SCHEMAS, DISCOVERY_SECTION_ID, discoveryInput, limitsReport, modelExecution, modelIsCandidate, modelsReport, nativeAgentSpec, reserveAgentType, withDiscoverySection, workerAgentSpec } from '../hooks/discovery'
+import { candidates, discoveryGuidance, DISCOVERY_SECTION_ID, limitsReport, modelExecution, modelIsCandidate, modelsReport, withDiscoverySection } from '../hooks/discovery'
 import type { Limits } from '../hooks/protocol'
 
 const baseRows: PickerRow[] = [
@@ -12,6 +12,11 @@ const baseRows: PickerRow[] = [
   { model: 'grok/grok-build', label: 'Grok Build', description: 'Grok CLI as a worker with its own tools' },
 ]
 
+const families = [
+  { family: 'codex', label: 'OpenAI Codex (ChatGPT subscription)', type: 'rice-multi-models:codex', model: 'codex/gpt-6.1-sol', tiers: { haiku: 'codex/gpt-6.1-mini' } },
+  { family: 'claude', label: 'Claude (Anthropic)', type: 'rice-multi-models:claude' },
+]
+
 test('discovery section replaces its own id once and leaves all other section order intact', () => {
   const initial = [
     { id: 'first', text: 'first section', scope: 'shared' as const },
@@ -19,28 +24,32 @@ test('discovery section replaces its own id once and leaves all other section or
     { id: 'last', text: 'last section', scope: 'session' as const },
     { id: DISCOVERY_SECTION_ID, text: 'duplicate stale section', scope: 'session' as const },
   ]
-  const once = withDiscoverySection(initial)
-  const twice = withDiscoverySection(once)
+  const text = discoveryGuidance(families)
+  const once = withDiscoverySection(initial, text)
+  const twice = withDiscoverySection(once, text)
   expect(once.map(section => section.id)).toEqual(['first', 'last', DISCOVERY_SECTION_ID])
   expect(twice).toEqual(once)
-  expect(once.at(-1)).toMatchObject({ id: DISCOVERY_SECTION_ID, scope: 'session', text: DISCOVERY_GUIDANCE })
+  expect(once.at(-1)).toMatchObject({ id: DISCOVERY_SECTION_ID, scope: 'session', text })
 })
 
-test('prompt guidance follows session restrictions without imposing a provider preference', () => {
-  expect(DISCOVERY_GUIDANCE).toContain('Follow the user\'s provider and model restrictions for this session')
-  expect(DISCOVERY_GUIDANCE).toContain('Obey provider quota refusals')
-  expect(DISCOVERY_GUIDANCE).toContain('Never fall back to another provider implicitly')
-  expect(DISCOVERY_GUIDANCE).toContain('not unlimited capacity')
-  expect(DISCOVERY_GUIDANCE).not.toMatch(/Codex-only|Luna|AirFVR/)
+test('family guidance keeps each conversation in its family and names explicit native choices only', () => {
+  const text = discoveryGuidance(families, [{ type: 'rice-multi-models:agy', label: 'Antigravity (Gemini)' }])
+  expect(text).toContain('Each conversation stays on its own provider family')
+  expect(text).toContain('pick a tier inside the current family; they never switch provider')
+  expect(text).toContain('only when the user or session instructions ask for it')
+  expect(text).toContain('OpenAI Codex (ChatGPT subscription): codex/gpt-6.1-sol (tiers: haiku -> codex/gpt-6.1-mini); agent type rice-multi-models:codex')
+  expect(text).toContain('Claude (Anthropic): native Claude models; agent type rice-multi-models:claude')
+  expect(text).toContain('CLI worker agent type rice-multi-models:agy')
+  expect(text).toContain('never switch providers to get around them')
+  expect(text).not.toMatch(/mcp__|Luna|AirFVR/)
 })
 
 test('native window explanations distinguish primary integration from per-model registration without changing report keys', () => {
   const report = JSON.parse(modelsReport([], [], { status: 'unavailable', windows: [] }))
   expect(Object.keys(report)).toEqual(['models', 'discovery', 'providerApprovals', 'codexLimits', 'compaction', 'nativeContextRegistration'])
-  expect(report.compaction).toMatchObject({ routed: 'unavailable', customSummarization: false, providerFallback: false, nativeClaude: 'unchanged' })
-  expect(DISCOVERY_GUIDANCE).toContain('native routed compaction is unavailable')
+  expect(report.compaction).toMatchObject({ routed: 'session.compact', customSummarization: true, providerFallback: false, nativeClaude: 'unchanged' })
   expect(report.compaction.modelSwitchGuard).toContain('not proof of request fit')
-  for (const explanation of [DISCOVERY_GUIDANCE, report.nativeContextRegistration]) {
+  for (const explanation of [report.nativeContextRegistration]) {
     expect(explanation).toContain('main routed native-provider model')
     expect(explanation).toContain('supported process-local CLAUDE_CODE_MAX_CONTEXT_TOKENS')
     expect(explanation).toContain('fresh exact active contextWindow ?? maxContextWindow')
@@ -53,21 +62,6 @@ test('native window explanations distinguish primary integration from per-model 
     expect(explanation).toContain('mixed custom models and restoration on plugin unload remain limitations')
     expect(explanation).not.toContain('200k fallback')
   }
-})
-
-test('owned discovery schemas stay strict for host and remote tool translation', () => {
-  expect(DISCOVERY_SCHEMAS['mcp__rice-multi-models__models']).toEqual({
-    type: 'object',
-    properties: { action: { type: 'string', enum: ['models', 'status'] } },
-    required: ['action'],
-    additionalProperties: false,
-  })
-  expect(DISCOVERY_SCHEMAS['mcp__rice-multi-models__agent_type']).toEqual({
-    type: 'object',
-    properties: { model: { type: 'string' }, mode: { type: 'string', enum: ['read', 'write'], default: 'read' } },
-    required: ['model'],
-    additionalProperties: false,
-  })
 })
 
 test('picker candidates come only from the fresh catalogue with unknown metadata kept unknown', () => {
@@ -107,49 +101,6 @@ test('model candidates distinguish native providers from the supplied CLI worker
   expect(modelExecution('agy/review-model', configured)).toBe('native provider')
   expect(modelExecution('local/not-supplied', rows)).toBeUndefined()
   expect(modelIsCandidate('local/not-supplied', rows)).toBe(false)
-})
-
-test('model and status tool inputs are strict and the agent mode defaults to read', () => {
-  expect(discoveryInput({ action: 'models' })).toEqual({ action: 'models' })
-  expect(discoveryInput({ action: 'status', extra: true })).toBeUndefined()
-  expect(discoveryInput({ action: 'refresh' })).toBeUndefined()
-  expect(agentTypeInput({ model: 'local/qwen-3' })).toEqual({ model: 'local/qwen-3', mode: 'read' })
-  expect(agentTypeInput({ model: 'local/qwen-3', mode: 'write' })).toEqual({ model: 'local/qwen-3', mode: 'write' })
-  expect(agentTypeInput({ model: 'local/qwen-3', mode: 'auto' })).toBeUndefined()
-  expect(agentTypeInput({ model: 'local/qwen-3', mode: 'read', permissionMode: 'bypassPermissions' })).toBeUndefined()
-  expect(agentTypeInput({ model: ' local/qwen-3' })).toBeUndefined()
-})
-
-test('dynamic native Agent type names are stable per model and mode but differ across pairs', () => {
-  const registry = new Map<string, string>()
-  const first = reserveAgentType(registry, 'local/qwen-3\\u0000read\\u0000route-a', 1)
-  const reused = reserveAgentType(registry, 'local/qwen-3\\u0000read\\u0000route-a', first.index)
-  const write = reserveAgentType(registry, 'local/qwen-3\\u0000write\\u0000route-a', reused.index)
-  const otherModel = reserveAgentType(registry, 'codex/gpt-6.1-sol\\u0000read\\u0000route-a', write.index)
-  const changedRoute = reserveAgentType(registry, 'local/qwen-3\\u0000read\\u0000route-b', otherModel.index)
-  expect(first).toMatchObject({ name: 'model-1', reused: false })
-  expect(reused).toMatchObject({ name: 'model-1', reused: true })
-  expect(write).toMatchObject({ name: 'model-2', reused: false })
-  expect(otherModel).toMatchObject({ name: 'model-3', reused: false })
-  expect(changedRoute).toMatchObject({ name: 'model-4', reused: false })
-  expect([...registry.values()].every(name => /^[A-Za-z0-9_-]{1,64}$/.test(name))).toBe(true)
-})
-
-test('native registrations use native Agent specs without permission overrides while CLI workers stay distinct', () => {
-  const nativeRead = nativeAgentSpec('model-1', 'local/qwen-3', 'read')
-  const nativeWrite = nativeAgentSpec('model-2', 'codex/gpt-6.1-sol', 'write')
-  const cliRead = workerAgentSpec('model-3', 'agy/gemini-3.8-flash-high', 'read', 'Antigravity (Gemini)')
-  expect(nativeRead.model).toBe('local/qwen-3')
-  expect(nativeRead.prompt).toContain('Search with the Glob and Grep tools')
-  expect(nativeRead.tools).toEqual(['Read', 'Glob', 'Grep', 'Bash', 'WebFetch', 'WebSearch'])
-  expect(nativeWrite.prompt).toContain('general-purpose agent')
-  expect(nativeWrite.tools).toBeUndefined()
-  expect('permissionMode' in nativeRead).toBe(false)
-  expect('permissionMode' in nativeWrite).toBe(false)
-  expect(cliRead.model).toBe('agy/gemini-3.8-flash-high')
-  expect(cliRead.description).toContain('CLI worker with its own tools')
-  expect(cliRead.tools).toEqual([])
-  expect(cliRead.description).toContain('reads and plans only (plan mode)')
 })
 
 test('missing limits remain unavailable while reported limits include observed time and reset metadata', () => {

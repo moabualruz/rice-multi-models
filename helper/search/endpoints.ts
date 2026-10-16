@@ -4,7 +4,8 @@ import { join } from 'node:path'
 import { MAX_SEARCH_CONFIG_BYTES, orderedSearchEndpoints, parseSearchConfig } from '../../hooks/search-config.ts'
 import type { SearchEndpoint } from '../../hooks/search-config.ts'
 import { runCommand } from '../core/subprocess.ts'
-import type { SearchResult } from '../native/search.ts'
+
+export type SearchResult = { title: string; url: string; content: string }
 
 export class SearchUnavailable extends Error {}
 export type SearchAttempt = { name: string; status: 'unavailable' | 'success'; http?: number }

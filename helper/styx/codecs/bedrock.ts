@@ -1,6 +1,6 @@
 // Copied from Trosfy/claude-styx styxd/codecs/bedrock.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: import paths for this layout.
+// Modified by Mo Abualruz: import paths for this layout.
 // The `bedrock` kind (Amazon Bedrock ConverseStream): request bodies from the normalized transcript, and a
 // decoder for the provider's event stream. Pure.
 import { isObject } from '../../../hooks/config'

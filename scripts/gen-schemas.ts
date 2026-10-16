@@ -1,6 +1,6 @@
 // Copied from Trosfy/claude-styx scripts/gen-schemas.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: header only; run with NODE_PATH pointing at a TypeScript install, for example
+// Modified by Mo Abualruz: header only; run with NODE_PATH pointing at a TypeScript install, for example
 //   NODE_PATH=~/.bun/install/global/node_modules bun scripts/gen-schemas.ts --tools <claude-code.d.ts>
 // Dev-only: writes hooks/schemas.gen.ts (built-in tool input schemas, committed) and, when an MCP
 // declaration file is present, hooks/schemas.mcp.gen.json (git-ignored; the hooks module reads it with

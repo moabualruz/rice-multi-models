@@ -92,6 +92,11 @@ export async function syncPicker(input: PickerSyncInput): Promise<PickerSyncResu
       added.push({ ...row })
       occupied.add(row.model)
     }
+    // Never create a picker block just to hold nothing.
+    if (settings.modelPicker === undefined && retained.length === 0 && added.length === 0) {
+      if (canonical(ownership) !== canonical({ version: 1, rows: [], edited: [...edited].sort() })) await atomicWrite(record, { version: 1, rows: [], edited: [...edited].sort() })
+      return { ok: true, changed: false, count: 0, path: file, preserved: 0 }
+    }
     const next = { ...settings, modelPicker: { ...picker, options: [...retained, ...added] } }
     const nextOwned: Ownership = { version: 1, rows: added, edited: [...edited].sort() }
     const changed = canonical(settings) !== canonical(next)

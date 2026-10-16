@@ -1,6 +1,6 @@
 // Copied from greenpolo/cc-multi-cli-plugin plugins/multi-openai/src/auth.ts at 3dcb057
 // (Apache-2.0, Copyright 2026 greenpolo; see LICENSES/cc-multi-cli-plugin.Apache-2.0.txt and its NOTICE).
-// Modified by mkh: import paths point at ../core; the app-server client names itself rice_multi_models.
+// Modified by Mo Abualruz: import paths point at ../core; the app-server client names itself rice_multi_models.
 import { spawn } from 'node:child_process';
 import { readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';

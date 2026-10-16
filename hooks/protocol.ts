@@ -1,6 +1,6 @@
 // Adapted from Trosfy/claude-styx hooks/protocol.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: a step names its target by model id (`codex/<slug>`), carries the session for cache
+// Modified by Mo Abualruz: a step names its target by model id (`codex/<slug>`), carries the session for cache
 // keys and the transport to use; events add `signature` (reasoning to carry back) and `limits`.
 //
 // The contract between the mod and the helper that answers its routed steps. Pure: no engine types and

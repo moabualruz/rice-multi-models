@@ -1,212 +1,105 @@
-# Direct native inference
+# Direct inference inside ordinary Claude
 
-Status: incomplete under the owner's no-launcher requirement, 2026-10-16.
-The 0.8.0 startup-preload integration is historical implementation evidence and
-does not satisfy the current activation contract.
+Status: implemented in 0.9.0 against Claude Code 2.1.301 and 2.1.302. Named host
+residuals are listed at the end; they are documented, not hidden.
 
-## Outcome
+## Required outcome
 
-A primary conversation and each of its child conversations own their selected
-model and provider. Every inference operation uses that owner, including native
-compaction, tool-internal inference, permission classifiers, lifecycle summaries
-and auxiliary calls made by mods. An explicitly selected alternate child keeps
-its own provider after nested delegation, resume and communication.
+The main conversation and each subagent own their selected model and provider.
+Ordinary turns and the auxiliary work they cause (compaction, titles, permission
+judgments, web search and fetch, evaluators, forked skills) use that
+conversation's provider family. A conversation stays in its family by default; a
+different family is used only when the user or session instructions ask for it.
 
-There is no network listener, inference proxy or gateway. The official native
-Claude executable remains intact. Provider requests use the existing direct
-clients. Native compaction keeps the host's prompt, transcript selection and
-bookkeeping; the mod supplies the provider response rather than a replacement
-summary algorithm.
+Users start the official, unmodified `claude` command. The mod works only through
+supported plugin hooks. It registers no MCP tools, and it adds no launcher, alias,
+preload, binary patch, inference proxy or gateway. Provider clients in the shipped
+Node helper make direct requests.
 
-Users start the ordinary, unmodified `claude` command. Installing or enabling a
-mod must activate its supported behavior through the host's plugin API. Do not
-introduce a separate command, replacement launcher, shell wrapper or alias. Do
-not substitute global preload configuration or a native binary patch for the
-rejected launcher. The original direct-provider, account-isolation and inference
-coverage requirements remain required; partial turn routing is insufficient.
+## Families
 
-## Historical implementation seam
+A family is a provider id (`codex`, a declared provider such as `openrouter`, or
+`claude` for native models).
 
-Claude Code 2.1.299 is a compiled Bun executable. Bun's documented `BUN_OPTIONS`
-preload executes an owned module before the embedded program. A native runtime
-proof intercepted a real streamed compaction request for `codex/owned` and the
-host completed compaction. This is native protocol proof with a deterministic
-response, not live provider proof.
+| Situation | Result |
+| --- | --- |
+| Agent tool `model` alias (`haiku`, `sonnet`, `opus`, `fable`) under a routed parent | The tier inside the parent's family: `tiers.<family>.<alias>`, else `tiers.<family>.default`, else the parent's own model |
+| Agent with no model, or a definition naming a native alias | Same as above |
+| Agent definition naming `provider/model` | That exact model |
+| Agent type `rice-multi-models:<family>` | That family, tier from the alias |
+| Agent type `rice-multi-models:claude` | Native Claude, alias honored |
+| Forks | Inherit the parent model (host rule) |
+| Forked skill or skill `model:` alias in a routed conversation | Tier inside the owning conversation's family |
+| Parent on native Claude | Native resolution unchanged |
 
-The host also has an optimized `Bun.FetchSession` path. Its transport selects that
-pool when the current global fetch equals the function captured at module load.
-The adapter must cover this path. The proven fetch accessor supplies an owned
-delegate with a distinct identity on each read; unrelated requests still invoke
-the original fetch. Test this behavior on each supported native version.
+`tiers` is an optional top-level block of `rice-multi-models.json`, keyed by family
+id, mapping `default`, `haiku`, `sonnet`, `opus` and `fable` to routed model ids of
+that family. Entries from another family are ignored.
 
-`BUN_OPTIONS` did not decode shell or JSON quotation around a preload filename
-in the tested binary. The former launcher validated its actual path transport,
-including paths with spaces, and required a successful preload handshake. This
-is retained evidence about that rejected activation path, not installation
-guidance or a conforming implementation.
+The main prompt gets one session section that lists the available families, their
+default models, tiers and agent types. It contains no tool instructions.
 
-Sources and alternative interfaces are recorded in
-[the primary-source research](../research/native-inference-routing-20261014.md).
+## Implementation boundaries
 
-## Modules
+| Boundary | Behavior |
+| --- | --- |
+| `turn.step` | Answers routed steps for main and subagents from the engine's own transcript, prompt and tools. Native alias steps resolve inside the owner's family. A step whose family cannot be resolved is refused visibly; the hook never throws, because a throwing hook lets the host run the native request. |
+| `agent.spawn` | Applies the family table above before the engine resolves the model, using the parent's effective (remapped) model; the mod's own agent types carry their registered model. |
+| `session.compact` | Selected-provider summary with a bounded verbatim tail of recent engine messages split at an exchange boundary (tool pairs and pending calls kept whole). The summary request is fitted to the model's input bound by shortening tool outputs, then long texts, then leaving out the middle of the oldest history; failures keep the original transcript. |
+| `tool.call` / `tool.check` for WebSearch and WebFetch | Native rules and classic PreToolUse run first; the checked input is then served by the selected provider, configured search services, then native search with the session's account (search only). |
+| `tool.check` (auto mode) | Unresolved asks for routed conversations are judged by the owner's provider with the effective auto-mode policy. SubagentHandback is never judged here. |
+| Classic PreToolUse command hook | Reports the native per-call permission mode (`scripts/permission-context.mjs`). |
+| `classic.UserPromptSubmit` | Returns `sessionTitle` from the selected provider, with a local fallback. |
+| Classic Stop and SubagentStop | Prompt-type evaluators are answered by the selected provider when every hook source of the event is visible to the mod. |
+| `model.complete`, `model.classify`, `model.fork` | Routed through the main conversation's family (these public events carry no caller identity). |
 
-Use TypeScript and the existing esbuild and Node 22+ workflow. The following
-modules describe the 0.8.0 adapter. Reuse their provider codecs and ownership
-logic only behind a conforming host API; their existing launcher cannot be the
-production activation mechanism.
+### Permission judgments
 
-1. `native/ownership.ts`: immutable owners and correlation for actual Worker
-   instances, dispatch IDs, environment ports, operations and continuations.
-2. `native/requests.ts`: parse the authentic native request, resolve its owner,
-   preserve its prompt/transcript, and construct the existing direct request.
-3. `native/responses.ts`: convert direct provider events into complete native
-   JSON or SSE responses, retaining text, tools, usage, errors and cancellation.
-4. `native/preload.ts`: initialize ownership tracking and transport interception
-   before native startup. It opens no network listener.
-5. `native/launch.ts`: historical startup-preload installer, excluded from the
-   current production activation contract.
-6. Existing hooks publish current selection, catalogue and approved provider
-   identities, use trusted caller metadata for exposed auxiliary operations, and
-   allow authentic native compaction only when the adapter is healthy.
+A judgment is invalidated when policy or loaded instructions change
+(`classic.ConfigChange`, `prompt.context`) or when the main permission mode
+changes. Mode changes are detected by comparing core's own verdicts for harmless
+`$.tool.check` queries (Bash, Write, Edit, Agent) taken before and after the
+judgment. The native auto-mode defaults come from `claude auto-mode defaults`, run
+once per Claude Code version in a mod-owned configuration folder so the user's
+settings are never migrated, and cached per version so a background CLI update
+does not break a running session.
 
-## Ownership contract
+### Input budget
 
-An owner contains the session identity, optional agent identity and exact selected
-model. A request's native model alias is separate from that selection. Auxiliary
-Haiku or Sonnet aliases do not choose another provider. The default routed target
-is the owner's exact selected model; any family optimization must be explicit and
-supported by fresh catalogue evidence.
+The local 95% guard estimates a step from the provider-reported input of the
+conversation's previous request (input plus cache reads and writes) and adds an
+estimate only for messages appended since. The character heuristic is used only
+without an anchor, after a model change or after compaction.
 
-Capture owners from authoritative native `turn.step` and other loop-bearing
-events. Keys include the actual Worker instance and numeric dispatch ID, because
-replacement Workers can restart their counters. Host-to-worker frames use
-`dispatch` or `dispatch_stream`, `id`, `event`, `payload` and `environments`.
+## Named host residuals
 
-Worker `next` and `next_pull` continuations refer to that dispatch ID. Dedicated
-environment ports are associated through the transferred port in `load`.
-Operations carry `dispatchId`, `registration`, `serving`, `rootEvent`, `op` and
-`args`; streaming operations carry the initial metadata in `open`. Custom noun
-calls use their own `callId` and environment membership.
+- **Auto-mode handoff review.** When a subagent finishes under an auto-mode
+  parent, Claude Code reviews its report with a native classifier request. The
+  host exposes no seam to route or skip it. It fails open: with Claude unavailable
+  the report is delivered with an "unavailable" note.
+- **Agent-type evaluators.** Stop and SubagentStop hooks of `type: "agent"` need a
+  native verification loop; events containing one run natively, so every other
+  configured hook still runs. Prompt-type evaluators are routed.
+- **Hidden hook sources.** When another enabled plugin (including function hook
+  modules registered before this mod), an invoked skill, an agent definition file
+  or a session plugin directory may define hooks for the same event, evaluators run
+  natively rather than risking dropped hooks.
+- **Restricted tool sessions.** Without any file-edit tool, an auto-to-plan switch
+  during a pending judgment cannot be told apart by the query fingerprint; other
+  mode switches still are.
+- **Subagent transcripts.** Routed subagents, forked skills and fork subagents need
+  session persistence (the default). Under `--no-session-persistence` their tasks
+  are not readable by plugins and routed ones refuse without sending anything.
+- **Resume model.** The host restores only the default model on resume and
+  exposes no setter; the mod records each session's main model and, when a routed
+  conversation resumes on another model, shows the `/model` command to return.
 
-Run the corresponding native message callback under `AsyncLocalStorage` with its
-captured owner. This preserves ownership through asynchronous native requests and
-nested completion dispatches whose payload carries no agent ID. Preserve the
-host's separate async context and cancellation signals.
+## Verification
 
-Do not select the latest active child, infer an owner from prompt text, share a
-single mutable current-model variable, or reinterpret requested auxiliary model
-names as ownership. Refuse an ambiguous routed operation before provider dispatch.
-Retain already captured operation contexts through cleanup of their originating
-dispatch. Bound and clean correlations at native result, error, unload and stream
-completion boundaries.
-
-## Native request and response contract
-
-Intercept actual inference endpoints before network transmission. Accept native
-Messages JSON and streamed requests. Validate model, system, messages, tools and
-limits with bounded inputs. Authentication headers are neither logged nor forwarded
-to a different provider. Load credentials through the owning direct client.
-
-Keep native prompts and transcript ordering. Use the existing protocol codecs for
-Chat Completions, Responses, Anthropic Messages, Gemini and Bedrock. Codex retains
-its direct ChatGPT transport and account admission; CLI workers retain their
-declared execution model and capability limits. Do not claim an unavailable model
-capability merely because its provider has been configured.
-
-Streaming responses must contain the complete native message/block sequence and
-terminal message events. Preserve tool identities and JSON arguments. Ordinary
-inference errors must retain a useful nonsecret class and phase, disable unsafe
-native replay, and never trigger an Anthropic or different-provider fallback.
-The dedicated WebSearch chain below is the owner's explicit exception. Abort the
-direct request when the native request is abandoned.
-
-Native token-count and quota probes must use the routed provider's supported
-contract or the host's documented local estimation fallback. They must not contact
-an exhausted Claude subscription to authorize unrelated inference.
-
-Native web extraction keeps the host's retrieval behavior and routes its authentic
-summarizer request. Dedicated WebSearch first tries the selected provider's native
-search capability with that provider's selected account. If unavailable, it tries
-the explicitly configured retrieval services in priority order. The final fallback
-is native Claude WebSearch using the current selected Anthropic account. This
-exception does not apply to ordinary inference. Preserve native search result
-shapes, domain constraints, cancellation and bounded execution. Retrieval endpoints
-are search/content services, never inference gateways. Owner SearXNG configuration
-and live tests are restricted to this Mac and mkh-pc; WSL and other machines are
-excluded.
-
-## Launch and compatibility
-
-Use the normal `claude` executable and updater on every platform. Plugin reload
-does not retroactively load a main-process preload, and a second startup command
-is not an accepted remedy. Terminal, SDK, IDE, desktop and background launches
-need the actual supported plugin activation contract, rather than environment
-inheritance from a special entry point.
-
-The current 2.1.301 inspection and ordinary-command plugin proof are recorded in
-[plugin-only activation research](../research/plugin-only-activation-20261016.md).
-Two required host capabilities remain unavailable through the inspected plugin
-API: a caller-owned interception boundary for every native inference request and
-response, and an atomic session-local account transition that invalidates native
-credential caches and retires old-account quota responses. These boundaries are
-dependencies, not permission to reduce the feature requirements.
-
-Before another release is described as complete, demonstrate those capabilities
-inside ordinary `claude`, without preload variables, wrappers, aliases or a
-replacement executable. Repeat actual native compaction, auxiliary-inference,
-concurrent-provider and account-cache acceptance against that path. The retained
-launcher-based receipts do not establish this new activation requirement.
-
-Probe actual native versions on macOS and Linux/WSL. Declare Windows support only
-with meaningful native evidence. Unsupported or missing adapter activation is
-reported clearly; legacy main-turn routing is not full native-inference coverage.
-
-Original user sessions are not restarted, compacted or rewritten for validation.
-Use owned test sessions and normal installation/update commands.
-
-## Implementation waves
-
-1. Runtime and ownership: loader, real transport interception, immutable dispatch
-   correlation, explicit auxiliary owner metadata and concurrent native proofs.
-2. Direct requests: native request conversion, bundled direct transport, JSON/SSE,
-   abort/error handling, authentic native compaction and web extraction.
-3. Complete inference inventory: web search, classifiers, prompt/agent evaluators,
-   lifecycle requests, scheduling/communication and exact provider compatibility.
-4. Delivery: assembled canonical check, required hosted CI, normal publication,
-   GitHub publication. Installation and live validation on owner machines follow
-   the owner's explicit post-publication "proceed" gate.
-
-Each wave must close a named behavior or obtain missing integration proof. Reuse
-existing successful release evidence for unchanged inputs; do not replay 0.6.4
-installation merely because this specification is new.
-
-## Acceptance
-
-Test ordinary native inference entry points with Anthropic inference denied and
-independently observed selected-provider requests. Test dedicated WebSearch's
-explicit native-Claude fallback separately. Deterministic fixtures prove routing
-and native contracts. Separate live checks prove entitlement and output.
-
-- Main, child, nested, resumed and messaged loops retain their selected providers.
-- Overlapping children from different providers keep distinct auxiliary owners.
-- Skill loading, temporary model overrides and deferred ToolSearch work.
-- Completion, classification and appropriate transcript forks use their owners.
-- Manual, automatic and precomputed compaction use native requests/bookkeeping.
-- WebFetch synthesis uses the conversation's direct selected-provider inference.
-- Dedicated WebSearch follows selected provider/account, configured services by
-  priority, then native Claude/current Anthropic account, with each step observed.
-- Auto classifiers and configured prompt/agent evaluators retain their native
-  decisions while using the requesting conversation's provider.
-- Resume summaries, prompt suggestions, titles, goals and scheduled/incoming turns
-  follow their owner's route where enabled in the tested host.
-- Ordinary inference token/quota probes, failure, cancellation and retry paths
-  do not leak to Claude or replay committed provider work. Dedicated WebSearch
-  follows only its explicitly authorized fallback chain.
-- All declared protocol families have meaningful contract tests; live configured
-  provider results retain their actual availability and capability scope.
-- The full gate and hosted checks pass for the assembled revision, and the published
-  payload matches that revision and bundled runtime digests. Machine installation
-  is a separate human gate after complete GitHub publication.
-
-The task remains incomplete until the required behavior is proven. Refusing a
-previously broken path or documenting its failure is not a working feature.
+`bun run check` runs the unit suites, typechecks against the installed build's
+generated API, the bundle check and the native proofs: compaction, permissions,
+permission mode, search, evaluators, titles and the routing phases of
+`npm run test:phases` (children with and without persistence, family, built-in
+tools, compaction, classifier, skills, budget, partial failure, prompt evaluators,
+all five protocols, automatic compaction and a throwing `turn.step` hook). CI runs
+it on Linux for Claude Code 2.1.301 and 2.1.302 and on native Windows for 2.1.302.

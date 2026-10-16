@@ -1,7 +1,12 @@
-// Real native entry points, direct stand-in providers, and a denied Anthropic endpoint.
-// No account is used. Production hooks and the bundled in-process adapter remain in place.
+// Ordinary `claude --plugin-dir` with the production hooks, direct stand-in
+// providers and a denied Anthropic endpoint. The mod works only through public
+// plugin hooks. No account is used: HOME and CLAUDE_CONFIG_DIR are an owned
+// temporary fixture, and every request that reaches the Anthropic stub fails
+// the run.
+// Usage: node scripts/proof-native-adapter.mjs [phase] [--public-hooks]
+// (`--public-hooks` is accepted for existing callers; it is the only mode.)
 import assert from 'node:assert/strict'
-import { cpSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
@@ -9,12 +14,25 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
 
+const PHASES = ['children', 'family', 'builtins', 'compact', 'classifier', 'skills', 'budget', 'failure', 'evaluators', 'protocols', 'auto', 'step-throw']
+const OPT_IN = []
+const flags = process.argv.slice(2).filter(arg => arg.startsWith('--'))
+const unknownFlags = flags.filter(flag => flag !== '--public-hooks')
+if (unknownFlags.length) throw new Error(`unknown option ${unknownFlags.join(' ')}`)
+const selected = process.argv.slice(2).find(arg => !arg.startsWith('--'))
+if (selected !== undefined && ![...PHASES, ...OPT_IN].includes(selected)) throw new Error(`unknown phase ${selected}; phases: ${[...PHASES, ...OPT_IN].join(', ')}`)
+const wants = name => selected === undefined ? PHASES.includes(name) : selected === name
+
 const root = fileURLToPath(new URL('../', import.meta.url))
 const fixture = mkdtempSync(join(tmpdir(), 'rice-native space-'))
 const plugin = join(fixture, 'plugin space'), configDir = join(fixture, '.claude')
 const observations = [], denied = []
 let phase = 'setup', mainCalls = 0
 const protocols = ['openai', 'responses', 'anthropic', 'gemini', 'bedrock']
+// The first line of the routed compaction system prompt (hooks/compact.ts).
+const COMPACTION_MARK = 'Create a precise continuation summary'
+const CHILDREN_PROMPT = 'Use both owned child agents, then report completion.'
+const FAMILY_PROMPT = 'Use two owned subagents, then report completion.'
 const search = createServer((request, response) => {
   const query = new URL(request.url, 'http://fixture').searchParams.get('q')
   observations.push({ phase, kind: 'retrieval', query })
@@ -35,8 +53,9 @@ const provider = createServer(async (request, response) => {
     response.end(JSON.stringify(family === 'gemini' ? { models: ['main', 'child'].map(id => ({ name: 'models/' + id, inputTokenLimit: 495904, outputTokenLimit: 4096 })) } : { data: ['main', 'child'].map(id => ({ id, ...(family === 'anthropic' ? { max_input_tokens: 495904, max_tokens: 4096 } : {}) })) }))
     return
   }
+  const compaction = text.includes(COMPACTION_MARK)
   if (protocols.includes(family) && family !== 'openai') {
-    observations.push({ phase, kind: 'provider', family, model: body.model ?? 'main', path: request.url.split('?')[0], nativeCredentials: !!(request.headers.authorization && request.headers.authorization !== 'Bearer owned-bedrock-fixture' || request.headers['x-api-key'] || request.headers['x-goog-api-key']) })
+    observations.push({ phase, kind: 'provider', family, model: body.model ?? 'main', path: request.url.split('?')[0], compaction, nativeCredentials: !!(request.headers.authorization && request.headers.authorization !== 'Bearer owned-bedrock-fixture' || request.headers['x-api-key'] || request.headers['x-goog-api-key']) })
     if (family === 'bedrock') { response.setHeader('content-type', 'application/vnd.amazon.eventstream'); response.end(readFileSync(join(root, 'helper/styx/codecs/fixtures/bedrock/text.eventstream'))); return }
     response.setHeader('content-type', 'text/event-stream')
     if (family === 'responses') { response.end(readFileSync(join(root, 'helper/styx/codecs/fixtures/responses/recorded-text.sse'))); return }
@@ -47,22 +66,31 @@ const provider = createServer(async (request, response) => {
   const userText = (body.messages ?? []).filter(message => message.role === 'user').map(message => typeof message.content === 'string' ? message.content : (message.content ?? []).map(block => block.text ?? '').join('\n')).join('\n')
   const auxiliary = serialized.match(/OWNED_AUX_([a-z0-9]+)/)?.[1]
   const fork = serialized.match(/OWNED_FORK_([a-z0-9]+)/)?.[1]
-  const entry = { phase, kind: 'provider', family, model: body.model, ...(auxiliary ? { auxiliary } : {}), ...(fork ? { fork } : {}), classify: userText.includes('labels'),
+  // A child loop's own request carries its task prompt and never the main
+  // conversation's prompt (the main request echoes the task in its tool calls).
+  const familyChild = !serialized.includes(FAMILY_PROMPT) ? userText.match(/OWNED_FAMILY_([A-Z]+)/)?.[1] : undefined
+  const child = !serialized.includes(CHILDREN_PROMPT) ? userText.match(/OWNED_CHILD_([AB])/)?.[1] : undefined
+  const entry = { phase, kind: 'provider', family, model: body.model, unreadableTask: serialized.includes('is not readable by plugins'), ...(auxiliary ? { auxiliary } : {}), ...(fork ? { fork } : {}), ...(child && phase === 'children' ? { child } : {}), ...(familyChild && phase === 'family' ? { familyChild } : {}), classify: userText.includes('labels'), compaction,
     evaluator: serialized.includes('OWNED_EVALUATOR'), formatKeys: Object.keys(body.response_format?.json_schema?.schema?.properties ?? {}), commandRan: (body.messages ?? []).some(message => message.role === 'tool' && JSON.stringify(message.content).includes('OWNED_CLASSIFIER_OK')), started: performance.now() }
   observations.push(entry)
   let content = 'Owned provider answer', calls
   if (auxiliary) { await new Promise(resolve => setTimeout(resolve, 100)); content = 'OWNED_AUX_OK' }
   else if (fork) content = 'OWNED_FORK_OK'
-  else if (phase === 'children' && body.model === 'main' && mainCalls++ === 0) calls = [
+  else if (phase.startsWith('children') && body.model === 'main' && mainCalls++ === 0) calls = [
     { id: 'call_child_a', type: 'function', function: { name: 'Agent', arguments: JSON.stringify({ description: 'Owned child A', prompt: 'Return OWNED_CHILD_A without tools.', subagent_type: 'owned-a', name: 'owned-a-peer' }) } },
     { id: 'call_child_b', type: 'function', function: { name: 'Agent', arguments: JSON.stringify({ description: 'Owned child B', prompt: 'Return OWNED_CHILD_B without tools.', subagent_type: 'owned-b', name: 'owned-b-peer' }) } },
   ]
-  else if (phase === 'classifier' && body.model === 'main' && mainCalls++ === 0) calls = [{ id: 'call_classifier', type: 'function', function: { name: 'Bash', arguments: JSON.stringify({ command: "/bin/sh -c 'printf OWNED_CLASSIFIER_OK'", description: 'Print the owned classifier marker' }) } }]
-  else if (phase === 'classifier' && !body.tools?.length) content = '<severity>1</severity>'
+  else if (phase === 'family' && body.model === 'main' && !familyChild && mainCalls++ === 0) calls = [
+    { id: 'call_family_explore', type: 'function', function: { name: 'Agent', arguments: JSON.stringify({ description: 'Owned family explore', prompt: 'Return OWNED_FAMILY_EXPLORE without tools.', subagent_type: 'Explore', model: 'haiku', run_in_background: false }) } },
+    { id: 'call_family_general', type: 'function', function: { name: 'Agent', arguments: JSON.stringify({ description: 'Owned family general', prompt: 'Return OWNED_FAMILY_GENERAL without tools.', subagent_type: 'general-purpose', run_in_background: false }) } },
+  ]
+  else if (phase === 'classifier' && body.model === 'main' && body.tools?.length && mainCalls++ === 0) calls = [{ id: 'call_classifier', type: 'function', function: { name: 'Bash', arguments: JSON.stringify({ command: "/bin/sh -c 'printf OWNED_CLASSIFIER_OK'", description: 'Print the owned classifier marker' }) } }]
   else if (phase === 'builtins' && body.tools?.some(tool => tool.function?.name === 'web_search')) {
     const hasResult = body.messages?.some(message => message.role === 'tool')
     if (!hasResult) calls = [{ id: 'call_search', type: 'function', function: { name: 'web_search', arguments: JSON.stringify({ query: 'Claude Code native mod docs' }) } }]
     else content = 'Owned cited source: https://code.claude.com/docs/en/plugins/mods'
+  // The routed permission judgment is a tool-less request whose answer must
+  // match its { decision, reason } JSON schema (hooks/permission.ts).
   } else if (body.response_format?.json_schema) content = JSON.stringify(schemaValue(body.response_format.json_schema.schema))
   else if (userText.includes('labels')) content = 'owned'
   entry.ended = performance.now()
@@ -84,10 +112,22 @@ function schemaValue(schema) {
   if (schema.type === 'null') return null
   return 'Owned classifier rationale'
 }
+// The production hooks change while this proof stays fixed: a missing anchor
+// must fail loudly instead of silently dropping a fixture prelude.
+function inject(source, anchor, replacement, all = false) {
+  if (!source.includes(anchor)) throw new Error(`hooks/register.ts no longer contains the fixture anchor ${JSON.stringify(anchor.trim().slice(0, 80))}`)
+  return all ? source.replaceAll(anchor, replacement) : source.replace(anchor, replacement)
+}
+function sessionRows(session) {
+  const files = readdirSync(join(configDir, 'projects'), { recursive: true }).filter(file => typeof file === 'string' && file.endsWith(session + '.jsonl'))
+  return files.flatMap(file => readFileSync(join(configDir, 'projects', file), 'utf8').trim().split('\n').map(line => JSON.parse(line)))
+}
+const compactBoundaries = session => sessionRows(session).filter(event => event.type === 'system' && event.subtype === 'compact_boundary')
+const strip = ({ started, ended, ...event }) => event
 await Promise.all([new Promise(resolve => provider.listen(0, '127.0.0.1', resolve)), new Promise(resolve => search.listen(0, '127.0.0.1', resolve))])
 try {
   mkdirSync(plugin); mkdirSync(configDir); mkdirSync(join(configDir, 'plugins')); mkdirSync(join(configDir, 'agents'))
-  for (const directory of ['.claude-plugin', 'hooks', 'types', 'dist']) cpSync(join(root, directory), join(plugin, directory), { recursive: true })
+  for (const directory of ['.claude-plugin', 'hooks', 'types', 'dist', 'scripts']) cpSync(join(root, directory), join(plugin, directory), { recursive: true })
   writeFileSync(join(configDir, 'plugins/installed_plugins.json'), JSON.stringify({ version: 2, plugins: { 'rice-multi-models@rice-mods': [{ scope: 'user', installPath: plugin }] } }))
   writeFileSync(join(configDir, 'settings.json'), JSON.stringify({ enabledPlugins: { 'rice-multi-models@rice-mods': true } }))
   writeFileSync(join(fixture, '.claude.json'), JSON.stringify({ hasCompletedOnboarding: true }))
@@ -100,19 +140,27 @@ try {
   }
   const file = join(plugin, 'hooks/register.ts')
   let source = readFileSync(file, 'utf8')
-  source = source.replace('export const register: Register = on => {', 'let proofBuiltinsDone = false\nexport const register: Register = on => {')
-  source = source.replaceAll('    await loadProviders($)', `    await loadProviders($)\n    if (!loaded.config) throw new Error('owned fixture configuration must pass the production parser')\n    for (const provider of Object.values(loaded.config.providers)) await $.store.set(TRUST_PREFIX + fingerprint(provider), true)`)
-  source = source.replace('    const started = await next(e)', `    await $.state.set({ plugin: 'rice-multi-models', key: 'prefs' }, { effort: null, transport: 'sse', helper: 'once', workers: 'read' })\n    const started = await next(e)`)
-  source = source.replace("  on('turn.step', async function* ($, e, next) {", `  on('turn.step', async function* ($, e, next) {
-    if (e.agentId && await $.env.get('RICE_OWNED_PHASE') === 'children') {
-      const result = await $.model.complete({ model: 'haiku', prompt: 'OWNED_AUX_' + e.agentId })
-      if (!result.isAnswered || result.text !== 'OWNED_AUX_OK') throw new Error('owned child auxiliary failed')
-      const label = await $.model.classify('Owned classification fixture', ['owned', 'other'])
-      if (label !== 'owned') throw new Error('owned child classification failed')
-      const fork = await $.model.fork('OWNED_FORK_' + e.agentId)
-      if (!fork.isAnswered) throw new Error('owned child fork failed')
+  source = inject(source, 'export const register: Register = on => {', 'let proofBuiltinsDone = false\nexport const register: Register = on => {')
+  source = inject(source, '    await loadProviders($)', `    await loadProviders($)\n    if (!loaded.config) throw new Error('owned fixture configuration must pass the production parser')\n    for (const provider of Object.values(loaded.config.providers)) await $.store.set(TRUST_PREFIX + fingerprint(provider), true)`, true)
+  source = inject(source, '    const started = await next(e)', `    await $.state.set({ plugin: 'rice-multi-models', key: 'prefs' }, { effort: null, transport: 'sse', helper: 'once', workers: 'read' })\n    const started = await next(e)`)
+  // The children prelude records each auxiliary outcome and never throws: the
+  // host skips a turn.step hook that throws and sends the step, unrouted, to
+  // native Claude. $.model.fork takes { prompt }.
+  source = inject(source, "  on('turn.step', async function* ($, e, next) {", `  on('turn.step', async function* ($, e, next) {
+    const ownedPhase = await $.env.get('RICE_OWNED_PHASE')
+    if (e.agentId && e.index === 0 && ownedPhase === 'children') {
+      const settle = async work => { try { return await work() } catch (error) { return { threw: String(error?.message ?? error).slice(0, 300) } } }
+      const report = { agentId: e.agentId, model: e.model }
+      report.complete = await settle(async () => { const answer = await $.model.complete({ model: 'haiku', prompt: 'OWNED_AUX_' + e.agentId }); return { isAnswered: answer.isAnswered, text: answer.text ?? null } })
+      report.classify = await settle(async () => ({ label: await $.model.classify('Owned classification fixture', ['owned', 'other']) ?? null }))
+      report.fork = await settle(async () => { const answer = await $.model.fork({ prompt: 'OWNED_FORK_' + e.agentId }); return { isAnswered: answer.isAnswered, text: answer.text ?? null } })
+      await settle(() => $.fs.write('owned-prelude/' + e.agentId + '.json', JSON.stringify(report)))
     }
-    if (e.agentId === undefined && !proofBuiltinsDone && await $.env.get('RICE_OWNED_PHASE') === 'builtins') {
+    if (e.agentId === undefined && ownedPhase?.startsWith('step-throw')) {
+      if (ownedPhase === 'step-throw-mid') yield { kind: 'text', index: 0, text: 'OWNED_PARTIAL_BEFORE_FAILURE ' }
+      throw new Error('OWNED_STEP_FAILURE')
+    }
+    if (e.agentId === undefined && !proofBuiltinsDone && ownedPhase === 'builtins') {
       proofBuiltinsDone = true
       const calls = []
       for (const input of [{ tool: 'Skill', skill: 'plugin-authoring' }, { tool: 'ToolSearch', query: 'Find the web search tool', max_results: 1 }, { tool: 'WebFetch', url: 'https://example.com', prompt: 'Give the page title only.' }, { tool: 'WebSearch', query: 'Claude Code native mod docs', allowed_domains: ['code.claude.com'] }]) {
@@ -129,34 +177,70 @@ try {
   writeFileSync(file, source)
   const env = Object.fromEntries(['PATH', 'TMPDIR', 'LANG', 'SystemRoot', 'WINDIR', 'ComSpec', 'TEMP', 'TMP', 'RICE_CLAUDE_EXECUTABLE'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]))
   Object.assign(env, { HOME: fixture, USERPROFILE: fixture, CLAUDE_CONFIG_DIR: configDir, CODEX_HOME: join(fixture, '.codex'), ANTHROPIC_API_KEY: 'owned-no-account', ANTHROPIC_BASE_URL: base,
-    RICE_MULTI_MODELS_SEARCH_URL: `http://127.0.0.1:${search.address().port}/search`, RICE_MULTI_MODELS_NATIVE_TRACE: join(fixture, 'native.jsonl'), ENABLE_TOOL_SEARCH: 'true', DISABLE_AUTOUPDATER: '1', DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1' })
-  async function run(name, extra, prompt, permission = 'dontAsk', model = 'a/main') {
+    RICE_MULTI_MODELS_SEARCH_URL: `http://127.0.0.1:${search.address().port}/search`, ENABLE_TOOL_SEARCH: 'true', DISABLE_AUTOUPDATER: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1' })
+  // Public hooks answer a refusal or a failed response as the step's own text,
+  // so the host reports an ordinary result: exit 0 and is_error false. Exit 1
+  // with is_error is reserved for a host API error (here only the denied stub).
+  async function run(name, extra, prompt, { permission = 'dontAsk', model = 'a/main', expectSuccess = true } = {}) {
     phase = name; mainCalls = 0
     const started = Date.now()
-    const child = spawn(process.execPath, [join(plugin, 'dist/launch.mjs'), '-p', ...(model ? ['--model', model] : []), '--setting-sources', 'user', '--strict-mcp-config', '--permission-mode', permission, '--allowedTools', 'Skill,ToolSearch,WebFetch,WebSearch,Agent,SendMessage', '--output-format', 'json', ...extra, '--', prompt], { cwd: fixture, env: { ...env, RICE_OWNED_PHASE: name }, stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(process.env.RICE_CLAUDE_EXECUTABLE || 'claude', ['--plugin-dir', plugin, '-p', ...(model ? ['--model', model] : []), '--setting-sources', 'user', '--strict-mcp-config', '--permission-mode', permission, '--allowedTools', 'Skill,ToolSearch,WebFetch,WebSearch,Agent,SendMessage', '--output-format', 'json', ...extra, '--', prompt], { cwd: fixture, env: { ...env, RICE_OWNED_PHASE: name }, stdio: ['ignore', 'pipe', 'pipe'] })
     process.stdout.write(`${JSON.stringify({ phase: name, ownedPid: child.pid })}\n`)
     let stdout = '', stderr = ''; child.stdout.on('data', bytes => stdout += bytes); child.stderr.on('data', bytes => stderr += bytes)
     const timer = setTimeout(() => child.kill('SIGTERM'), 60000)
     const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', resolve) }); clearTimeout(timer)
     let result; try { result = JSON.parse(stdout) } catch {}
-    if (code !== 0 && !['partial-failure', 'budget'].includes(name)) process.stdout.write(`${JSON.stringify({ phase: name, elapsedMs: Date.now() - started, ...(stderr.includes('Windows native bootstrap') ? { bootstrap: { stage: stderr.match(/stage=([a-z-]+)/)?.[1] ?? 'no-phase-output', errorClass: stderr.includes('timed out establishing') ? 'ETIMEDOUT' : 'path-refused' } } : {}), observations, trace: (() => { try { return readFileSync(join(fixture, 'native.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line)) } catch { return [] } })(), setupErrors: stderr.match(/(?:Error|rice-multi-models)[^\n]{0,180}/g)?.slice(-3) ?? [], outputTail: stdout.slice(-300) })}\n`)
-    assert.equal(code, ['partial-failure', 'budget'].includes(name) ? 1 : 0, `native ${name} exit; output type ${result?.type ?? 'missing'}, stderr present ${!!stderr}`)
-    assert.ok(result, `native ${name} emitted its JSON result`)
-    assert.equal(result.is_error, ['partial-failure', 'budget'].includes(name), `native ${name} result`)
+    if (!expectSuccess) return { code, result }
+    if (code !== 0 || result?.is_error !== false) process.stdout.write(`${JSON.stringify({ phase: name, code, elapsedMs: Date.now() - started, observations: observations.filter(event => event.phase === name).map(strip), denied: denied.filter(event => event.phase === name), setupErrors: stderr.match(/(?:Error|rice-multi-models)[^\n]{0,180}/g)?.slice(-3) ?? [], outputTail: stdout.slice(-300) })}\n`)
+    assert.equal(code, 0, `${name} exit; output type ${result?.type ?? 'missing'}, stderr present ${!!stderr}`)
+    assert.ok(result, `${name} emitted its JSON result`)
+    assert.equal(result.is_error, false, `${name} result`)
     return result
   }
-  const selected = process.argv[2]
-  if (!selected || selected === 'children') {
-    await run('children', ['--no-session-persistence'], 'Use both owned child agents, then report completion.')
+  // A subagent's task prompt is in its $.session.messages view only when the
+  // session is saved, so the subagent phases keep normal session persistence.
+  if (wants('children')) {
+    await run('children', [], CHILDREN_PROMPT)
+    const preludeDir = join(fixture, 'owned-prelude')
+    const reports = existsSync(preludeDir) ? readdirSync(preludeDir).map(name => JSON.parse(readFileSync(join(preludeDir, name), 'utf8'))) : []
+    assert.deepEqual(reports.map(report => report.model).sort(), ['a/child', 'b/child'], 'both child loops step on their explicit provider/model')
+    for (const report of reports) {
+      assert.deepEqual(report.complete, { isAnswered: true, text: 'OWNED_AUX_OK' }, `child ${report.model} $.model.complete`)
+      assert.deepEqual(report.classify, { label: 'owned' }, `child ${report.model} $.model.classify`)
+      assert.deepEqual(report.fork, { isAnswered: true, text: 'OWNED_FORK_OK' }, `child ${report.model} $.model.fork`)
+    }
+    const turns = observations.filter(event => event.phase === 'children' && event.child)
+    assert.deepEqual(turns.map(event => `${event.child}:${event.family}/${event.model}`).sort(), ['A:a/child', 'B:b/child'], 'each child receives its task on its explicit provider/model')
+    // Public auxiliary calls carry no caller identity: they belong to the main
+    // conversation, so they use its family even from inside a child loop.
+    const agentIds = reports.map(report => report.agentId).sort()
     const requests = observations.filter(event => event.phase === 'children' && event.auxiliary)
-    assert.equal(requests.length, 2, 'two native child completions')
-    assert.deepEqual(requests.map(event => event.family).sort(), ['a', 'b'])
-    assert.ok(requests.every(event => event.model === 'child'), 'child auxiliary must use its selected model')
-    assert.ok(Math.max(...requests.map(event => event.started)) < Math.min(...requests.map(event => event.ended)), 'native child auxiliary requests overlap')
+    assert.deepEqual(requests.map(event => event.auxiliary).sort(), agentIds, 'one completion per child loop')
+    assert.ok(requests.every(event => event.family === 'a' && event.model === 'main'), 'auxiliary completions use the main conversation family')
+    assert.ok(Math.max(...requests.map(event => event.started)) < Math.min(...requests.map(event => event.ended)), 'concurrent auxiliary completions overlap')
+    const labels = observations.filter(event => event.phase === 'children' && event.classify)
+    assert.equal(labels.length, 2, 'one classification per child loop')
+    assert.ok(labels.every(event => event.family === 'a' && event.model === 'main'), 'classifications use the main conversation family')
     const forks = observations.filter(event => event.phase === 'children' && event.fork)
-    assert.deepEqual(forks.map(event => event.family).sort(), ['a', 'b'], 'child forks keep distinct providers')
+    assert.deepEqual(forks.map(event => event.fork).sort(), agentIds, 'one fork per child loop')
+    assert.ok(forks.every(event => event.family === 'a' && event.model === 'main'), 'forks of the main thread use the main conversation family')
+    assert.equal(denied.filter(event => event.phase === 'children').length, 0, 'no child step reached native Claude')
+    // Without session persistence the host's view of a child transcript lacks
+    // its task. The child is refused visibly; nothing reaches any provider.
+    await run('children-unsaved', ['--no-session-persistence'], CHILDREN_PROMPT)
+    assert.equal(observations.filter(event => event.phase === 'children-unsaved' && event.model === 'child').length, 0, 'a child without a readable task sends nothing')
+    assert.ok(observations.some(event => event.phase === 'children-unsaved' && event.model === 'main' && event.unreadableTask), 'the parent receives the visible refusal')
+    assert.equal(denied.filter(event => event.phase === 'children-unsaved').length, 0, 'a child without a readable task never reaches native Claude')
   }
-  if (!selected || selected === 'builtins') {
+  if (wants('family')) {
+    await run('family', [], FAMILY_PROMPT)
+    const requests = observations.filter(event => event.phase === 'family' && event.kind === 'provider')
+    assert.deepEqual(requests.filter(event => event.familyChild).map(event => event.familyChild).sort(), ['EXPLORE', 'GENERAL'], 'the Explore child with a native haiku alias and the default child each received their task')
+    assert.ok(requests.length >= 4, 'the main turn, both children and the final main turn reached a provider')
+    assert.ok(requests.every(event => event.family === 'a' && event.model === 'main'), 'native alias and default subagents stay in the parent family')
+    assert.equal(denied.filter(event => event.phase === 'family').length, 0, 'no subagent request reached native Claude')
+  }
+  if (wants('builtins')) {
     const result = await run('builtins', ['--no-session-persistence'], 'Check native built-in direct routing.')
     const answer = JSON.parse(result.result)
     assert.ok(answer.calls.every(call => !call.isError && !call.deny), 'all available built-in calls complete')
@@ -164,73 +248,88 @@ try {
     assert.ok(observations.some(event => event.kind === 'retrieval'), 'native WebSearch retrieves')
     assert.ok(observations.filter(event => event.phase === 'builtins' && event.kind === 'provider').every(event => event.family === 'a' && event.model === 'main'), 'built-in inference uses its owner')
   }
-  if (!selected || selected === 'compact') {
+  if (wants('compact')) {
     const session = randomUUID()
     await run('seed', ['--session-id', session], 'Remember the owned native fixture constraint.')
     await run('compact', ['--resume', session], '/compact')
-    const trace = readFileSync(join(fixture, 'native.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line))
-    assert.ok(trace.some(event => event.phase === 'dispatch' && event.requestClass === 'compaction' && event.selectedModel === 'a/main'), 'authentic native compaction dispatch')
-    assert.ok(observations.some(event => event.phase === 'compact' && event.kind === 'provider'), 'native compactor uses direct provider')
+    assert.ok(observations.some(event => event.phase === 'compact' && event.family === 'a' && event.model === 'main' && event.compaction), 'manual compaction sends the routed compaction request to the conversation provider')
+    assert.ok(compactBoundaries(session).some(event => event.compactMetadata?.trigger === 'manual'), 'manual compaction completes native transcript bookkeeping')
   }
-  if (!selected || selected === 'classifier') {
-    await run('classifier', ['--no-session-persistence', '--settings', JSON.stringify({ autoMode: { classifyAllShell: true }, skipAutoPermissionPrompt: true })], 'Print the owned classifier marker using Bash.', 'auto')
-    const trace = readFileSync(join(fixture, 'native.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line))
-    assert.ok(trace.some(event => event.phase === 'dispatch' && event.requestClass === 'auxiliary' && event.selectedModel === 'a/main'), 'native auto classifier uses its owner')
-    assert.ok(observations.some(event => event.phase === 'classifier' && event.commandRan), 'native classifier allows the owned readonly command')
+  if (wants('classifier')) {
+    await run('classifier', ['--no-session-persistence', '--settings', JSON.stringify({ autoMode: { classifyAllShell: true }, skipAutoPermissionPrompt: true })], 'Print the owned classifier marker using Bash.', { permission: 'auto' })
+    const judgments = observations.filter(event => event.phase === 'classifier' && event.formatKeys.join() === 'decision,reason')
+    assert.ok(judgments.length >= 1, 'the auto-mode permission judgment reached a direct provider with its decision/reason schema')
+    assert.ok(judgments.every(event => event.family === 'a' && event.model === 'main'), 'the permission judgment uses the conversation provider')
+    assert.ok(observations.some(event => event.phase === 'classifier' && event.commandRan), 'the allowed readonly command ran')
   }
-  if (!selected || selected === 'skills') {
+  if (wants('skills')) {
     await run('skill-temp', ['--no-session-persistence'], '/owned-temp')
-    await run('skill-fork', ['--no-session-persistence'], '/owned-fork')
+    // A forked skill's transcript is readable only from its saved sidechain, so
+    // the supported case keeps normal session persistence.
+    await run('skill-fork', [], '/owned-fork')
     assert.ok(observations.some(event => event.phase === 'skill-temp' && event.family === 'a' && event.model === 'main'), 'temporary skill alias retains the selected primary provider')
     assert.ok(observations.some(event => event.phase === 'skill-fork' && event.family === 'b' && event.model === 'child'), 'forked skill uses its explicitly selected provider')
+    const unsaved = await run('skill-fork-unsaved', ['--no-session-persistence'], '/owned-fork')
+    assert.match(unsaved.result, /transcript of .+ is unreadable/, 'without persistence the fork refuses visibly')
+    assert.equal(observations.filter(event => event.phase === 'skill-fork-unsaved' && event.kind === 'provider').length, 0, 'an unreadable fork sends nothing')
+    assert.equal(denied.filter(event => event.phase === 'skill-fork-unsaved').length, 0, 'an unreadable fork never falls back to Claude')
   }
-  if (!selected || selected === 'budget') {
-    const result = await run('budget', ['--no-session-persistence', '--tools', ''], 'Owned oversized context. '.repeat(250), 'dontAsk', 'budget/main')
-    assert.match(result.result, /95% safety threshold.*512 token input bound/, 'configured native input bound remains enforced')
-    assert.equal(observations.filter(event => event.phase === 'budget' && event.kind === 'provider').length, 0, 'oversized native requests stop before provider dispatch')
+  if (wants('budget')) {
+    const result = await run('budget', ['--no-session-persistence', '--tools', ''], 'Owned oversized context. '.repeat(250), { model: 'budget/main' })
+    assert.match(result.result, /95% safety threshold.*512 token input bound/, 'the configured input bound refuses visibly as the step answer')
+    assert.equal(observations.filter(event => event.phase === 'budget' && event.kind === 'provider').length, 0, 'an oversized request stops before provider dispatch')
   }
-  if (!selected || selected === 'failure') {
-    await run('partial-failure', ['--no-session-persistence'], 'Return the owned partial output.')
-    assert.equal(observations.filter(event => event.phase === 'partial-failure' && event.kind === 'provider').length, 1, 'native host does not replay a provider request after committed partial output')
+  if (wants('failure')) {
+    const result = await run('partial-failure', ['--no-session-persistence'], 'Return the owned partial output.')
+    assert.equal(observations.filter(event => event.phase === 'partial-failure' && event.kind === 'provider').length, 1, 'a committed partial response is not replayed')
+    assert.match(result.result, /rice-multi-models: .*response failed/, 'the incomplete response is reported as the step answer')
   }
-  if (!selected || selected === 'evaluators') {
-    for (const type of ['prompt', 'agent']) {
-      await run('evaluator-' + type, ['--no-session-persistence', '--settings', JSON.stringify({ hooks: { Stop: [{ hooks: [{ type, prompt: 'OWNED_EVALUATOR: allow this owned fixture by returning exactly {"ok":true}. $ARGUMENTS', timeout: 30 }] }] } })], 'Return the owned completion.')
-      assert.ok(observations.some(event => event.phase === 'evaluator-' + type && event.evaluator), type + ' evaluator reaches a direct provider')
-      assert.ok(observations.filter(event => event.phase === 'evaluator-' + type).every(event => event.family === 'a' && event.model === 'main'), type + ' evaluator retains its owner')
-    }
+  if (wants('evaluators')) {
+    // Prompt-type Stop evaluators are routed. Agent-type evaluators run natively
+    // by design; scripts/proof-public-evaluators.mjs covers them.
+    await run('evaluator-prompt', ['--no-session-persistence', '--settings', JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'prompt', prompt: 'OWNED_EVALUATOR: allow this owned fixture by returning exactly {"ok":true}. $ARGUMENTS', timeout: 30 }] }] } })], 'Return the owned completion.')
+    assert.ok(observations.some(event => event.phase === 'evaluator-prompt' && event.evaluator), 'prompt evaluator reaches a direct provider')
+    assert.ok(observations.filter(event => event.phase === 'evaluator-prompt').every(event => event.family === 'a' && event.model === 'main'), 'prompt evaluator retains its owner')
   }
-  if (!selected || selected === 'protocols') {
+  if (wants('protocols')) {
     for (const kind of protocols) {
       const session = randomUUID(), model = `${kind}/main`
-      await run(`seed-${kind}`, ['--session-id', session], 'Remember the owned provider protocol fixture.', 'dontAsk', model)
-      await run(`compact-${kind}`, ['--resume', session], '/compact', 'dontAsk', model)
-      const trace = readFileSync(join(fixture, 'native.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line))
-      assert.ok(trace.some(event => event.phase === 'dispatch' && event.requestClass === 'compaction' && event.selectedModel === model), `${kind} native compactor dispatch`)
-      assert.ok(observations.some(event => event.phase === `compact-${kind}` && event.family === kind), `${kind} direct native provider request`)
+      await run(`seed-${kind}`, ['--session-id', session], 'Remember the owned provider protocol fixture.', { model })
+      await run(`compact-${kind}`, ['--resume', session], '/compact', { model })
+      assert.ok(observations.some(event => event.phase === `compact-${kind}` && event.family === kind && event.compaction), `${kind} receives the routed compaction request`)
       assert.ok(observations.filter(event => event.family === kind).every(event => !event.nativeCredentials), `${kind} does not receive native Claude credentials`)
     }
   }
-  if (!selected || selected === 'auto') {
+  if (wants('auto')) {
+    // A resumed conversation keeps its provider only when it is selected again:
+    // ordinary claude starts a resume on the configured model.
     env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = '1'
     const session = randomUUID()
     await run('auto-seed', ['--session-id', session, '--tools', ''], 'Remember this owned native fixture context. ' + 'OWNED_AUTO_CONTEXT '.repeat(2500))
     await run('auto-second', ['--resume', session, '--tools', ''], 'Keep the owned native fixture constraints for later.')
-    await run('auto-third', ['--resume', session, '--tools', ''], 'Confirm the owned native fixture constraints remain in context.', 'dontAsk', null)
-    await run('auto-continue', ['--resume', session, '--tools', ''], 'Continue the owned native fixture.', 'dontAsk', null)
-    const trace = readFileSync(join(fixture, 'native.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line))
-    assert.ok(trace.some(event => event.phase === 'lifecycle' && event.trigger === 'auto'), 'real native automatic compaction event')
-    const files = readdirSync(join(configDir, 'projects'), { recursive: true }).filter(file => typeof file === 'string' && file.endsWith(session + '.jsonl'))
-    const boundaries = files.flatMap(file => readFileSync(join(configDir, 'projects', file), 'utf8').trim().split('\n').map(line => JSON.parse(line))).filter(event => event.type === 'system' && event.subtype === 'compact_boundary')
-    if (!boundaries.some(event => event.compactMetadata?.trigger === 'auto')) process.stdout.write(JSON.stringify({ autoDiagnostics: { boundaries: boundaries.map(event => ({ keys: Object.keys(event), compactMetadata: event.compactMetadata })), observations: observations.filter(event => event.phase.startsWith('auto')), trace: trace.filter(event => ['dispatch','refused','lifecycle'].includes(event.phase)), stores: readdirSync(join(configDir, 'plugins/store')), } }) + '\n')
-    assert.ok(boundaries.some(event => event.compactMetadata?.trigger === 'auto'), 'authentic automatic compaction completes native transcript bookkeeping')
-    assert.ok(observations.some(event => event.phase === 'auto-third' && event.family === 'a' && event.model === 'main'), 'startup compaction reaches its approved direct provider')
+    await run('auto-third', ['--resume', session, '--tools', ''], 'Confirm the owned native fixture constraints remain in context.')
+    await run('auto-continue', ['--resume', session, '--tools', ''], 'Continue the owned native fixture.')
+    const boundaries = compactBoundaries(session)
+    if (!boundaries.some(event => event.compactMetadata?.trigger === 'auto')) process.stdout.write(JSON.stringify({ autoDiagnostics: { boundaries: boundaries.map(event => ({ keys: Object.keys(event), compactMetadata: event.compactMetadata })), observations: observations.filter(event => event.phase.startsWith('auto')).map(strip) } }) + '\n')
+    assert.ok(boundaries.some(event => event.compactMetadata?.trigger === 'auto'), 'automatic compaction completes native transcript bookkeeping')
+    assert.ok(observations.some(event => event.phase === 'auto-third' && event.family === 'a' && event.model === 'main' && event.compaction), 'startup compaction of a resumed conversation reaches its direct provider')
+    assert.ok(observations.filter(event => event.phase.startsWith('auto') && event.kind === 'provider').every(event => event.family === 'a' && event.model === 'main'), 'every automatic compaction and turn stays in the conversation family')
     delete env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE
   }
-  assert.equal(denied.length, 0, 'no native Anthropic inference requests escape the adapter')
-  process.stdout.write(`${JSON.stringify({ nativeAdapter: 'pass', observations: observations.map(({ started, ended, ...event }) => event), deniedInference: denied.length })}\n`)
+  if (wants('step-throw')) {
+    // A turn.step hook that throws is skipped by the host, which then sends the
+    // step unrouted to native Claude. The production hook must refuse instead.
+    for (const name of ['step-throw', 'step-throw-mid']) {
+      const { code, result } = await run(name, ['--no-session-persistence', '--tools', ''], 'Return the owned completion.', { expectSuccess: false })
+      process.stdout.write(`${JSON.stringify({ phase: name, code, isError: result?.is_error, result: result?.result?.slice(0, 300), denied: denied.filter(event => event.phase === name) })}\n`)
+      assert.equal(denied.filter(event => event.phase === name).length, 0, `${name}: a failing routed step never falls back to native Claude`)
+      assert.equal(observations.filter(event => event.phase === name && event.kind === 'provider').length, 0, `${name}: a failing routed step is not replayed`)
+    }
+  }
+  assert.equal(denied.length, 0, 'no inference request reaches native Claude')
+  process.stdout.write(`${JSON.stringify({ integration: 'ordinary-claude-public-hooks', phase: selected ?? 'all', result: 'pass', observations: observations.map(strip), deniedInference: denied.length })}\n`)
 } catch (error) {
-  process.stdout.write(JSON.stringify({ failedPhase: phase, observations: observations.map(({started,ended,...event})=>event), denied, dispatch: (()=>{try{return readFileSync(join(fixture,'native.jsonl'),'utf8').trim().split('\n').map(line=>JSON.parse(line)).filter(event=>['dispatch','refused','policy'].includes(event.phase))}catch{return []}})() })+'\n')
+  process.stdout.write(JSON.stringify({ failedPhase: phase, observations: observations.map(strip), denied }) + '\n')
   throw error
 } finally {
   await Promise.all([new Promise(resolve => provider.close(resolve)), new Promise(resolve => search.close(resolve))])

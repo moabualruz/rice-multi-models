@@ -1,6 +1,6 @@
 // Copied from Trosfy/claude-styx styxd/codecs/conformance.spec.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: import paths for this layout; messages name rice-multi-models.
+// Modified by Mo Abualruz: import paths for this layout; messages name rice-multi-models.
 // The codec conformance suite. Every response under fixtures/<kind>/<scenario>.<ext> is decoded whole and
 // split at random byte offsets (a character split included), and must give the events its
 // <scenario>.expected.json holds (text deltas merged, minted ids numbered). Every kind holds the shared

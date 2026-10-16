@@ -1,6 +1,6 @@
 // Copied from Trosfy/claude-styx styxd/codecs/openai.spec.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: import paths for this layout; messages name rice-multi-models.
+// Modified by Mo Abualruz: import paths for this layout; messages name rice-multi-models.
 // The `openai` codec: request bodies from the normalized transcript, and its decoder read the way styxd
 // reads it (whole tool calls, ids minted, one stop or error) and the way the engine gets it (through the
 // step assembler), against the captured LV1 fixtures and hand-built streams for the cases LV1 cannot produce.

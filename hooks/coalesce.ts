@@ -1,5 +1,5 @@
 // Copied from Trosfy/claude-styx hooks/step.ts at 5072384 (MIT, Copyright (c) 2026 styx contributors;
-// see LICENSES/claude-styx.MIT.txt). Modified by mkh: coalesce alone, so the helper imports no engine types.
+// see LICENSES/claude-styx.MIT.txt). Modified by Mo Abualruz: coalesce alone, so the helper imports no engine types.
 import type { StepEvent } from './protocol'
 
 // Adjacent text deltas merged into one, and adjacent thinking deltas likewise, so what arrives together

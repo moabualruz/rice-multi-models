@@ -1,6 +1,6 @@
 // Copied from Trosfy/claude-styx styxd/codecs/eventstream.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by mkh: import paths for this layout; portable IEEE CRC-32.
+// Modified by Mo Abualruz: import paths for this layout; portable IEEE CRC-32.
 // The AWS event-stream framing Bedrock streams its answer in. A frame is a prelude (total length, headers
 // length, CRC32 of those 8 bytes), the headers, the payload, and a CRC32 of everything before it, all
 // integers big-endian. Pure.

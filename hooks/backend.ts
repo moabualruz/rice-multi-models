@@ -6,7 +6,7 @@
 // provider request.
 import type { ModelUsage, ProcessSpawnChunk, ProcessSpawnResult } from 'claude-code'
 
-import type { StepEvent, StepWire } from './protocol'
+import type { StepEvent, StepWire, StopReason } from './protocol'
 
 type Child = AsyncGenerator<ProcessSpawnChunk, ProcessSpawnResult, void>
 
@@ -115,15 +115,17 @@ export async function* helperStep(port: HelperPort, wire: StepWire): AsyncGenera
 }
 
 /** A whole answer as text, for compaction and one-shot completions. */
-export async function collectText(port: HelperPort, wire: StepWire): Promise<{ text: string; usage?: ModelUsage; error?: string }> {
+export async function collectText(port: HelperPort, wire: StepWire): Promise<{ text: string; usage?: ModelUsage; error?: string; stopReason?: StopReason }> {
   let text = ''
   let usage: ModelUsage | undefined
   let error: string | undefined
+  let stopReason: StopReason | undefined
   for await (const event of helperStep(port, wire)) {
     if (event.type === 'text') text += event.text
     else if (event.type === 'usage') usage = { input_tokens: event.in, output_tokens: event.out, cache_read_input_tokens: event.cacheRead, cache_creation_input_tokens: event.cacheWrite }
     else if (event.type === 'error') error = event.text
+    else if (event.type === 'stop') stopReason = event.reason
   }
 
-  return { text, ...(usage ? { usage } : {}), ...(error !== undefined ? { error } : {}) }
+  return { text, ...(usage ? { usage } : {}), ...(error !== undefined ? { error } : {}), ...(stopReason ? { stopReason } : {}) }
 }
