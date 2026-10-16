@@ -27,6 +27,8 @@ export type ModelConfig = {
   tools: boolean | readonly string[]
   parallelToolCalls: boolean
   vision: boolean
+  // Automatic detection is limited to qualified official hosted search endpoints.
+  webSearch?: 'auto' | 'native' | 'off'
   params: Json
   // Body params an alias lays over `params`, kept apart so a null deletes a key from every layer below it.
   overrides?: Json
@@ -127,7 +129,7 @@ export const RESERVED_ALIASES = new Set(['fable', 'opus', 'sonnet', 'haiku', 'de
 const PROVIDER_KEYS = ['kind', 'baseUrl', 'allowHttp', 'auth', 'authHeader', 'headers', 'params', 'timeoutMs', 'maxTools', 'models', 'sessionHeader']
 // The keys a model and an alias share: what a request is built from.
 const REQUEST_KEYS = ['params', 'effort', 'cache', 'headers']
-const MODEL_KEYS = ['kind', 'contextWindow', 'maxInputTokens', 'maxOutputTokens', 'tools', 'vision', ...REQUEST_KEYS]
+const MODEL_KEYS = ['kind', 'contextWindow', 'maxInputTokens', 'maxOutputTokens', 'tools', 'vision', 'webSearch', ...REQUEST_KEYS]
 const KIND_NAMES = '"openai", "responses", "anthropic", "gemini" or "bedrock"'
 const KEY_TTL_S = 300
 // The longest timer a runtime takes (2^31 - 1 ms); a longer one fires at once.
@@ -267,6 +269,7 @@ function model(id: string, providerKind: Kind, v: unknown, path: string, errors:
   // A key of another kind is reported above and read as absent.
   const mine = (k: string) => (spec.modelKeys.includes(k) ? v[k] : undefined)
   const { contextWindow, maxInputTokens, maxOutputTokens } = v
+  if (v.webSearch !== undefined && !['auto', 'native', 'off'].includes(String(v.webSearch))) errors.push(`${path}.webSearch: must be auto, native or off`)
   const maxTokensParam = mine('maxTokensParam')
   const systemRole = mine('systemRole')
   if (contextWindow !== undefined && !isCount(contextWindow)) errors.push(`${path}.contextWindow: must be a positive integer`)
@@ -291,6 +294,7 @@ function model(id: string, providerKind: Kind, v: unknown, path: string, errors:
     tools: toolsOf(v['tools'], `${path}.tools`, errors),
     parallelToolCalls: bool(mine('parallelToolCalls'), true, `${path}.parallelToolCalls`, errors),
     vision: bool(v['vision'], true, `${path}.vision`, errors),
+    ...(['auto', 'native', 'off'].includes(String(v.webSearch)) ? { webSearch: v.webSearch as ModelConfig['webSearch'] } : {}),
     ...requests(v, kind, path, errors, isCount(maxOutputTokens) ? maxOutputTokens : Infinity),
   }
   const budget = inputBudget(out)

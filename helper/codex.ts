@@ -4,7 +4,7 @@
 import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
 
-import type { Limits, StepEvent, StepRequest, StopReason, Transport } from '../hooks/protocol.ts'
+import type { Limits, SearchEvidence, StepEvent, StepRequest, StopReason, Transport } from '../hooks/protocol.ts'
 import type { Emit, MessagesRequest, MessagesResponse, RequestMessage } from './core/messages.ts'
 import { fromResponses, toResponses } from './core/responses.ts'
 import type { ResponsesRequest } from './core/responses.ts'
@@ -42,7 +42,7 @@ export function messagesBody(req: StepRequest, model: string): MessagesRequest {
     model,
     system: req.system,
     messages: req.transcript as unknown as RequestMessage[],
-    tools: req.tools.map(tool => ({
+    tools: (req.native?.webSearch ? [] : req.tools).map(tool => ({
       name: tool.name,
       description: tool.description,
       input_schema: tool.schema,
@@ -51,8 +51,8 @@ export function messagesBody(req: StepRequest, model: string): MessagesRequest {
     stream: true,
     ...(req.native?.maxTokens !== undefined ? { max_tokens: req.native.maxTokens } : {}),
     ...(req.native?.stopSequences ? { stop_sequences: req.native.stopSequences } : {}),
-    ...(req.native?.toolChoice ? { tool_choice: req.native.toolChoice } : {}),
-    ...(req.native?.outputSchema ? { output_format: { type: 'json_schema', schema: req.native.outputSchema } } : {}),
+    ...(req.native?.toolChoice && !req.native.webSearch ? { tool_choice: req.native.toolChoice } : {}),
+    ...(req.native?.outputSchema && !req.native.webSearch ? { output_format: { type: 'json_schema', schema: req.native.outputSchema } } : {}),
   }
   if (typeof req.effort === 'string') body.output_config = { effort: req.effort }
   else if (typeof req.effort === 'number') body.thinking = { type: 'enabled', budget_tokens: req.effort }
@@ -63,10 +63,19 @@ export function messagesBody(req: StepRequest, model: string): MessagesRequest {
 /** The Responses request: cc-multi's translation, its compatibility note, and a cache key per conversation. */
 export function responsesRequest(req: StepRequest, model: string, body: MessagesRequest): ResponsesRequest {
   const translated = toResponses(body, model)
+  const search = req.native?.webSearch
+  // Mirror the official Codex subscription serializer, rather than assuming
+  // that public Platform-only search parameters are accepted by this backend.
+  if (search?.blockedDomains?.length) throw new Error('Codex search cannot enforce these search restrictions')
+  if (search?.maxUses !== undefined && (!Number.isSafeInteger(search.maxUses) || search.maxUses < 1 || search.maxUses > 20)) throw new Error('Codex search use limit must be an integer from 1 to 20')
 
   return {
     ...translated,
-    ...(req.native?.outputSchema && translated.text ? { text: { format: { ...translated.text.format, strict: false } } } : {}),
+    ...(req.native?.outputSchema && !search && translated.text ? { text: { format: { ...translated.text.format, strict: false } } } : {}),
+    ...(search ? { tools: [{ type: 'web_search' as const, external_web_access: true,
+      ...(search.allowedDomains?.length ? { filters: { allowed_domains: search.allowedDomains } } : {}),
+      ...(search.location ? { user_location: { ...search.location, type: 'approximate' } } : {}),
+    }], tool_choice: 'auto' as const, parallel_tool_calls: false } : {}),
     instructions: openaiInstructions(translated.instructions),
     prompt_cache_key: createHash('sha256').update(JSON.stringify(['codex', req.session, req.who, model])).digest('hex'),
   }
@@ -354,7 +363,7 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
           idleTimer = setTimeout(() => attemptControl.abort(new ProviderFailure(`the Codex stream sent nothing for ${idleMs} ms`, { event: 'stream.idle', code: 'stream-idle', transient: true })), idleMs)
         }
         arm()
-        const mapper = eventMapper(event => {
+        const push = (event: StepEvent) => {
           ttfb ??= Date.now() - started
           if (event.type === 'tool_use') {
             committed = true
@@ -362,12 +371,14 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
           }
           if (committed) queue.push(event)
           else pending.push(event)
-        })
+        }
+        const mapper = eventMapper(push)
         try {
           signal.throwIfAborted()
           const response = await fromResponses(touching(await open(), arm), req.target, mapper.emit, {
             toolNames: originalToolNames(body),
             inputTokens: estimateInputTokens(request),
+            ...(req.native?.webSearch ? { onSearchSources: (evidence: SearchEvidence) => push({ type: 'search_sources', ...evidence }) } : {}),
           })
           clearTimeout(idleTimer)
           flush()

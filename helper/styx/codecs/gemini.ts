@@ -8,6 +8,7 @@ import { isObject } from '../../../hooks/config'
 import type { ModelConfig } from '../../../hooks/config'
 import { decoderOver, isIndex, params, parseJson, sseReader } from '../codec'
 import type { Codec, Neutral, Sink } from '../codec'
+import { uniqueSearchSources } from '../../core/search.ts'
 
 type Json = Record<string, unknown>
 type Part =
@@ -73,6 +74,8 @@ function decoder() {
   let finish: string | undefined
   let usage: Json | undefined
   let calls = 0
+  let searched = false
+  const searchSources: unknown[] = []
 
   function chunk(s: Sink, data: string) {
     const c = parseJson(data)
@@ -83,6 +86,20 @@ function decoder() {
     if (typeof blocked === 'string') finish = 'safety'
     const candidate = Array.isArray(c['candidates']) ? c['candidates'][0] : undefined
     if (!isObject(candidate)) return
+    const grounding = candidate['groundingMetadata']
+    if (isObject(grounding)) {
+      const queries = grounding['webSearchQueries']
+      const chunks = grounding['groundingChunks']
+      if (Array.isArray(queries) && queries.some(query => typeof query === 'string' && query.trim())) searched = true
+      if (Array.isArray(chunks)) for (const [index, chunk] of chunks.entries()) {
+        if (isObject(chunk) && isObject(chunk['web'])) {
+          searched = true
+          const supports = Array.isArray(grounding['groundingSupports']) ? grounding['groundingSupports'] : []
+          const snippets = supports.flatMap(support => isObject(support) && Array.isArray(support['groundingChunkIndices']) && support['groundingChunkIndices'].includes(index) && isObject(support['segment']) && typeof support['segment']['text'] === 'string' ? [support['segment']['text']] : [])
+          searchSources.push({ title: chunk['web']['title'], url: chunk['web']['uri'], ...(snippets.length ? { content: snippets.join('\n') } : {}) })
+        }
+      }
+    }
     const content = isObject(candidate['content']) ? candidate['content'] : {}
     for (const part of Array.isArray(content['parts']) ? content['parts'] : []) {
       if (!isObject(part)) return s.fail('a part is not an object')
@@ -106,6 +123,7 @@ function decoder() {
       const input = count(usage['promptTokenCount']) + count(usage['toolUsePromptTokenCount'])
       s.out.push({ t: 'usage', in: Math.max(0, input - cached), out: count(usage['candidatesTokenCount']) + thoughts, cacheRead: cached, cacheWrite: 0, ...(thoughts > 0 ? { reasoning: thoughts } : {}) })
     }
+    if (searched) s.out.push({ t: 'search_sources', sources: uniqueSearchSources(searchSources), searched: true })
     s.out.push({ t: 'finish', reason: finish === 'stop' && calls > 0 ? 'tool_calls' : finish })
   }
   return decoderOver(sseReader(), chunk, end)

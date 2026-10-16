@@ -16,6 +16,7 @@ Set-BootstrapStage 'identity'
 try {
   $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
   $sid = $identity.User.Value
+  Set-BootstrapStage 'identity-ready'
   function Assert-PrivatePath([string]$path, [bool]$directory) {
     Set-BootstrapStage 'inspect-private-path'
     $item = Get-Item -Force -LiteralPath $path
@@ -50,7 +51,8 @@ public static class RiceNativeBootstrapPath {
   public static extern uint GetShortPathName(string path, StringBuilder output, uint length);
 }
 '@
-  $security = New-Object System.Security.AccessControl.DirectorySecurity
+  Set-BootstrapStage 'construct-private-acl'
+  $security = [System.Security.AccessControl.DirectorySecurity]::new()
   $security.SetAccessRuleProtection($true, $false)
   $security.SetOwner($identity.User)
   $rule = [System.Security.AccessControl.FileSystemAccessRule]::new($identity.User, [System.Security.AccessControl.FileSystemRights]::FullControl, [System.Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit', [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Allow)
@@ -69,7 +71,7 @@ public static class RiceNativeBootstrapPath {
       Set-BootstrapStage 'shorten-directory'
       try {
         Add-Type -TypeDefinition $shortPathSource
-        $buffer = New-Object System.Text.StringBuilder(32768)
+        $buffer = [System.Text.StringBuilder]::new(32768)
         $length = [RiceNativeBootstrapPath]::GetShortPathName($directory, $buffer, [uint32]$buffer.Capacity)
         if ($length -gt 0 -and $length -lt $buffer.Capacity -and [System.IO.Directory]::Exists($buffer.ToString())) { $plain = $buffer.ToString() }
       } catch { <# A plain fallback base does not require the optional short-path API. #> }

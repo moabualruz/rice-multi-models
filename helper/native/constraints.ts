@@ -50,5 +50,45 @@ export function nativeConstraints(body: string, model: ModelConfig, native: Step
     if (choice?.type === 'none') delete sent.toolConfig
     if (native.outputSchema) sent.outputConfig = { textFormat: { type: 'json_schema', structure: { jsonSchema: { schema: JSON.stringify(native.outputSchema) } } } }
   }
+  if (native.webSearch) {
+    const search = native.webSearch
+    if (search.maxUses !== undefined && (!Number.isSafeInteger(search.maxUses) || search.maxUses < 1)) throw new Error('Invalid native search use limit')
+    if (model.kind === 'responses') {
+      sent.tools = [{ type: 'web_search', external_web_access: true,
+        ...(search.allowedDomains?.length || search.blockedDomains?.length ? { filters: {
+          ...(search.allowedDomains?.length ? { allowed_domains: search.allowedDomains } : {}),
+          ...(search.blockedDomains?.length ? { blocked_domains: search.blockedDomains } : {}),
+        } } : {}),
+        ...(search.location ? { user_location: { ...search.location, type: 'approximate' } } : {}),
+      }]
+      sent.tool_choice = { type: 'web_search' }
+      sent.include = [...new Set([...(Array.isArray(sent.include) ? sent.include.filter(value => typeof value === 'string') : []), 'web_search_call.action.sources'])]
+      delete sent.parallel_tool_calls
+      delete sent.text
+      if (search.maxUses !== undefined) sent.max_tool_calls = search.maxUses
+    } else if (model.kind === 'anthropic') {
+      if (search.allowedDomains?.length && search.blockedDomains?.length) throw new Error('Anthropic search supports one domain filter list per request')
+      sent.tools = [{ type: 'web_search_20250305', name: 'web_search', max_uses: search.maxUses ?? 8,
+        ...(search.allowedDomains?.length ? { allowed_domains: search.allowedDomains } : {}),
+        ...(search.blockedDomains?.length ? { blocked_domains: search.blockedDomains } : {}),
+        ...(search.location ? { user_location: { ...search.location, type: 'approximate' } } : {}),
+      }]
+      sent.tool_choice = { type: 'tool', name: 'web_search' }
+      delete sent.thinking
+      const output = { ...object(sent.output_config) }
+      delete output.format
+      if (Object.keys(output).length) sent.output_config = output
+      else delete sent.output_config
+    } else if (model.kind === 'gemini') {
+      if (search.allowedDomains?.length || search.blockedDomains?.length || search.location || search.maxUses !== undefined) throw new Error('Gemini search cannot enforce these search restrictions')
+      sent.tools = [{ googleSearch: {} }]
+      delete sent.toolConfig
+      const generation = { ...object(sent.generationConfig) }
+      delete generation.responseMimeType
+      delete generation.responseJsonSchema
+      delete generation.responseSchema
+      sent.generationConfig = generation
+    } else throw new Error('This provider protocol has no supported hosted search contract')
+  }
   return JSON.stringify(sent)
 }

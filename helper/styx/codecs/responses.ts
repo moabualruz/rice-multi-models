@@ -6,6 +6,7 @@ import { isObject } from '../../../hooks/config'
 import { decoderOver, isIndex, params, parseJson, sseReader } from '../codec'
 import type { Codec, Neutral, Sink } from '../codec'
 import type { Image, Text, Thinking } from '../history'
+import { responsesSearchEvidence } from '../../core/search.ts'
 
 type Json = Record<string, unknown>
 type Content = { type: 'input_text' | 'output_text'; text: string } | { type: 'input_image'; image_url: string; detail: 'auto' }
@@ -84,8 +85,15 @@ function decoder() {
   const thought = new Set<unknown>()
   let calls = 0
   let ended = false
+  const searchItems = new Map<unknown, Json>()
+  const searchAnnotations: Json[] = []
 
   function item(s: Sink, it: Json, index: unknown) {
+    if (it['type'] === 'web_search_call' || it['type'] === 'message') {
+      searchItems.set(index, it)
+      const evidence = responsesSearchEvidence([it])
+      if (evidence.error) return s.fail(evidence.error)
+    }
     if (it['type'] === 'function_call') {
       const name = str(it['name'])
       const whole = typeof it['arguments'] === 'string' && it['arguments'] !== '' ? it['arguments'] : (args.get(index) ?? '')
@@ -102,6 +110,12 @@ function decoder() {
   }
   function done(s: Sink, r: Json, status: string) {
     ended = true
+    const items = [...searchItems.values(), ...(Array.isArray(r['output']) ? r['output'] : []), ...(searchAnnotations.length ? [{ type: 'message', content: [{ type: 'output_text', annotations: searchAnnotations }] }] : [])]
+    if (items.some(it => isObject(it) && (it['type'] === 'web_search_call' || it['type'] === 'message' && Array.isArray(it['content']) && it['content'].some(part => isObject(part) && Array.isArray(part['annotations']))))) {
+      const evidence = responsesSearchEvidence(items)
+      if (evidence.error) return s.fail(evidence.error)
+      s.out.push({ t: 'search_sources', sources: evidence.sources, searched: evidence.searched })
+    }
     const u = r['usage']
     if (isObject(u) && isIndex(u['input_tokens']) && isIndex(u['output_tokens'])) {
       const cached = isObject(u['input_tokens_details']) && isIndex(u['input_tokens_details']['cached_tokens']) ? u['input_tokens_details']['cached_tokens'] : 0
@@ -118,6 +132,9 @@ function decoder() {
     const index = e['output_index'] ?? e['item_id']
     if (type === 'response.output_text.delta' || type === 'response.refusal.delta') {
       if (str(e['delta']) !== '') s.out.push({ t: 'text', text: str(e['delta']) })
+    } else if (type === 'response.output_text.annotation.added') {
+      if (isObject(e['annotation'])) searchAnnotations.push(e['annotation'])
+      else s.fail('Search citation metadata is malformed')
     } else if (type === 'response.reasoning_summary_text.delta' || type === 'response.reasoning_text.delta') {
       thought.add(index)
       if (str(e['delta']) !== '') s.out.push({ t: 'thinking', text: str(e['delta']) })

@@ -6,7 +6,7 @@
 import type { Effort } from '../../hooks/protocol'
 import { EFFORTS, isObject } from '../../hooks/config'
 import type { ModelConfig, ProviderConfig } from '../../hooks/config'
-import type { RemoteTool, StopReason, Usage } from '../../hooks/protocol'
+import type { RemoteTool, SearchSource, StopReason, Usage } from '../../hooks/protocol'
 import { ERROR_TEXT_MAX } from './errors'
 import type { Message, Thinking } from './history'
 
@@ -44,6 +44,7 @@ export type Decoded =
   | { t: 'thinking'; text: string }
   | { t: 'sealed'; block: Thinking }
   | { t: 'tool'; id?: string; name: string; args: string | Json }
+  | { t: 'search_sources'; sources: SearchSource[]; searched: boolean }
   | ({ t: 'usage' } & Usage)
   | { t: 'finish'; reason: string }
   | { t: 'error'; message: string }

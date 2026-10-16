@@ -11,6 +11,7 @@ import { syncPicker } from './picker-settings.ts'
 import { opencodeEntries, opencodeKey } from './opencode-auth.ts'
 import { discoverCodex } from './codex-catalog.ts'
 import { discover } from './discover.ts'
+import { searchConfiguration } from './search-config.ts'
 
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = []
@@ -75,6 +76,10 @@ export async function main(lifetime?: AbortSignal): Promise<void> {
     if (!result.ok) process.exitCode = 1
   } else if (mode === 'sync-picker') {
     const result = await syncPicker(JSON.parse(await readStdin()))
+    process.stdout.write(`${JSON.stringify(result)}\n`)
+    if (!result.ok) process.exitCode = 1
+  } else if (mode === 'search-config') {
+    const result = await searchConfiguration(JSON.parse(await readStdin()))
     process.stdout.write(`${JSON.stringify(result)}\n`)
     if (!result.ok) process.exitCode = 1
   } else if (mode === 'opencode-entries') {

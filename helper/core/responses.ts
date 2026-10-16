@@ -14,6 +14,8 @@ import { isRecord } from './record.ts';
 import { ProviderFailure } from './provider-failure.ts';
 import { type SafeguardProvider, safeguardResults } from './safeguards.ts';
 import { callId, toolName } from './tools.ts';
+import { responsesSearchAccounting, responsesSearchEvidence } from './search.ts';
+import type { SearchEvidence } from '../../hooks/protocol.ts';
 
 // Anthropic Messages <-> OpenAI Responses, for native Claude Code workers.
 /** Signature prefix OpenAI reasoning state carries; other providers pass their own. */
@@ -34,15 +36,17 @@ export type ResponsesInputItem =
   | { type: 'function_call_output'; call_id: string; output: string | ResponsesInputContent[] }
   | { type: 'reasoning'; id?: string; encrypted_content: string; summary: unknown };
 
-interface ResponsesTool {
+interface ResponsesFunctionTool {
   type: 'function';
   name: string;
   description: string;
   parameters: unknown;
   strict: boolean;
 }
+export type ResponsesWebSearchTool = { type: 'web_search'; external_web_access: boolean; filters?: { allowed_domains?: string[]; blocked_domains?: string[] }; user_location?: Record<string, unknown> };
+type ResponsesTool = ResponsesFunctionTool | ResponsesWebSearchTool;
 
-type ResponsesToolChoice = 'auto' | 'none' | 'required' | { type: 'function'; name?: string };
+type ResponsesToolChoice = 'auto' | 'none' | 'required' | { type: 'function'; name?: string } | { type: 'web_search' };
 
 export interface ResponsesRequest {
   model: string;
@@ -57,6 +61,7 @@ export interface ResponsesRequest {
   include: string[];
   store: boolean;
   stream: boolean;
+  max_tool_calls?: number;
 }
 
 interface ResponsesUsage {
@@ -79,6 +84,7 @@ interface ResponsesOutputContent {
   type: string;
   text?: string;
   refusal?: string;
+  annotations?: unknown[];
 }
 
 /** The output items this gateway understands; any other `type` is rejected. */
@@ -86,6 +92,7 @@ type ResponsesOutputItem = (
   | { type: 'message'; content?: ResponsesOutputContent[] }
   | { type: 'function_call'; call_id?: string; name?: string; arguments?: string }
   | { type: 'reasoning'; encrypted_content?: string | null; summary?: unknown }
+  | { type: 'web_search_call'; status?: string; action?: Record<string, unknown>; error?: unknown }
 ) & { id?: string };
 
 /** Streamed events the translation acts on. Any other `type` is ignored, exactly
@@ -95,6 +102,7 @@ type ResponseStreamEvent =
   | { type: 'response.output_item.added'; output_index: number; item: ResponsesOutputItem }
   | { type: 'response.output_item.done'; output_index: number; item: ResponsesOutputItem }
   | { type: 'response.output_text.delta'; output_index: number; delta: string }
+  | { type: 'response.output_text.annotation.added'; output_index: number; annotation: Record<string, unknown> }
   | { type: 'response.refusal.delta'; output_index: number; delta: string }
   | { type: 'response.function_call_arguments.delta'; output_index: number; delta: string }
   | { type: 'response.reasoning_summary_text.delta'; output_index: number; delta: string }
@@ -126,6 +134,9 @@ function isOutputItem(value: unknown, done: boolean): value is ResponsesOutputIt
       value[key] === undefined ? !done : typeof value[key] === 'string',
     );
   }
+  if (value.type === 'web_search_call') {
+    return (value.status === undefined ? !done : typeof value.status === 'string') && (value.action === undefined || isRecord(value.action));
+  }
   if (value.type === 'message') {
     return (
       value.content === undefined ||
@@ -133,6 +144,7 @@ function isOutputItem(value: unknown, done: boolean): value is ResponsesOutputIt
         value.content.every(
           (part) =>
             isRecord(part) &&
+            (part.annotations === undefined || Array.isArray(part.annotations)) &&
             (part.type === 'output_text'
               ? typeof part.text === 'string'
               : part.type === 'refusal' && typeof part.refusal === 'string'),
@@ -210,6 +222,9 @@ function isStreamEvent(value: unknown): value is ResponseStreamEvent {
     case 'response.function_call_arguments.delta':
     case 'response.reasoning_summary_text.delta':
       valid = indexed && typeof value.delta === 'string';
+      break;
+    case 'response.output_text.annotation.added':
+      valid = indexed && isRecord(value.annotation);
       break;
     case 'response.failed':
     case 'error':
@@ -305,7 +320,7 @@ function outputFormat(body: MessagesRequest) {
   return format;
 }
 
-function inputTool(tool: unknown): ResponsesTool {
+function inputTool(tool: unknown): ResponsesFunctionTool {
   if (!isRecord(tool)) {
     throw new Error('Invalid tool');
   }
@@ -329,7 +344,7 @@ function inputTool(tool: unknown): ResponsesTool {
 
 function toolChoice(
   choice: MessagesRequest['tool_choice'],
-  tools: ResponsesTool[],
+  tools: ResponsesFunctionTool[],
 ): ResponsesToolChoice {
   const wanted = choice?.type ?? 'auto';
   if (!['auto', 'any', 'none', 'tool'].includes(wanted)) {
@@ -536,6 +551,7 @@ interface OutputSlot {
   block?: ResponseContentBlock;
   index?: number;
   emitted: number;
+  annotations: unknown[];
 }
 
 function finalOutputItem(
@@ -558,13 +574,16 @@ function finalOutputItem(
   if (previous.type === 'reasoning' && item.type === 'reasoning') {
     return { ...previous, ...item };
   }
+  if (previous.type === 'web_search_call' && item.type === 'web_search_call') {
+    return { ...previous, ...item, ...(previous.action || item.action ? { action: { ...previous.action, ...item.action } } : {}) };
+  }
   return { ...item, id: item.id ?? previous.id };
 }
 
 function outputValue(item: ResponsesOutputItem): unknown {
   switch (item.type) {
     case 'message':
-      return item.content;
+      return item.content?.map(part => [part.type, part.text, part.refusal]);
     case 'function_call':
       return [item.call_id, item.name, item.arguments];
     case 'reasoning':
@@ -573,10 +592,15 @@ function outputValue(item: ResponsesOutputItem): unknown {
       // Already emitted signatures retain the completed item snapshot; opaque
       // ciphertext is not a stable identity field for terminal reconciliation.
       return [item.summary ?? []];
+    case 'web_search_call':
+      // Included sources can arrive only in terminal metadata. The completed
+      // action's identity still has to agree with its earlier snapshot.
+      return [item.status, item.action && Object.fromEntries(Object.entries(item.action).filter(([key]) => key !== 'sources')), item.error];
   }
 }
 
 export interface ResponseOptions {
+  onSearchSources?: (evidence: SearchEvidence) => void;
   safeguards?: unknown;
   safeguardProvider?: SafeguardProvider;
   toolNames?: ReadonlyMap<string, string>;
@@ -600,6 +624,11 @@ class ResponseStream {
   private model: string;
   private emit: Emit;
   private options: ResponseOptions;
+  private terminalOutput?: ResponsesOutputItem[];
+
+  private searchEvidence() {
+    return responsesSearchEvidence([...this.slots.values()].flatMap(slot => [slot.item, ...(slot.annotations.length ? [{ type: 'message', content: [{ type: 'output_text', annotations: slot.annotations }] }] : [])]));
+  }
 
   constructor(model: string, emit: Emit, options: ResponseOptions) {
     this.model = model;
@@ -673,6 +702,9 @@ class ResponseStream {
     if (!message) {
       throw new Error('OpenAI stream omitted response.created');
     }
+    const evidence = this.searchEvidence();
+    if (evidence.error) throw new Error(evidence.error);
+    this.options.onSearchSources?.({ sources: evidence.sources, searched: evidence.searched, ...responsesSearchAccounting(this.terminalOutput, [...this.slots.values()].map(slot => slot.item)) });
     const cached = usage?.input_tokens_details?.cached_tokens ?? 0;
     const written = usage?.input_tokens_details?.cache_write_tokens ?? 0;
     message.usage = {
@@ -714,6 +746,7 @@ class ResponseStream {
       { type: 'response.completed' | 'response.incomplete' | 'response.done' }
     >,
   ) {
+    this.terminalOutput = event.response.output;
     if (this.stopPending) {
       this.start(event.response);
       this.finish('stop_sequence', event.response.usage);
@@ -737,7 +770,7 @@ class ResponseStream {
       this.finish('stop_sequence', event.response.usage);
       return;
     }
-    if (!this.content.length || this.cursor !== this.slots.size) {
+    if ((!this.content.length && !this.searchEvidence().searched) || this.cursor !== this.slots.size) {
       throw new Error('OpenAI completed with missing output');
     }
     let stopReason: StopReason = this.content.some((block) => block.type === 'tool_use')
@@ -788,7 +821,7 @@ class ResponseStream {
     if (this.slots.has(index)) {
       throw new Error('Duplicate OpenAI output item');
     }
-    const slot = { item, text: '', arguments: '', done: false, emitted: 0 };
+    const slot = { item, text: '', arguments: '', done: false, emitted: 0, annotations: [] };
     this.slots.set(index, slot);
     return slot;
   }
@@ -805,6 +838,11 @@ class ResponseStream {
       return;
     }
     const slot = this.slots.get(event.output_index);
+    if (event.type === 'response.output_text.annotation.added') {
+      if (!slot || slot.item.type !== 'message') throw new Error('Search citation without a message output item');
+      slot.annotations.push(event.annotation);
+      return;
+    }
     if (!slot || slot.done) {
       throw new Error('OpenAI event without an active output item');
     }
@@ -824,10 +862,12 @@ class ResponseStream {
 
   private finishItem(slot: OutputSlot, item: ResponsesOutputItem) {
     const final = finalOutputItem(slot.item, item);
+    if (final.type === 'message') for (const part of final.content ?? []) slot.annotations.push(...(part.annotations ?? []));
     if (slot.done) {
       if (!isDeepStrictEqual(outputValue(slot.item), outputValue(final))) {
         throw new Error('OpenAI terminal output changed a completed item');
       }
+      slot.item = final;
       return;
     }
     if (final.type === 'message') {
@@ -843,7 +883,7 @@ class ResponseStream {
         throw new Error('OpenAI function arguments changed after streaming');
       }
       slot.arguments = final.arguments;
-    } else if (!slot.text && Array.isArray(final.summary)) {
+    } else if (final.type === 'reasoning' && !slot.text && Array.isArray(final.summary)) {
       slot.text = final.summary.map((part) => (part as { text: string }).text).join('\n');
     }
     slot.item = final;
@@ -852,6 +892,7 @@ class ResponseStream {
 
   private createBlock(slot: OutputSlot): ResponseContentBlock {
     const item = slot.item;
+    if (item.type === 'web_search_call') throw new Error('Hosted search is not a function call');
     if (item.type === 'reasoning') {
       return { type: 'thinking', thinking: '', signature: '' };
     }
@@ -972,6 +1013,13 @@ class ResponseStream {
       const slot = this.slots.get(this.cursor);
       if (!slot) {
         return;
+      }
+      if (slot.item.type === 'web_search_call') {
+        if (!slot.done) return;
+        const evidence = responsesSearchEvidence([slot.item]);
+        if (evidence.error) throw new Error(evidence.error);
+        this.cursor++;
+        continue;
       }
       if (slot.item.type === 'function_call' && !slot.done) {
         return;

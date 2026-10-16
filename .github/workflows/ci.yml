@@ -69,3 +69,4 @@ jobs:
           node scripts/proof-windows-bootstrap.mjs "$env:RUNNER_TEMP/windows-bootstrap.mjs"
       - run: node scripts/proof-windows-native-launcher.mjs
       - run: node scripts/proof-native-adapter.mjs protocols
+      - run: npm run test:search

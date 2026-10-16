@@ -18,6 +18,17 @@ const number = (value: unknown): value is number => Number.isSafeInteger(value) 
 const text = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length < 4096
 const UNOWNED: NativeOwner = Object.freeze({ unowned: true })
 const MAX_FRAMES = 4096
+export type NativeSearchInput = { query: string; allowed_domains?: string[]; blocked_domains?: string[] }
+
+function searchInput(value: unknown): NativeSearchInput | undefined {
+  if (!record(value) || value.tool !== 'WebSearch') return undefined
+  const input = record(value.input) ? value.input : value
+  if (typeof input.query !== 'string' || !input.query.trim() || input.query.length > 2048) return undefined
+  return { query: input.query,
+    ...(Array.isArray(input.allowed_domains) && input.allowed_domains.every(domain => typeof domain === 'string') ? { allowed_domains: input.allowed_domains as string[] } : {}),
+    ...(Array.isArray(input.blocked_domains) && input.blocked_domains.every(domain => typeof domain === 'string') ? { blocked_domains: input.blocked_domains as string[] } : {}),
+  }
+}
 
 /** Correlations are scoped to real Worker/port objects, never a global last-child value. */
 export class NativeOwnership {
@@ -26,6 +37,8 @@ export class NativeOwnership {
   private readonly ports = new WeakMap<object, PortState>()
   private readonly pairs = new WeakMap<object, object>()
   private readonly models = new Map<string, string>()
+  // Queries stay in process memory and never enter routing metadata or trace frames.
+  private readonly searches = new WeakMap<NativeOwner, NativeSearchInput>()
   private primary: string | undefined
   private session: string | undefined
 
@@ -54,6 +67,15 @@ export class NativeOwnership {
 
   pair(first: object, second: object): void { this.pairs.set(first, second); this.pairs.set(second, first) }
 
+  search(owner: NativeOwner | undefined): NativeSearchInput | undefined { return owner ? this.searches.get(owner) : undefined }
+
+  private withSearch(owner: NativeOwner, input: NativeSearchInput | undefined): NativeOwner {
+    if (!input) return owner
+    const scoped = Object.freeze({ ...owner })
+    this.searches.set(scoped, input)
+    return scoped
+  }
+
   private owner(event: string, payload: Record<string, unknown>): NativeOwner {
     const inherited = this.context.getStore()
     const loop = ['turn.step', 'turn.start', 'turn.complete', 'session.compact'].includes(event)
@@ -69,7 +91,8 @@ export class NativeOwnership {
     // Capture that frame's explicit route, preserving the parent selection.
     const selected = event === 'turn.step' && !id && text(payload.model) && !nativeAlias(payload.model) ? payload.model : this.primary
     const model = id ? this.models.get(id) ?? (inherited?.agentId === id ? inherited.model : undefined) : loop ? selected : inherited?.model ?? (inherited?.unowned ? undefined : this.primary)
-    return Object.freeze({ ...(model ? { model } : {}), ...(id ? { agentId: id } : {}), ...(this.session ? { sessionId: this.session } : {}), ...(!model ? { unowned: true as const } : {}) })
+    const owner = Object.freeze({ ...(model ? { model } : {}), ...(id ? { agentId: id } : {}), ...(this.session ? { sessionId: this.session } : {}), ...(!model ? { unowned: true as const } : {}) })
+    return this.withSearch(owner, event === 'tool.call' ? searchInput(payload) ?? this.search(inherited) : loop ? undefined : this.search(inherited))
   }
 
   outgoing(worker: object, value: unknown): unknown {
@@ -129,7 +152,8 @@ export class NativeOwnership {
     const frame = number(operation.dispatchId) ? state.frames.get(operation.dispatchId)
       : number(operation.serving) ? state.calls.get(operation.serving) : undefined
     const selected = frame && frame.environments.has(binding.environment) ? frame.owner : UNOWNED
-    const owner = operation.op === 'model.fork' && !selected.unowned ? Object.freeze({ ...selected, purpose: 'fork' as const }) : selected
+    let owner = operation.op === 'model.fork' && !selected.unowned ? Object.freeze({ ...selected, purpose: 'fork' as const }) : selected
+    owner = this.withSearch(owner, operation.op === 'tool.call' ? searchInput(operation.args) ?? this.search(selected) : this.search(selected))
     if (binding.operations.size >= MAX_FRAMES) return UNOWNED
     binding.operations.set(value.opId, { owner, stream: value.type === 'op_pull' })
     return owner

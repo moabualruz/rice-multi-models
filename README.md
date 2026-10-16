@@ -201,13 +201,62 @@ Within a running session, `/rice-account <name>` changes that session and its
 descendants. `/reload-plugins` updates function hooks; a process that lacks the
 native cache hook needs a launcher restart to update account usage reporting.
 
-Native WebSearch uses a SearXNG JSON search endpoint supplied through
-`RICE_MULTI_MODELS_SEARCH_URL`, for example `https://search.example/search`.
-That service retrieves source records; the selected conversation provider makes
-all inference calls. WebFetch keeps native page retrieval and routes its native
-summarizer through the same owner. Missing retrieval configuration is reported
-without switching providers. `/rice-models doctor` reports adapter activation
-and whether search is configured.
+### Web search
+
+Native WebSearch tries these options in order, independently for each conversation:
+
+1. Search supplied by the selected provider and account, when its endpoint and model support the request.
+2. Your saved search services, in ascending priority order. Put a self-hosted or free service first and cloud services after it.
+3. Claude Code's native WebSearch, using the Anthropic account currently selected for this session.
+
+This final fallback applies only to the dedicated WebSearch operation. It does not
+change the session model, account selection, compaction provider or subagents.
+If Claude's quota is exhausted, a working provider search or saved retrieval
+service still completes the search. If all three options fail, the tool reports
+the failure. A successful search with no results stops the chain.
+
+Add services from inside the mod:
+
+```text
+/rice-models search setup
+/rice-models search
+```
+
+The setup dialog asks for the service, endpoint, priority and credential reference.
+You can also configure it directly:
+
+```text
+/rice-models search add home searxng https://search.example/search priority=10
+/rice-models search add brave brave https://api.search.brave.com/res/v1/web/search priority=20 key-env=BRAVE_SEARCH_API_KEY
+/rice-models search add tavily tavily https://api.tavily.com/search priority=30 key-env=TAVILY_API_KEY
+/rice-models search priority home 0
+/rice-models search remove tavily
+```
+
+Use your actual SearXNG URL with JSON results enabled. Supply cloud keys through
+the named environment variable or an absolute credential-helper argv in
+`<CLAUDE_CONFIG_DIR>/rice-multi-models/search.json`. Enter only variable names in
+the session. Each service receives its own credential. Edits apply on the next
+search; no restart is needed. Existing `RICE_MULTI_MODELS_SEARCH_URL` configuration
+remains a SearXNG fallback after saved services.
+
+Official OpenAI Responses, Anthropic Messages and Google GenerateContent endpoints
+have dedicated search contracts; actual account/model availability is checked
+when searching. Codex uses its subscription backend and selected login. Ollama
+cloud search uses the selected, explicitly configured Ollama cloud account;
+localhost inference alone never enables cloud search. Other compatible endpoints
+can opt in through the model's `"webSearch": "native"` setting; `"off"` skips that
+provider's search. A protocol name alone does not establish search support.
+
+Search restrictions are preserved. Unsupported domain, location or invocation
+limits advance to saved services. In particular, Google grounding does not expose
+an exact server-tool invocation limit, so requests requiring that bound use the
+next search option. Codex accepts a bounded result only when its completed
+response provides sufficient search-call accounting; that check cannot cap
+already consumed server work. Provider/service output is buffered before failover,
+and cancellation stops the chain. See the [provider research](docs/research/provider-web-search-20261016.md)
+for contracts and limitations. WebFetch keeps native page retrieval and routes its
+summarizer through the conversation's selected provider.
 
 ### Provider-specific setup
 
@@ -324,7 +373,8 @@ then retains immutable ownership across asynchronous continuations. It routes
 native Messages requests inside the host process using the existing direct
 clients. Concurrent children keep distinct owners; child completions,
 classification and transcript forks do not borrow the parent's provider.
-Unknown ownership and failed providers never select a different provider.
+Unknown ownership fails closed. Ordinary inference keeps its provider on failure;
+dedicated WebSearch follows the explicit search fallback order above.
 
 Native request caps, named tool choice, structured output, domain restrictions,
 cancellation and exact stop strings are preserved across protocol families.
@@ -534,7 +584,9 @@ Codex CLI on the same account. The session helper accepts up to 64 concurrent st
 
 Release **0.8.0** adds the native Windows launcher, translates Claude's positional
 tool additions and removals, and composes Rice Accounts' native cache and explicit
-startup account selection. Launcher setup still saves the verified native
+startup account selection. It also adds provider-native web search, an in-session
+search configurator and ordered retrieval services before native Claude fallback.
+Launcher setup still saves the verified native
 executable, so plain `rice-claude` reuses a private qualified 2.1.299 copy while the
 machine's ordinary Claude command keeps its version. The native adapter, direct
 compaction, web inference, prompt/agent evaluators, concurrent child ownership,

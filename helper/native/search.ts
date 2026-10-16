@@ -1,6 +1,7 @@
 import type { ApiMessage, StepEvent, StepWire, Usage } from '../../hooks/protocol.ts'
 import type { NativeRequest } from './requests.ts'
 import { record } from './ownership.ts'
+import { configuredSearch } from '../search/endpoints.ts'
 
 type Direct = (wire: StepWire, signal: AbortSignal) => AsyncIterable<StepEvent>
 type Block = { type: string } & Record<string, unknown>
@@ -23,44 +24,11 @@ function domains(tool: Record<string, unknown>, name: string): string[] {
   return value
 }
 
-/** SearXNG is retrieval only. The selected conversation provider makes every inference call. */
+/** Configured services perform retrieval without a Claude inference request. */
 export const retrieve: Retrieval = async (query, tool, signal) => {
-  const address = process.env.RICE_MULTI_MODELS_SEARCH_URL
-  if (!address) throw new Error('configure RICE_MULTI_MODELS_SEARCH_URL for native WebSearch retrieval')
-  const url = new URL(address)
-  if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) throw new Error('invalid direct search endpoint')
-  if (!query.trim() || query.length > 2048) throw new Error('invalid direct search query')
   const allow = domains(tool, 'allowed_domains'), block = domains(tool, 'blocked_domains')
   if (allow.length && block.length) throw new Error('native search allows one domain policy')
-  url.searchParams.set('q', query)
-  url.searchParams.set('format', 'json')
-  const response = await fetch(url, { signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]) })
-  if (!response.ok) {
-    // Capture status before reading the bounded, possibly non-JSON error body.
-    await response.body?.cancel()
-    throw new Error(`direct search retrieval HTTP ${response.status}`)
-  }
-  const reader = response.body?.getReader()
-  if (!reader) throw new Error('empty direct search response')
-  const chunks: Uint8Array[] = []; let size = 0
-  try {
-    while (true) {
-      const item = await reader.read()
-      if (item.done) break
-      size += item.value.byteLength
-      if (size > 2 * 1024 * 1024) throw new Error('direct search response exceeds bound')
-      chunks.push(item.value)
-    }
-  } finally { await reader.cancel() }
-  const body: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
-  if (!record(body) || !Array.isArray(body.results)) throw new Error('invalid direct search response')
-  return body.results.filter(record).flatMap(result => {
-    if (typeof result.title !== 'string' || typeof result.url !== 'string') return []
-    let location: URL
-    try { location = new URL(result.url) } catch { return [] }
-    if (!['http:', 'https:'].includes(location.protocol) || location.username || location.password || allow.length && !allow.some(rule => domainMatches(result.url as string, rule)) || block.some(rule => domainMatches(result.url as string, rule))) return []
-    return [{ title: result.title.slice(0, 512), url: location.href, content: typeof result.content === 'string' ? result.content.slice(0, 4000) : '' }]
-  }).slice(0, 10)
+  return (await configuredSearch(query, signal)).filter(result => (!allow.length || allow.some(rule => domainMatches(result.url, rule))) && !block.some(rule => domainMatches(result.url, rule)))
 }
 
 /** Execute native server search as a bounded direct-provider function loop, then return native blocks. */

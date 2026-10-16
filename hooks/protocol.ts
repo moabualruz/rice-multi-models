@@ -15,6 +15,10 @@ export type RemoteTool = { name: string; description: string; schema: Record<str
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 export type Transport = 'auto' | 'ws' | 'sse'
+export type WebSearch = { allowedDomains?: string[]; blockedDomains?: string[]; maxUses?: number; location?: Record<string, unknown> }
+export type SearchSource = { title: string; url: string; content?: string }
+/** `complete` certifies reported call accounting, separately from answer completion. */
+export type SearchEvidence = { sources: SearchSource[]; searched: boolean; calls?: number; complete?: boolean }
 
 /**
  * One routed step: the model id it is for, the system prompt, the tools offered, the transcript (in
@@ -42,6 +46,8 @@ export type StepRequest = {
     stopSequences?: string[]
     toolChoice?: { type: 'auto' | 'any' | 'none' | 'tool'; name?: string; disable_parallel_tool_use?: boolean }
     outputSchema?: Record<string, unknown>
+    /** Dedicated hosted search. Only the selected provider's search tool is offered. */
+    webSearch?: WebSearch
   }
 }
 
@@ -65,6 +71,7 @@ export type StepEvent =
   | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
   /** Server-tool blocks executed by the direct native adapter, within the same owner. */
   | { type: 'native_block'; block: Record<string, unknown> }
+  | ({ type: 'search_sources' } & SearchEvidence)
   | ({ type: 'usage' } & Usage)
   | { type: 'limits'; limits: Limits }
   | { type: 'resume'; key: string }

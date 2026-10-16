@@ -8,6 +8,7 @@ import { str } from '../../../hooks/transcript'
 import { count, decoderOver, lastUsers, lostThinking, obj, params, parseJson, sseReader, thinkingReader } from '../codec'
 import type { Codec, Sink } from '../codec'
 import type { Message } from '../history'
+import { uniqueSearchSources } from '../../core/search.ts'
 
 type Json = Record<string, unknown>
 type Block = Message['content'][number]
@@ -39,11 +40,26 @@ function decoder() {
   // The latest of each count seen: message_start may carry zeros, message_delta the totals.
   const usage = { in: 0, out: 0, cacheRead: 0, cacheWrite: 0 }
   let finished = false
+  const searchBlocks = new Map<unknown, Json>()
+  const searchSources: unknown[] = []
+  let searched = false
+
+  function searchResult(s: Sink, block: Json): boolean {
+    if (block['type'] !== 'web_search_tool_result') return false
+    const content = block['content']
+    if (isObject(content) && content['type'] === 'web_search_tool_result_error') { s.fail(`Anthropic web search failed: ${str(content['error_code']) || 'unknown'}`); return true }
+    if (!Array.isArray(content)) { s.fail('Anthropic web search result is malformed'); return true }
+    if (content.some(value => !isObject(value) || value['type'] !== 'web_search_result' || typeof value['url'] !== 'string' || typeof value['title'] !== 'string')) { s.fail('Anthropic web search result is malformed'); return true }
+    searched = true
+    searchSources.push(...content.map(value => ({ title: value['title'], url: value['url'] })))
+    return true
+  }
 
   function take(u: Json) {
     for (const [key, field] of Object.entries(COUNTS) as [keyof typeof COUNTS, string][]) usage[key] = Math.max(usage[key], count(u[field]))
   }
-  function event({ out, fail }: Sink, data: string) {
+  function event(s: Sink, data: string) {
+    const { out, fail } = s
     const ev = parseJson(data)
     if (!isObject(ev)) return fail(`unparseable stream data: ${data.slice(0, 200)}`)
     const delta = obj(ev['delta'])
@@ -54,11 +70,16 @@ function decoder() {
       case 'message_start':
         return take(obj(obj(ev['message'])['usage']))
       case 'content_block_start':
+        if (block['type'] === 'web_search_tool_result') { searchBlocks.set(ev['index'], block); searchResult(s, block); return }
         if (block['type'] === 'tool_use') held.set(ev['index'], { ...(typeof block['id'] === 'string' ? { id: block['id'] } : {}), name: typeof block['name'] === 'string' ? block['name'] : '', json: '', input: block['input'] })
         else if (block['type'] === 'thinking') thinking.add(ev['index'], { text: str(block['thinking']), signature: str(block['signature']) })
         else if (block['type'] === 'redacted_thinking') thinking.add(ev['index'], { redacted: str(block['data']) })
         return
       case 'content_block_delta': {
+        if (delta['type'] === 'citations_delta' && isObject(delta['citation']) && delta['citation']['type'] === 'web_search_result_location') {
+          searchSources.push({ title: delta['citation']['title'], url: delta['citation']['url'], content: delta['citation']['cited_text'] })
+          return
+        }
         if (delta['type'] === 'text_delta' && nonEmpty(delta['text'])) out.push({ t: 'text', text: delta['text'] })
         else if (delta['type'] === 'thinking_delta' && nonEmpty(delta['thinking'])) {
           out.push({ t: 'thinking', text: delta['thinking'] })
@@ -68,6 +89,7 @@ function decoder() {
         return
       }
       case 'content_block_stop': {
+        if (searchBlocks.has(ev['index'])) { searchBlocks.delete(ev['index']); return }
         const block = thinking.seal(ev['index'])
         if (block !== undefined) return void out.push({ t: 'sealed', block })
         const h = held.get(ev['index'])
@@ -81,12 +103,14 @@ function decoder() {
         out.push({ t: 'usage', ...usage })
         if (typeof delta['stop_reason'] === 'string') {
           finished = true
+          if (searched) out.push({ t: 'search_sources', sources: uniqueSearchSources(searchSources), searched: true })
           out.push({ t: 'finish', reason: delta['stop_reason'] })
         }
     }
   }
   return decoderOver(sseReader(), event, ({ fail }) => {
-    if (held.size > 0) fail('the stream ended inside a tool call')
+    if (searchBlocks.size > 0) fail('the stream ended inside a web search result')
+    else if (held.size > 0) fail('the stream ended inside a tool call')
     else if (!finished) fail('the stream ended with no stop reason')
   })
 }

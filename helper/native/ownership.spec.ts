@@ -3,6 +3,20 @@ import { NativeOwnership } from './ownership'
 
 const dispatch = (id: number, agentId: string, model: string, environmentId = 7) => ({ type: 'dispatch', id, event: 'turn.step', payload: { agentId, model }, environments: [{ environmentId }] })
 
+test('concurrent search inputs stay scoped to their native tool operation and outside metadata', async () => {
+  const ownership = new NativeOwnership('codex/parent'), worker = {}, first = {}, second = {}
+  ownership.pair(first, second)
+  ownership.outgoing(worker, { type: 'load', environmentId: 7, port: second })
+  ownership.outgoing(worker, dispatch(1, 'a', 'provider-a/model'))
+  ownership.outgoing(worker, dispatch(2, 'b', 'provider-b/model'))
+  const a = ownership.portOwner(first, { type: 'op', opId: 1, dispatchId: 1, op: 'tool.call', args: { tool: 'WebSearch', query: 'query a' } })
+  const b = ownership.portOwner(first, { type: 'op', opId: 2, dispatchId: 2, op: 'tool.call', args: { tool: 'WebSearch', query: 'query b' } })
+  const values = await Promise.all([a, b].map(owner => ownership.run(owner, async () => { await Promise.resolve(); return ownership.search(ownership.context.getStore())?.query })))
+  expect(values).toEqual(['query a', 'query b'])
+  expect(JSON.stringify(a)).not.toContain('query')
+  expect(ownership.search(ownership.selection('a'))).toBeUndefined()
+})
+
 test('overlapping child operations retain their exact owner after asynchronous interleaving', async () => {
   const ownership = new NativeOwnership('codex/parent')
   const worker = {}, first = {}, second = {}

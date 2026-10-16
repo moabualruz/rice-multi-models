@@ -447,9 +447,9 @@ var require_permessage_deflate = __commonJS({
        * @private
        */
       _decompress(data, fin, callback) {
-        const endpoint = this._isServer ? "client" : "server";
+        const endpoint2 = this._isServer ? "client" : "server";
         if (!this._inflate) {
-          const key = `${endpoint}_max_window_bits`;
+          const key = `${endpoint2}_max_window_bits`;
           const windowBits = typeof this.params[key] !== "number" ? zlib.Z_DEFAULT_WINDOWBITS : this.params[key];
           this._inflate = zlib.createInflateRaw({
             ...this._options.zlibInflateOptions,
@@ -482,7 +482,7 @@ var require_permessage_deflate = __commonJS({
           } else {
             this._inflate[kTotalLength] = 0;
             this._inflate[kBuffers] = [];
-            if (fin && this.params[`${endpoint}_no_context_takeover`]) {
+            if (fin && this.params[`${endpoint2}_no_context_takeover`]) {
               this._inflate.reset();
             }
           }
@@ -498,9 +498,9 @@ var require_permessage_deflate = __commonJS({
        * @private
        */
       _compress(data, fin, callback) {
-        const endpoint = this._isServer ? "server" : "client";
+        const endpoint2 = this._isServer ? "server" : "client";
         if (!this._deflate) {
-          const key = `${endpoint}_max_window_bits`;
+          const key = `${endpoint2}_max_window_bits`;
           const windowBits = typeof this.params[key] !== "number" ? zlib.Z_DEFAULT_WINDOWBITS : this.params[key];
           this._deflate = zlib.createDeflateRaw({
             ...this._options.zlibDeflateOptions,
@@ -526,7 +526,7 @@ var require_permessage_deflate = __commonJS({
           this._deflate[kCallback] = null;
           this._deflate[kTotalLength] = 0;
           this._deflate[kBuffers] = [];
-          if (fin && this.params[`${endpoint}_no_context_takeover`]) {
+          if (fin && this.params[`${endpoint2}_no_context_takeover`]) {
             this._deflate.reset();
           }
           callback(null, data2);
@@ -706,8 +706,8 @@ var require_validation = __commonJS({
       0
       // 112 - 127
     ];
-    function isValidStatusCode(code) {
-      return code >= 1e3 && code <= 1014 && code !== 1004 && code !== 1005 && code !== 1006 || code >= 3e3 && code <= 4999;
+    function isValidStatusCode(code2) {
+      return code2 >= 1e3 && code2 <= 1014 && code2 !== 1004 && code2 !== 1005 && code2 !== 1006 || code2 >= 3e3 && code2 <= 4999;
     }
     function _isValidUTF8(buf) {
       const len = buf.length;
@@ -1311,11 +1311,11 @@ var require_receiver = __commonJS({
             this.emit("conclude", 1005, EMPTY_BUFFER);
             this.end();
           } else {
-            const code = data.readUInt16BE(0);
-            if (!isValidStatusCode(code)) {
+            const code2 = data.readUInt16BE(0);
+            if (!isValidStatusCode(code2)) {
               const error = this.createError(
                 RangeError,
-                `invalid status code ${code}`,
+                `invalid status code ${code2}`,
                 true,
                 1002,
                 "WS_ERR_INVALID_CLOSE_CODE"
@@ -1340,7 +1340,7 @@ var require_receiver = __commonJS({
               return;
             }
             this._loop = false;
-            this.emit("conclude", code, buf);
+            this.emit("conclude", code2, buf);
             this.end();
           }
           this._state = GET_INFO;
@@ -1530,22 +1530,22 @@ var require_sender = __commonJS({
        * @param {Function} [cb] Callback
        * @public
        */
-      close(code, data, mask, cb) {
+      close(code2, data, mask, cb) {
         let buf;
-        if (code === void 0) {
+        if (code2 === void 0) {
           buf = EMPTY_BUFFER;
-        } else if (typeof code !== "number" || !isValidStatusCode(code)) {
+        } else if (typeof code2 !== "number" || !isValidStatusCode(code2)) {
           throw new TypeError("First argument must be a valid error code number");
         } else if (data === void 0 || !data.length) {
           buf = Buffer.allocUnsafe(2);
-          buf.writeUInt16BE(code, 0);
+          buf.writeUInt16BE(code2, 0);
         } else {
           const length = Buffer.byteLength(data);
           if (length > 123) {
             throw new RangeError("The message must not be greater than 123 bytes");
           }
           buf = Buffer.allocUnsafe(2 + length);
-          buf.writeUInt16BE(code, 0);
+          buf.writeUInt16BE(code2, 0);
           if (typeof data === "string") {
             buf.write(data, 2);
           } else if (isUint8Array(data)) {
@@ -2040,9 +2040,9 @@ var require_event_target = __commonJS({
             callListener(handler, this, event);
           };
         } else if (type === "close") {
-          wrapper = function onClose(code, message) {
+          wrapper = function onClose(code2, message) {
             const event = new CloseEvent("close", {
-              code,
+              code: code2,
               reason: message.toString(),
               wasClean: this._closeFrameReceived && this._closeFrameSent
             });
@@ -2126,23 +2126,23 @@ var require_extension = __commonJS({
       let extensionName;
       let paramName;
       let start = -1;
-      let code = -1;
+      let code2 = -1;
       let end = -1;
       let i = 0;
       for (; i < header.length; i++) {
-        code = header.charCodeAt(i);
+        code2 = header.charCodeAt(i);
         if (extensionName === void 0) {
-          if (end === -1 && tokenChars[code] === 1) {
+          if (end === -1 && tokenChars[code2] === 1) {
             if (start === -1) start = i;
-          } else if (i !== 0 && (code === 32 || code === 9)) {
+          } else if (i !== 0 && (code2 === 32 || code2 === 9)) {
             if (end === -1 && start !== -1) end = i;
-          } else if (code === 59 || code === 44) {
+          } else if (code2 === 59 || code2 === 44) {
             if (start === -1) {
               throw new SyntaxError(`Unexpected character at index ${i}`);
             }
             if (end === -1) end = i;
             const name = header.slice(start, end);
-            if (code === 44) {
+            if (code2 === 44) {
               push(offers, name, params3);
               params3 = /* @__PURE__ */ Object.create(null);
             } else {
@@ -2153,23 +2153,23 @@ var require_extension = __commonJS({
             throw new SyntaxError(`Unexpected character at index ${i}`);
           }
         } else if (paramName === void 0) {
-          if (end === -1 && tokenChars[code] === 1) {
+          if (end === -1 && tokenChars[code2] === 1) {
             if (start === -1) start = i;
-          } else if (code === 32 || code === 9) {
+          } else if (code2 === 32 || code2 === 9) {
             if (end === -1 && start !== -1) end = i;
-          } else if (code === 59 || code === 44) {
+          } else if (code2 === 59 || code2 === 44) {
             if (start === -1) {
               throw new SyntaxError(`Unexpected character at index ${i}`);
             }
             if (end === -1) end = i;
             push(params3, header.slice(start, end), true);
-            if (code === 44) {
+            if (code2 === 44) {
               push(offers, extensionName, params3);
               params3 = /* @__PURE__ */ Object.create(null);
               extensionName = void 0;
             }
             start = end = -1;
-          } else if (code === 61 && start !== -1 && end === -1) {
+          } else if (code2 === 61 && start !== -1 && end === -1) {
             paramName = header.slice(start, i);
             start = end = -1;
           } else {
@@ -2177,30 +2177,30 @@ var require_extension = __commonJS({
           }
         } else {
           if (isEscaping) {
-            if (tokenChars[code] !== 1) {
+            if (tokenChars[code2] !== 1) {
               throw new SyntaxError(`Unexpected character at index ${i}`);
             }
             if (start === -1) start = i;
             else if (!mustUnescape) mustUnescape = true;
             isEscaping = false;
           } else if (inQuotes) {
-            if (tokenChars[code] === 1) {
+            if (tokenChars[code2] === 1) {
               if (start === -1) start = i;
-            } else if (code === 34 && start !== -1) {
+            } else if (code2 === 34 && start !== -1) {
               inQuotes = false;
               end = i;
-            } else if (code === 92) {
+            } else if (code2 === 92) {
               isEscaping = true;
             } else {
               throw new SyntaxError(`Unexpected character at index ${i}`);
             }
-          } else if (code === 34 && header.charCodeAt(i - 1) === 61) {
+          } else if (code2 === 34 && header.charCodeAt(i - 1) === 61) {
             inQuotes = true;
-          } else if (end === -1 && tokenChars[code] === 1) {
+          } else if (end === -1 && tokenChars[code2] === 1) {
             if (start === -1) start = i;
-          } else if (start !== -1 && (code === 32 || code === 9)) {
+          } else if (start !== -1 && (code2 === 32 || code2 === 9)) {
             if (end === -1) end = i;
-          } else if (code === 59 || code === 44) {
+          } else if (code2 === 59 || code2 === 44) {
             if (start === -1) {
               throw new SyntaxError(`Unexpected character at index ${i}`);
             }
@@ -2211,7 +2211,7 @@ var require_extension = __commonJS({
               mustUnescape = false;
             }
             push(params3, paramName, value);
-            if (code === 44) {
+            if (code2 === 44) {
               push(offers, extensionName, params3);
               params3 = /* @__PURE__ */ Object.create(null);
               extensionName = void 0;
@@ -2223,7 +2223,7 @@ var require_extension = __commonJS({
           }
         }
       }
-      if (start === -1 || inQuotes || code === 32 || code === 9) {
+      if (start === -1 || inQuotes || code2 === 32 || code2 === 9) {
         throw new SyntaxError("Unexpected end of input");
       }
       if (end === -1) end = i;
@@ -2526,7 +2526,7 @@ var require_websocket = __commonJS({
        *     closing
        * @public
        */
-      close(code, data) {
+      close(code2, data) {
         if (this.readyState === _WebSocket.CLOSED) return;
         if (this.readyState === _WebSocket.CONNECTING) {
           const msg = "WebSocket was closed before the connection was established";
@@ -2539,7 +2539,7 @@ var require_websocket = __commonJS({
           }
           return;
         }
-        this._sender.close(code, data, !this._isServer, (err) => {
+        this._sender.close(code2, data, !this._isServer, (err) => {
           if (err) return;
           this._closeFrameSent = true;
           if (this._closeFrameReceived || this._receiver._writableState.errorEmitted) {
@@ -3064,16 +3064,16 @@ var require_websocket = __commonJS({
         process.nextTick(cb, err);
       }
     }
-    function receiverOnConclude(code, reason) {
+    function receiverOnConclude(code2, reason) {
       const websocket = this[kWebSocket];
       websocket._closeFrameReceived = true;
       websocket._closeMessage = reason;
-      websocket._closeCode = code;
+      websocket._closeCode = code2;
       if (websocket._socket[kWebSocket] === void 0) return;
       websocket._socket.removeListener("data", socketOnData);
       process.nextTick(resume, websocket._socket);
-      if (code === 1005) websocket.close();
-      else websocket.close(code, reason);
+      if (code2 === 1005) websocket.close();
+      else websocket.close(code2, reason);
     }
     function receiverOnDrain() {
       const websocket = this[kWebSocket];
@@ -3232,7 +3232,7 @@ var require_stream = __commonJS({
       };
       duplex._final = function(callback) {
         if (ws.readyState === ws.CONNECTING) {
-          ws.once("open", function open() {
+          ws.once("open", function open2() {
             duplex._final(callback);
           });
           return;
@@ -3253,7 +3253,7 @@ var require_stream = __commonJS({
       };
       duplex._write = function(chunk, encoding, callback) {
         if (ws.readyState === ws.CONNECTING) {
-          ws.once("open", function open() {
+          ws.once("open", function open2() {
             duplex._write(chunk, encoding, callback);
           });
           return;
@@ -3279,12 +3279,12 @@ var require_subprotocol = __commonJS({
       let end = -1;
       let i = 0;
       for (i; i < header.length; i++) {
-        const code = header.charCodeAt(i);
-        if (end === -1 && tokenChars[code] === 1) {
+        const code2 = header.charCodeAt(i);
+        if (end === -1 && tokenChars[code2] === 1) {
           if (start === -1) start = i;
-        } else if (i !== 0 && (code === 32 || code === 9)) {
+        } else if (i !== 0 && (code2 === 32 || code2 === 9)) {
           if (end === -1 && start !== -1) end = i;
-        } else if (code === 44) {
+        } else if (code2 === 44) {
           if (start === -1) {
             throw new SyntaxError(`Unexpected character at index ${i}`);
           }
@@ -3586,9 +3586,9 @@ var require_websocket_server = __commonJS({
             req
           };
           if (this.options.verifyClient.length === 2) {
-            this.options.verifyClient(info, (verified, code, message, headers2) => {
+            this.options.verifyClient(info, (verified, code2, message, headers2) => {
               if (!verified) {
-                return abortHandshake(socket, code || 401, message, headers2);
+                return abortHandshake(socket, code2 || 401, message, headers2);
               }
               this.completeUpgrade(
                 extensions,
@@ -3688,8 +3688,8 @@ var require_websocket_server = __commonJS({
     function socketOnError() {
       this.destroy();
     }
-    function abortHandshake(socket, code, message, headers2) {
-      message = message || http.STATUS_CODES[code];
+    function abortHandshake(socket, code2, message, headers2) {
+      message = message || http.STATUS_CODES[code2];
       headers2 = {
         Connection: "close",
         "Content-Type": "text/html",
@@ -3698,17 +3698,17 @@ var require_websocket_server = __commonJS({
       };
       socket.once("finish", socket.destroy);
       socket.end(
-        `HTTP/1.1 ${code} ${http.STATUS_CODES[code]}\r
+        `HTTP/1.1 ${code2} ${http.STATUS_CODES[code2]}\r
 ` + Object.keys(headers2).map((h) => `${h}: ${headers2[h]}`).join("\r\n") + "\r\n\r\n" + message
       );
     }
-    function abortHandshakeOrEmitwsClientError(server, req, socket, code, message, headers2) {
+    function abortHandshakeOrEmitwsClientError(server, req, socket, code2, message, headers2) {
       if (server.listenerCount("wsClientError")) {
         const err = new Error(message);
         Error.captureStackTrace(err, abortHandshakeOrEmitwsClientError);
         server.emit("wsClientError", err, socket, req);
       } else {
-        abortHandshake(socket, code, message, headers2);
+        abortHandshake(socket, code2, message, headers2);
       }
     }
   }
@@ -3769,7 +3769,7 @@ var HOST_RE = /^(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+$/;
 var RESERVED_ALIASES = /* @__PURE__ */ new Set(["fable", "opus", "sonnet", "haiku", "default", "inherit", "native"]);
 var PROVIDER_KEYS = ["kind", "baseUrl", "allowHttp", "auth", "authHeader", "headers", "params", "timeoutMs", "maxTools", "models", "sessionHeader"];
 var REQUEST_KEYS = ["params", "effort", "cache", "headers"];
-var MODEL_KEYS = ["kind", "contextWindow", "maxInputTokens", "maxOutputTokens", "tools", "vision", ...REQUEST_KEYS];
+var MODEL_KEYS = ["kind", "contextWindow", "maxInputTokens", "maxOutputTokens", "tools", "vision", "webSearch", ...REQUEST_KEYS];
 var KIND_NAMES = '"openai", "responses", "anthropic", "gemini" or "bedrock"';
 var KEY_TTL_S = 300;
 var MAX_TIMEOUT_MS = 2 ** 31 - 1;
@@ -3777,119 +3777,120 @@ var isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 var own = (map, key) => Object.hasOwn(map, key) ? map[key] : void 0;
 var isCount = (v) => typeof v === "number" && Number.isInteger(v) && v > 0;
 var isKind = (v) => typeof v === "string" && Object.hasOwn(KINDS, v);
-function allowKeys(obj2, keys, path5, errors) {
-  for (const k of Object.keys(obj2)) if (!keys.includes(k)) errors.push(`${path5}.${k}: unknown key`);
+function allowKeys(obj2, keys2, path6, errors) {
+  for (const k of Object.keys(obj2)) if (!keys2.includes(k)) errors.push(`${path6}.${k}: unknown key`);
 }
-function params(v, kinds, path5, errors) {
+function params(v, kinds, path6, errors) {
   if (v === void 0) return {};
-  if (!isObject(v)) return errors.push(`${path5}: must be an object`), {};
-  for (const k of new Set((typeof kinds === "string" ? [kinds] : kinds).flatMap((kind) => KINDS[kind].reservedParams))) if (k in v) errors.push(`${path5}.${k}: reserved; styx sets it`);
+  if (!isObject(v)) return errors.push(`${path6}: must be an object`), {};
+  for (const k of new Set((typeof kinds === "string" ? [kinds] : kinds).flatMap((kind) => KINDS[kind].reservedParams))) if (k in v) errors.push(`${path6}.${k}: reserved; styx sets it`);
   return v;
 }
-function effortMap(v, kind, path5, errors) {
+function effortMap(v, kind, path6, errors) {
   if (v === void 0) return void 0;
-  if (!isObject(v)) return errors.push(`${path5}: must be an object`), void 0;
-  allowKeys(v, EFFORTS, path5, errors);
+  if (!isObject(v)) return errors.push(`${path6}: must be an object`), void 0;
+  allowKeys(v, EFFORTS, path6, errors);
   const levels = {};
   for (const level of EFFORTS) {
     if (!(level in v)) continue;
-    if (!isObject(v[level])) errors.push(`${path5}.${level}: must be an object of params`);
-    else levels[level] = params(v[level], kind, `${path5}.${level}`, errors);
+    if (!isObject(v[level])) errors.push(`${path6}.${level}: must be an object of params`);
+    else levels[level] = params(v[level], kind, `${path6}.${level}`, errors);
   }
   return levels;
 }
-function cacheOf(v, kind, path5, errors, off) {
+function cacheOf(v, kind, path6, errors, off) {
   if (v === void 0) return void 0;
-  if (!KINDS[kind].cache) errors.push(`${path5}: not supported on the ${kind} kind (it caches on its own)`);
+  if (!KINDS[kind].cache) errors.push(`${path6}: not supported on the ${kind} kind (it caches on its own)`);
   else if (v === null && off) return void 0;
-  else if (v !== "5m" && v !== "1h") errors.push(`${path5}: must be "5m" or "1h"${off ? " (null turns the model's cache off)" : ""}`);
+  else if (v !== "5m" && v !== "1h") errors.push(`${path6}: must be "5m" or "1h"${off ? " (null turns the model's cache off)" : ""}`);
   return v;
 }
-function thinkingBudget(p, max, path5, errors) {
+function thinkingBudget(p, max, path6, errors) {
   const nested = p["additionalModelRequestFields"];
   for (const holder of [p, isObject(nested) ? nested : {}]) {
     const t = holder["thinking"];
     const budget = isObject(t) ? t["budget_tokens"] : void 0;
-    if (typeof budget === "number" && budget >= max) errors.push(`${path5}.thinking.budget_tokens: ${budget} must be below maxOutputTokens (${max})`);
+    if (typeof budget === "number" && budget >= max) errors.push(`${path6}.thinking.budget_tokens: ${budget} must be below maxOutputTokens (${max})`);
   }
 }
-function requests(v, kind, path5, errors, max, alias = false) {
-  const effort = effortMap(v["effort"], kind, `${path5}.effort`, errors);
-  const p = params(v["params"], kind, `${path5}.params`, errors);
-  thinkingBudget(p, max, `${path5}.params`, errors);
-  for (const [level, lp] of Object.entries(effort ?? {})) thinkingBudget(lp, max, `${path5}.effort.${level}`, errors);
-  return { effort, params: p, ..."cache" in v ? { cache: cacheOf(v["cache"], kind, `${path5}.cache`, errors, alias) } : {}, headers: headers(v["headers"], `${path5}.headers`, errors) };
+function requests(v, kind, path6, errors, max, alias = false) {
+  const effort = effortMap(v["effort"], kind, `${path6}.effort`, errors);
+  const p = params(v["params"], kind, `${path6}.params`, errors);
+  thinkingBudget(p, max, `${path6}.params`, errors);
+  for (const [level, lp] of Object.entries(effort ?? {})) thinkingBudget(lp, max, `${path6}.effort.${level}`, errors);
+  return { effort, params: p, ..."cache" in v ? { cache: cacheOf(v["cache"], kind, `${path6}.cache`, errors, alias) } : {}, headers: headers(v["headers"], `${path6}.headers`, errors) };
 }
-function headers(v, path5, errors) {
+function headers(v, path6, errors) {
   if (v === void 0) return {};
-  if (!isObject(v)) return errors.push(`${path5}: must be an object`), {};
+  if (!isObject(v)) return errors.push(`${path6}: must be an object`), {};
   const out = {};
   for (const [name, value] of Object.entries(v)) {
-    if (!HEADER_NAME_RE.test(name)) errors.push(`${path5}.${name}: not a header name`);
-    else if (SECRET_HEADER_RE.test(name)) errors.push(`${path5}.${name}: auth-bearing headers are not allowed; the key comes from auth.command`);
-    else if (typeof value !== "string" || !HEADER_VALUE_RE.test(value)) errors.push(`${path5}.${name}: must be printable ASCII text`);
+    if (!HEADER_NAME_RE.test(name)) errors.push(`${path6}.${name}: not a header name`);
+    else if (SECRET_HEADER_RE.test(name)) errors.push(`${path6}.${name}: auth-bearing headers are not allowed; the key comes from auth.command`);
+    else if (typeof value !== "string" || !HEADER_VALUE_RE.test(value)) errors.push(`${path6}.${name}: must be printable ASCII text`);
     else out[name] = value;
   }
   return out;
 }
-function toolsOf(v, path5, errors) {
-  if (!Array.isArray(v)) return bool(v, true, path5, errors);
+function toolsOf(v, path6, errors) {
+  if (!Array.isArray(v)) return bool(v, true, path6, errors);
   if (v.length > 0 && v.every((x) => typeof x === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(x))) return v;
-  errors.push(`${path5}: true, false, or a non-empty list of tool names`);
+  errors.push(`${path6}: true, false, or a non-empty list of tool names`);
   return true;
 }
-function bool(v, fallback, path5, errors) {
+function bool(v, fallback, path6, errors) {
   if (v === void 0) return fallback;
-  if (typeof v !== "boolean") errors.push(`${path5}: must be true or false`);
+  if (typeof v !== "boolean") errors.push(`${path6}: must be true or false`);
   return v === true;
 }
-function auth(id, v, path5, errors) {
+function auth(id, v, path6, errors) {
   const login = `configure an absolute credential-helper argv in "auth": { "command": [...] } for ${id}; use /rice-models opencode for OpenCode's existing login`;
   const a = v["auth"];
-  if (v["apiKeyEnv"] !== void 0) errors.push(`${path5}.apiKeyEnv: no longer read; keys come from a credential helper. Run ${login} in its place`);
-  else if (a === void 0) errors.push(`${path5}.auth: missing; run ${login}, or set "auth": "none" for a server that checks no key`);
+  if (v["apiKeyEnv"] !== void 0) errors.push(`${path6}.apiKeyEnv: no longer read; keys come from a credential helper. Run ${login} in its place`);
+  else if (a === void 0) errors.push(`${path6}.auth: missing; run ${login}, or set "auth": "none" for a server that checks no key`);
   if (a === void 0) return { command: [], ttlSeconds: KEY_TTL_S };
   if (a === "none") return a;
-  if (!isObject(a)) return errors.push(`${path5}.auth: must be { "command": ["/absolute/helper", ...] } or "none"`), { command: [], ttlSeconds: KEY_TTL_S };
+  if (!isObject(a)) return errors.push(`${path6}.auth: must be { "command": ["/absolute/helper", ...] } or "none"`), { command: [], ttlSeconds: KEY_TTL_S };
   for (const k of Object.keys(a)) {
-    if (k === "env") errors.push(`${path5}.auth.env: not supported; keys come from "command" (run ${login})`);
-    else if (k !== "command" && k !== "ttlSeconds") errors.push(`${path5}.auth.${k}: unknown key`);
+    if (k === "env") errors.push(`${path6}.auth.env: not supported; keys come from "command" (run ${login})`);
+    else if (k !== "command" && k !== "ttlSeconds") errors.push(`${path6}.auth.${k}: unknown key`);
   }
   const { command, ttlSeconds } = a;
   const argv = Array.isArray(command) && command.every((s) => typeof s === "string") ? command : void 0;
-  if (argv === void 0 || argv.length === 0) errors.push(`${path5}.auth.command: must be a non-empty list of strings`);
-  else if (!(argv[0].startsWith("/") || /^[A-Za-z]:[\\/]/.test(argv[0]) || /^\\\\[^\\]+\\[^\\]+/.test(argv[0]))) errors.push(`${path5}.auth.command: the first entry must be an absolute path (no shell expands ~ or searches PATH)`);
-  else if (argv.some((s) => new RegExp("\\p{Cc}", "u").test(s))) errors.push(`${path5}.auth.command: must not contain control characters`);
-  if (ttlSeconds !== void 0 && !isCount(ttlSeconds)) errors.push(`${path5}.auth.ttlSeconds: must be a positive integer`);
+  if (argv === void 0 || argv.length === 0) errors.push(`${path6}.auth.command: must be a non-empty list of strings`);
+  else if (!(argv[0].startsWith("/") || /^[A-Za-z]:[\\/]/.test(argv[0]) || /^\\\\[^\\]+\\[^\\]+/.test(argv[0]))) errors.push(`${path6}.auth.command: the first entry must be an absolute path (no shell expands ~ or searches PATH)`);
+  else if (argv.some((s) => new RegExp("\\p{Cc}", "u").test(s))) errors.push(`${path6}.auth.command: must not contain control characters`);
+  if (ttlSeconds !== void 0 && !isCount(ttlSeconds)) errors.push(`${path6}.auth.ttlSeconds: must be a positive integer`);
   return { command: argv ?? [], ttlSeconds: ttlSeconds ?? KEY_TTL_S };
 }
-function modelKind(v, providerKind, path5, errors) {
+function modelKind(v, providerKind, path6, errors) {
   const k = v["kind"];
   if (k === void 0) return void 0;
-  if (!isKind(k) || k === "bedrock") errors.push(`${path5}.kind: must be "openai", "responses", "anthropic" or "gemini"`);
-  else if (providerKind === "bedrock") errors.push(`${path5}.kind: a bedrock provider's models are all bedrock`);
+  if (!isKind(k) || k === "bedrock") errors.push(`${path6}.kind: must be "openai", "responses", "anthropic" or "gemini"`);
+  else if (providerKind === "bedrock") errors.push(`${path6}.kind: a bedrock provider's models are all bedrock`);
   else return k;
   return void 0;
 }
-function model(id, providerKind, v, path5, errors) {
-  if (!isObject(v)) return errors.push(`${path5}: must be an object`), void 0;
-  const kind = modelKind(v, providerKind, path5, errors) ?? providerKind;
+function model(id, providerKind, v, path6, errors) {
+  if (!isObject(v)) return errors.push(`${path6}: must be an object`), void 0;
+  const kind = modelKind(v, providerKind, path6, errors) ?? providerKind;
   const spec = KINDS[kind];
-  allowKeys(v, [...MODEL_KEYS, ...spec.modelKeys], path5, errors);
+  allowKeys(v, [...MODEL_KEYS, ...spec.modelKeys], path6, errors);
   const mine = (k) => spec.modelKeys.includes(k) ? v[k] : void 0;
   const { contextWindow, maxInputTokens, maxOutputTokens } = v;
+  if (v.webSearch !== void 0 && !["auto", "native", "off"].includes(String(v.webSearch))) errors.push(`${path6}.webSearch: must be auto, native or off`);
   const maxTokensParam = mine("maxTokensParam");
   const systemRole = mine("systemRole");
-  if (contextWindow !== void 0 && !isCount(contextWindow)) errors.push(`${path5}.contextWindow: must be a positive integer`);
-  if (maxOutputTokens !== void 0 && !isCount(maxOutputTokens)) errors.push(`${path5}.maxOutputTokens: must be a positive integer`);
+  if (contextWindow !== void 0 && !isCount(contextWindow)) errors.push(`${path6}.contextWindow: must be a positive integer`);
+  if (maxOutputTokens !== void 0 && !isCount(maxOutputTokens)) errors.push(`${path6}.maxOutputTokens: must be a positive integer`);
   if (maxInputTokens !== void 0 && (!isCount(maxInputTokens) || isCount(contextWindow) && maxInputTokens > contextWindow)) {
-    errors.push(`${path5}.maxInputTokens: must be a positive integer no larger than contextWindow`);
+    errors.push(`${path6}.maxInputTokens: must be a positive integer no larger than contextWindow`);
   }
   if (maxTokensParam !== void 0 && maxTokensParam !== "max_tokens" && maxTokensParam !== "max_completion_tokens") {
-    errors.push(`${path5}.maxTokensParam: must be max_tokens or max_completion_tokens`);
+    errors.push(`${path6}.maxTokensParam: must be max_tokens or max_completion_tokens`);
   }
   if (systemRole !== void 0 && systemRole !== "system" && systemRole !== "developer" && systemRole !== "user") {
-    errors.push(`${path5}.systemRole: must be system, developer or user`);
+    errors.push(`${path6}.systemRole: must be system, developer or user`);
   }
   const out = {
     id,
@@ -3899,71 +3900,72 @@ function model(id, providerKind, v, path5, errors) {
     ...maxOutputTokens === void 0 ? {} : { maxOutputTokens },
     ...maxTokensParam === void 0 ? {} : { maxTokensParam },
     systemRole: systemRole ?? "system",
-    tools: toolsOf(v["tools"], `${path5}.tools`, errors),
-    parallelToolCalls: bool(mine("parallelToolCalls"), true, `${path5}.parallelToolCalls`, errors),
-    vision: bool(v["vision"], true, `${path5}.vision`, errors),
-    ...requests(v, kind, path5, errors, isCount(maxOutputTokens) ? maxOutputTokens : Infinity)
+    tools: toolsOf(v["tools"], `${path6}.tools`, errors),
+    parallelToolCalls: bool(mine("parallelToolCalls"), true, `${path6}.parallelToolCalls`, errors),
+    vision: bool(v["vision"], true, `${path6}.vision`, errors),
+    ...["auto", "native", "off"].includes(String(v.webSearch)) ? { webSearch: v.webSearch } : {},
+    ...requests(v, kind, path6, errors, isCount(maxOutputTokens) ? maxOutputTokens : Infinity)
   };
   const budget = inputBudget(out);
   if (budget !== null && budget <= 0) {
-    errors.push(`${path5}: maxOutputTokens leaves no input budget inside contextWindow`);
+    errors.push(`${path6}: maxOutputTokens leaves no input budget inside contextWindow`);
   }
   return out;
 }
-function provider(id, v, path5, errors) {
-  if (!ID_RE.test(id) || id === "native") errors.push(`${path5}: provider ids are lowercase letters, digits and dashes (not "native")`);
-  if (!isObject(v)) return errors.push(`${path5}: must be an object`), void 0;
+function provider(id, v, path6, errors) {
+  if (!ID_RE.test(id) || id === "native") errors.push(`${path6}: provider ids are lowercase letters, digits and dashes (not "native")`);
+  if (!isObject(v)) return errors.push(`${path6}: must be an object`), void 0;
   const { kind: rawKind, baseUrl, timeoutMs, maxTools, models } = v;
-  if (!isKind(rawKind)) errors.push(`${path5}.kind: must be ${KIND_NAMES}`);
+  if (!isKind(rawKind)) errors.push(`${path6}.kind: must be ${KIND_NAMES}`);
   const kind = isKind(rawKind) ? rawKind : "openai";
   const raw = isObject(models) ? Object.values(models) : [];
   const kinds = [.../* @__PURE__ */ new Set([kind, ...raw.flatMap((m) => isObject(m) && isKind(m["kind"]) && m["kind"] !== "bedrock" && kind !== "bedrock" ? [m["kind"]] : [])])];
   const providerKeys = kinds.flatMap((k) => KINDS[k].providerKeys);
-  allowKeys(v, [...PROVIDER_KEYS, ...providerKeys, "apiKeyEnv"], path5, errors);
-  const allowHttp = bool(v["allowHttp"], false, `${path5}.allowHttp`, errors);
+  allowKeys(v, [...PROVIDER_KEYS, ...providerKeys, "apiKeyEnv"], path6, errors);
+  const allowHttp = bool(v["allowHttp"], false, `${path6}.allowHttp`, errors);
   let origin = "";
   let base = "";
-  if (typeof baseUrl !== "string") errors.push(`${path5}.baseUrl: must be ${allowHttp ? "an http or https" : "an https"} URL`);
-  else if (/[\\\s]/.test(baseUrl)) errors.push(`${path5}.baseUrl: must not contain a backslash or whitespace`);
-  else if (/[[\]{}]/.test(baseUrl)) errors.push(`${path5}.baseUrl: must not contain [, ], { or } (URL templates and IPv6 literals are not supported)`);
+  if (typeof baseUrl !== "string") errors.push(`${path6}.baseUrl: must be ${allowHttp ? "an http or https" : "an https"} URL`);
+  else if (/[\\\s]/.test(baseUrl)) errors.push(`${path6}.baseUrl: must not contain a backslash or whitespace`);
+  else if (/[[\]{}]/.test(baseUrl)) errors.push(`${path6}.baseUrl: must not contain [, ], { or } (URL templates and IPv6 literals are not supported)`);
   else {
     let url;
     try {
       url = new URL(baseUrl);
     } catch {
-      errors.push(`${path5}.baseUrl: not a URL`);
+      errors.push(`${path6}.baseUrl: not a URL`);
     }
     if (url !== void 0) {
       const plain = url.protocol === "http:";
-      if (url.protocol !== "https:" && !(plain && allowHttp)) errors.push(`${path5}.baseUrl: must use https${plain ? ' (plain http needs "allowHttp": true on the provider)' : ""}`);
-      else if (!HOST_RE.test(url.hostname)) errors.push(`${path5}.baseUrl: the host must be a DNS name (letters, digits and dashes, with no trailing dot)`);
-      if (url.username !== "" || url.password !== "") errors.push(`${path5}.baseUrl: must not carry credentials`);
-      if (/[?#]/.test(baseUrl)) errors.push(`${path5}.baseUrl: must not carry a query or fragment`);
+      if (url.protocol !== "https:" && !(plain && allowHttp)) errors.push(`${path6}.baseUrl: must use https${plain ? ' (plain http needs "allowHttp": true on the provider)' : ""}`);
+      else if (!HOST_RE.test(url.hostname)) errors.push(`${path6}.baseUrl: the host must be a DNS name (letters, digits and dashes, with no trailing dot)`);
+      if (url.username !== "" || url.password !== "") errors.push(`${path6}.baseUrl: must not carry credentials`);
+      if (/[?#]/.test(baseUrl)) errors.push(`${path6}.baseUrl: must not carry a query or fragment`);
       origin = url.origin;
       base = url.href.replace(/\/+$/, "");
     }
   }
-  const key = auth(id, v, path5, errors);
-  if (key === "none" && kind === "bedrock") errors.push(`${path5}.auth: "none" is not allowed on a bedrock provider; Bedrock needs a key`);
+  const key = auth(id, v, path6, errors);
+  if (key === "none" && kind === "bedrock") errors.push(`${path6}.auth: "none" is not allowed on a bedrock provider; Bedrock needs a key`);
   const authHeader = v["authHeader"];
   const authHeaderOk = authHeader === "bearer" || authHeader === "x-api-key" || authHeader === "x-goog-api-key";
-  if (authHeader !== void 0 && !authHeaderOk) errors.push(`${path5}.authHeader: must be "bearer", "x-api-key" or "x-goog-api-key"`);
-  if (timeoutMs !== void 0 && !(isCount(timeoutMs) && timeoutMs <= MAX_TIMEOUT_MS)) errors.push(`${path5}.timeoutMs: must be a positive integer of at most ${MAX_TIMEOUT_MS}`);
-  if (maxTools !== void 0 && !isCount(maxTools)) errors.push(`${path5}.maxTools: must be a positive integer`);
+  if (authHeader !== void 0 && !authHeaderOk) errors.push(`${path6}.authHeader: must be "bearer", "x-api-key" or "x-goog-api-key"`);
+  if (timeoutMs !== void 0 && !(isCount(timeoutMs) && timeoutMs <= MAX_TIMEOUT_MS)) errors.push(`${path6}.timeoutMs: must be a positive integer of at most ${MAX_TIMEOUT_MS}`);
+  if (maxTools !== void 0 && !isCount(maxTools)) errors.push(`${path6}.maxTools: must be a positive integer`);
   const sessionHeader = v["sessionHeader"];
   const sessionHeaderOk = typeof sessionHeader === "string" && HEADER_NAME_RE.test(sessionHeader);
-  if (sessionHeader !== void 0 && !sessionHeaderOk) errors.push(`${path5}.sessionHeader: must be a header name`);
+  if (sessionHeader !== void 0 && !sessionHeaderOk) errors.push(`${path6}.sessionHeader: must be a header name`);
   const out = {};
-  if (models !== void 0 && !isObject(models)) errors.push(`${path5}.models: must be a map of model ids`);
+  if (models !== void 0 && !isObject(models)) errors.push(`${path6}.models: must be a map of model ids`);
   else if (isObject(models)) {
     for (const [mid, m] of Object.entries(models)) {
-      if (mid === "") errors.push(`${path5}.models: a model id is empty`);
-      const parsed = model(mid, kind, m, `${path5}.models.${mid}`, errors);
+      if (mid === "") errors.push(`${path6}.models: a model id is empty`);
+      const parsed = model(mid, kind, m, `${path6}.models.${mid}`, errors);
       if (parsed !== void 0) out[mid] = parsed;
     }
   }
-  const shared = params(v["params"], kinds, `${path5}.params`, errors);
-  thinkingBudget(shared, Math.min(...Object.values(out).map((m) => m.maxOutputTokens ?? Infinity)), `${path5}.params`, errors);
+  const shared = params(v["params"], kinds, `${path6}.params`, errors);
+  thinkingBudget(shared, Math.min(...Object.values(out).map((m) => m.maxOutputTokens ?? Infinity)), `${path6}.params`, errors);
   return {
     id,
     kind,
@@ -3972,10 +3974,10 @@ function provider(id, v, path5, errors) {
     allowHttp,
     auth: key,
     ...authHeaderOk ? { authHeader } : {},
-    headers: headers(v["headers"], `${path5}.headers`, errors),
+    headers: headers(v["headers"], `${path6}.headers`, errors),
     params: shared,
     ...timeoutMs === void 0 ? {} : { timeoutMs },
-    streamUsage: bool(providerKeys.includes("streamUsage") ? v["streamUsage"] : void 0, true, `${path5}.streamUsage`, errors),
+    streamUsage: bool(providerKeys.includes("streamUsage") ? v["streamUsage"] : void 0, true, `${path6}.streamUsage`, errors),
     maxTools: maxTools ?? 128,
     ...sessionHeaderOk ? { sessionHeader: sessionHeader.toLowerCase() } : {},
     models: out
@@ -4002,32 +4004,32 @@ function parseConfig(text2) {
   const partial = { providers, aliases: {} };
   if (raw["aliases"] !== void 0 && !isObject(raw["aliases"])) errors.push("aliases: must be an object");
   for (const [name, a] of Object.entries(isObject(raw["aliases"]) ? raw["aliases"] : {})) {
-    const path5 = `aliases.${name}`;
-    if (!ALIAS_RE.test(name)) errors.push(`${path5}: alias names start with a lowercase letter and hold lowercase letters, digits, dashes and dots (no "..", at most 64 characters)`);
-    if (RESERVED_ALIASES.has(name)) errors.push(`${path5}: "${name}" is a built-in model name`);
+    const path6 = `aliases.${name}`;
+    if (!ALIAS_RE.test(name)) errors.push(`${path6}: alias names start with a lowercase letter and hold lowercase letters, digits, dashes and dots (no "..", at most 64 characters)`);
+    if (RESERVED_ALIASES.has(name)) errors.push(`${path6}: "${name}" is a built-in model name`);
     const alias = typeof a === "string" ? { target: a } : isObject(a) ? a : void 0;
     if (alias === void 0) {
-      errors.push(`${path5}: must be "provider/model" or { target, note }`);
+      errors.push(`${path6}: must be "provider/model" or { target, note }`);
       continue;
     }
-    if (isObject(a)) allowKeys(a, ["target", "note", ...REQUEST_KEYS], path5, errors);
+    if (isObject(a)) allowKeys(a, ["target", "note", ...REQUEST_KEYS], path6, errors);
     const { target, note } = alias;
     if (note !== void 0 && (typeof note !== "string" || note.length > 120 || /[\r\n]/.test(note))) {
-      errors.push(`${path5}.note: must be one line of at most 120 characters`);
+      errors.push(`${path6}.note: must be one line of at most 120 characters`);
     }
     if (typeof target !== "string") {
-      errors.push(`${path5}.target: must be "provider/model"`);
+      errors.push(`${path6}.target: must be "provider/model"`);
       continue;
     }
     const why = undeclared(partial, target);
-    if (why !== void 0) errors.push(`${path5} → ${why}`);
+    if (why !== void 0) errors.push(`${path6} → ${why}`);
     const slash = target.indexOf("/");
     const host = why === void 0 ? own(providers, target.slice(0, slash)) : void 0;
     const set = REQUEST_KEYS.some((k) => k in alias);
-    if (set && why === void 0 && host === void 0) errors.push(`${path5}: ${REQUEST_KEYS.join(", ")} need a provider/model target, not a native one`);
+    if (set && why === void 0 && host === void 0) errors.push(`${path6}: ${REQUEST_KEYS.join(", ")} need a provider/model target, not a native one`);
     const aimed = host === void 0 ? void 0 : own(host.models, target.slice(slash + 1));
     const max = aimed?.maxOutputTokens ?? Infinity;
-    aliases[name] = { target, ...typeof note === "string" ? { note } : {}, ...set && host !== void 0 ? requests(alias, aimed?.kind ?? host.kind, path5, errors, max, true) : {} };
+    aliases[name] = { target, ...typeof note === "string" ? { note } : {}, ...set && host !== void 0 ? requests(alias, aimed?.kind ?? host.kind, path6, errors, max, true) : {} };
   }
   return errors.length > 0 ? { errors } : { config: { providers, aliases }, errors };
 }
@@ -4576,6 +4578,67 @@ function buildResults(requested, mode, content, provider2) {
   return [{ type: "dangerous_tool_use", status: { type: "available", tool_uses } }];
 }
 
+// helper/core/search.ts
+function searchSource(value) {
+  if (!isRecord(value) || typeof value.url !== "string") return void 0;
+  try {
+    const url = new URL(value.url);
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) return void 0;
+    return {
+      title: typeof value.title === "string" && value.title ? value.title.slice(0, 512) : url.hostname,
+      url: url.href,
+      ...typeof value.content === "string" ? { content: value.content.slice(0, 4e3) } : {}
+    };
+  } catch {
+    return void 0;
+  }
+}
+function uniqueSearchSources(values) {
+  const rows = /* @__PURE__ */ new Map();
+  for (const value of values) {
+    const source = searchSource(value);
+    if (!source) continue;
+    const previous = rows.get(source.url);
+    if (previous) rows.set(source.url, { ...previous, ...isRecord(value) && typeof value.title === "string" && value.title ? { title: source.title } : {}, ...source.content ? { content: source.content } : {} });
+    else if (rows.size < 100) rows.set(source.url, source);
+  }
+  return [...rows.values()];
+}
+function responsesSearchEvidence(items) {
+  const sources = [];
+  let searched = false;
+  for (const item of items) {
+    if (!isRecord(item)) continue;
+    if (item.type === "web_search_call") {
+      if (item.status !== "completed" || item.error !== void 0) return { sources: [], searched: false, error: "Provider web search did not complete successfully" };
+      searched = true;
+      if (isRecord(item.action) && item.action.sources !== void 0) {
+        if (!Array.isArray(item.action.sources)) return { sources: [], searched: false, error: "Provider web search sources are malformed" };
+        sources.push(...item.action.sources);
+      }
+    } else if (item.type === "message" && Array.isArray(item.content)) {
+      for (const part2 of item.content) if (isRecord(part2) && part2.type === "output_text" && Array.isArray(part2.annotations)) {
+        sources.push(...part2.annotations.filter((annotation) => isRecord(annotation) && annotation.type === "url_citation"));
+      }
+    }
+  }
+  return { sources: searched ? uniqueSearchSources(sources) : [], searched };
+}
+function responsesSearchAccounting(terminal, streamed) {
+  if (!Array.isArray(terminal) || terminal.some((item) => !isRecord(item) || typeof item.type !== "string")) return { complete: false };
+  const calls = /* @__PURE__ */ new Set();
+  for (const item of terminal) {
+    if (item.type !== "web_search_call") continue;
+    if (typeof item.id !== "string" || !item.id.trim() || item.status !== "completed" || calls.has(item.id)) return { complete: false };
+    calls.add(item.id);
+  }
+  for (const item of streamed) {
+    if (!isRecord(item) || item.type !== "web_search_call") continue;
+    if (typeof item.id !== "string" || !item.id.trim() || item.status !== "completed" || !calls.has(item.id)) return { complete: false };
+  }
+  return { calls: calls.size, complete: true };
+}
+
 // helper/core/responses.ts
 var OPENAI_SIGNATURE_PREFIX = "multi-openai:";
 var EFFORTS2 = ["low", "medium", "high", "xhigh", "max"];
@@ -4588,9 +4651,12 @@ function isOutputItem(value, done) {
       (key) => value[key] === void 0 ? !done : typeof value[key] === "string"
     );
   }
+  if (value.type === "web_search_call") {
+    return (value.status === void 0 ? !done : typeof value.status === "string") && (value.action === void 0 || isRecord(value.action));
+  }
   if (value.type === "message") {
     return value.content === void 0 || Array.isArray(value.content) && value.content.every(
-      (part2) => isRecord(part2) && (part2.type === "output_text" ? typeof part2.text === "string" : part2.type === "refusal" && typeof part2.refusal === "string")
+      (part2) => isRecord(part2) && (part2.annotations === void 0 || Array.isArray(part2.annotations)) && (part2.type === "output_text" ? typeof part2.text === "string" : part2.type === "refusal" && typeof part2.refusal === "string")
     );
   }
   if (value.type === "reasoning") {
@@ -4642,6 +4708,9 @@ function isStreamEvent(value) {
     case "response.function_call_arguments.delta":
     case "response.reasoning_summary_text.delta":
       valid = indexed && typeof value.delta === "string";
+      break;
+    case "response.output_text.annotation.added":
+      valid = indexed && isRecord(value.annotation);
       break;
     case "response.failed":
     case "error":
@@ -4894,16 +4963,21 @@ function finalOutputItem(previous, item) {
   if (previous.type === "reasoning" && item.type === "reasoning") {
     return { ...previous, ...item };
   }
+  if (previous.type === "web_search_call" && item.type === "web_search_call") {
+    return { ...previous, ...item, ...previous.action || item.action ? { action: { ...previous.action, ...item.action } } : {} };
+  }
   return { ...item, id: item.id ?? previous.id };
 }
 function outputValue(item) {
   switch (item.type) {
     case "message":
-      return item.content;
+      return item.content?.map((part2) => [part2.type, part2.text, part2.refusal]);
     case "function_call":
       return [item.call_id, item.name, item.arguments];
     case "reasoning":
       return [item.summary ?? []];
+    case "web_search_call":
+      return [item.status, item.action && Object.fromEntries(Object.entries(item.action).filter(([key]) => key !== "sources")), item.error];
   }
 }
 var ResponseStream = class {
@@ -4918,6 +4992,10 @@ var ResponseStream = class {
   model;
   emit;
   options;
+  terminalOutput;
+  searchEvidence() {
+    return responsesSearchEvidence([...this.slots.values()].flatMap((slot) => [slot.item, ...slot.annotations.length ? [{ type: "message", content: [{ type: "output_text", annotations: slot.annotations }] }] : []]));
+  }
   constructor(model2, emit, options) {
     this.model = model2;
     this.emit = emit;
@@ -4985,6 +5063,9 @@ var ResponseStream = class {
     if (!message) {
       throw new Error("OpenAI stream omitted response.created");
     }
+    const evidence = this.searchEvidence();
+    if (evidence.error) throw new Error(evidence.error);
+    this.options.onSearchSources?.({ sources: evidence.sources, searched: evidence.searched, ...responsesSearchAccounting(this.terminalOutput, [...this.slots.values()].map((slot) => slot.item)) });
     const cached = usage?.input_tokens_details?.cached_tokens ?? 0;
     const written = usage?.input_tokens_details?.cache_write_tokens ?? 0;
     message.usage = {
@@ -5020,6 +5101,7 @@ var ResponseStream = class {
     this.completed = true;
   }
   complete(event) {
+    this.terminalOutput = event.response.output;
     if (this.stopPending) {
       this.start(event.response);
       this.finish("stop_sequence", event.response.usage);
@@ -5039,7 +5121,7 @@ var ResponseStream = class {
       this.finish("stop_sequence", event.response.usage);
       return;
     }
-    if (!this.content.length || this.cursor !== this.slots.size) {
+    if (!this.content.length && !this.searchEvidence().searched || this.cursor !== this.slots.size) {
       throw new Error("OpenAI completed with missing output");
     }
     let stopReason = this.content.some((block) => block.type === "tool_use") ? "tool_use" : "end_turn";
@@ -5077,7 +5159,7 @@ var ResponseStream = class {
     if (this.slots.has(index)) {
       throw new Error("Duplicate OpenAI output item");
     }
-    const slot = { item, text: "", arguments: "", done: false, emitted: 0 };
+    const slot = { item, text: "", arguments: "", done: false, emitted: 0, annotations: [] };
     this.slots.set(index, slot);
     return slot;
   }
@@ -5092,6 +5174,11 @@ var ResponseStream = class {
       return;
     }
     const slot = this.slots.get(event.output_index);
+    if (event.type === "response.output_text.annotation.added") {
+      if (!slot || slot.item.type !== "message") throw new Error("Search citation without a message output item");
+      slot.annotations.push(event.annotation);
+      return;
+    }
     if (!slot || slot.done) {
       throw new Error("OpenAI event without an active output item");
     }
@@ -5110,10 +5197,12 @@ var ResponseStream = class {
   }
   finishItem(slot, item) {
     const final = finalOutputItem(slot.item, item);
+    if (final.type === "message") for (const part2 of final.content ?? []) slot.annotations.push(...part2.annotations ?? []);
     if (slot.done) {
       if (!isDeepStrictEqual(outputValue(slot.item), outputValue(final))) {
         throw new Error("OpenAI terminal output changed a completed item");
       }
+      slot.item = final;
       return;
     }
     if (final.type === "message") {
@@ -5127,7 +5216,7 @@ var ResponseStream = class {
         throw new Error("OpenAI function arguments changed after streaming");
       }
       slot.arguments = final.arguments;
-    } else if (!slot.text && Array.isArray(final.summary)) {
+    } else if (final.type === "reasoning" && !slot.text && Array.isArray(final.summary)) {
       slot.text = final.summary.map((part2) => part2.text).join("\n");
     }
     slot.item = final;
@@ -5135,6 +5224,7 @@ var ResponseStream = class {
   }
   createBlock(slot) {
     const item = slot.item;
+    if (item.type === "web_search_call") throw new Error("Hosted search is not a function call");
     if (item.type === "reasoning") {
       return { type: "thinking", thinking: "", signature: "" };
     }
@@ -5243,6 +5333,13 @@ var ResponseStream = class {
       const slot = this.slots.get(this.cursor);
       if (!slot) {
         return;
+      }
+      if (slot.item.type === "web_search_call") {
+        if (!slot.done) return;
+        const evidence = responsesSearchEvidence([slot.item]);
+        if (evidence.error) throw new Error(evidence.error);
+        this.cursor++;
+        continue;
       }
       if (slot.item.type === "function_call" && !slot.done) {
         return;
@@ -6022,7 +6119,7 @@ function messagesBody(req, model2) {
     model: model2,
     system: req.system,
     messages: req.transcript,
-    tools: req.tools.map((tool) => ({
+    tools: (req.native?.webSearch ? [] : req.tools).map((tool) => ({
       name: tool.name,
       description: tool.description,
       input_schema: tool.schema,
@@ -6031,8 +6128,8 @@ function messagesBody(req, model2) {
     stream: true,
     ...req.native?.maxTokens !== void 0 ? { max_tokens: req.native.maxTokens } : {},
     ...req.native?.stopSequences ? { stop_sequences: req.native.stopSequences } : {},
-    ...req.native?.toolChoice ? { tool_choice: req.native.toolChoice } : {},
-    ...req.native?.outputSchema ? { output_format: { type: "json_schema", schema: req.native.outputSchema } } : {}
+    ...req.native?.toolChoice && !req.native.webSearch ? { tool_choice: req.native.toolChoice } : {},
+    ...req.native?.outputSchema && !req.native.webSearch ? { output_format: { type: "json_schema", schema: req.native.outputSchema } } : {}
   };
   if (typeof req.effort === "string") body.output_config = { effort: req.effort };
   else if (typeof req.effort === "number") body.thinking = { type: "enabled", budget_tokens: req.effort };
@@ -6040,9 +6137,18 @@ function messagesBody(req, model2) {
 }
 function responsesRequest(req, model2, body) {
   const translated = toResponses(body, model2);
+  const search = req.native?.webSearch;
+  if (search?.blockedDomains?.length) throw new Error("Codex search cannot enforce these search restrictions");
+  if (search?.maxUses !== void 0 && (!Number.isSafeInteger(search.maxUses) || search.maxUses < 1 || search.maxUses > 20)) throw new Error("Codex search use limit must be an integer from 1 to 20");
   return {
     ...translated,
-    ...req.native?.outputSchema && translated.text ? { text: { format: { ...translated.text.format, strict: false } } } : {},
+    ...req.native?.outputSchema && !search && translated.text ? { text: { format: { ...translated.text.format, strict: false } } } : {},
+    ...search ? { tools: [{
+      type: "web_search",
+      external_web_access: true,
+      ...search.allowedDomains?.length ? { filters: { allowed_domains: search.allowedDomains } } : {},
+      ...search.location ? { user_location: { ...search.location, type: "approximate" } } : {}
+    }], tool_choice: "auto", parallel_tool_calls: false } : {},
     instructions: openaiInstructions(translated.instructions),
     prompt_cache_key: createHash2("sha256").update(JSON.stringify(["codex", req.session, req.who, model2])).digest("hex")
   };
@@ -6091,8 +6197,8 @@ async function* httpStream(stream) {
   try {
     yield* stream;
   } catch (error) {
-    const code = error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : "stream-reset";
-    throw new ProviderFailure("the Codex HTTP response connection failed before completion", { event: "http.stream", code, transient: true });
+    const code2 = error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : "stream-reset";
+    throw new ProviderFailure("the Codex HTTP response connection failed before completion", { event: "http.stream", code: code2, transient: true });
   }
 }
 function eventMapper(push) {
@@ -6101,46 +6207,46 @@ function eventMapper(push) {
   const emit = (type, value) => {
     if (type === "content_block_start" && "content_block" in value) {
       const block = value.content_block;
-      const open = { kind: block.type, json: "", thinking: "", signature: "" };
+      const open2 = { kind: block.type, json: "", thinking: "", signature: "" };
       if (block.type === "tool_use") {
-        open.id = block.id;
-        open.name = block.name;
-        if (block.input && typeof block.input === "object" && Object.keys(block.input).length > 0) open.json = JSON.stringify(block.input);
+        open2.id = block.id;
+        open2.name = block.name;
+        if (block.input && typeof block.input === "object" && Object.keys(block.input).length > 0) open2.json = JSON.stringify(block.input);
       }
       if (block.type === "thinking") {
-        open.thinking = block.thinking;
-        open.signature = block.signature;
+        open2.thinking = block.thinking;
+        open2.signature = block.signature;
         if (block.thinking) push({ type: "thinking", text: block.thinking });
       }
       if (block.type === "text" && block.text) push({ type: "text", text: block.text });
-      blocks2.set(value.index, open);
+      blocks2.set(value.index, open2);
       return;
     }
     if (type === "content_block_delta" && "index" in value && "delta" in value) {
-      const open = blocks2.get(value.index);
+      const open2 = blocks2.get(value.index);
       const delta = value.delta;
       if (delta.type === "text_delta") push({ type: "text", text: delta.text });
       else if (delta.type === "thinking_delta") {
         push({ type: "thinking", text: delta.thinking });
-        if (open) open.thinking += delta.thinking;
-      } else if (delta.type === "signature_delta" && open) open.signature += delta.signature;
-      else if (delta.type === "input_json_delta" && open) open.json += delta.partial_json;
+        if (open2) open2.thinking += delta.thinking;
+      } else if (delta.type === "signature_delta" && open2) open2.signature += delta.signature;
+      else if (delta.type === "input_json_delta" && open2) open2.json += delta.partial_json;
       return;
     }
     if (type === "content_block_stop" && "index" in value) {
-      const open = blocks2.get(value.index);
+      const open2 = blocks2.get(value.index);
       blocks2.delete(value.index);
-      if (open?.kind === "tool_use" && open.id && open.name) {
+      if (open2?.kind === "tool_use" && open2.id && open2.name) {
         calls += 1;
         let input = {};
         try {
-          input = open.json ? JSON.parse(open.json) : {};
+          input = open2.json ? JSON.parse(open2.json) : {};
         } catch {
           input = {};
         }
-        push({ type: "tool_use", id: open.id, name: open.name, input });
+        push({ type: "tool_use", id: open2.id, name: open2.name, input });
       }
-      if (open?.kind === "thinking" && open.signature) push({ type: "signature", thinking: open.thinking, signature: open.signature });
+      if (open2?.kind === "thinking" && open2.signature) push({ type: "signature", thinking: open2.thinking, signature: open2.signature });
     }
   };
   return { emit, toolCalls: () => calls };
@@ -6248,7 +6354,7 @@ async function* codexStep(req, model2, signal, options = {}) {
     transport = "ws";
     return closeAfter(socket.response(body2, attemptSignal, limitsOf, onLimits), socket);
   };
-  const open = async () => {
+  const open2 = async () => {
     if (choice !== "sse") {
       try {
         return await openSocket();
@@ -6287,7 +6393,7 @@ async function* codexStep(req, model2, signal, options = {}) {
           idleTimer = setTimeout(() => attemptControl.abort(new ProviderFailure(`the Codex stream sent nothing for ${idleMs} ms`, { event: "stream.idle", code: "stream-idle", transient: true })), idleMs);
         };
         arm();
-        const mapper = eventMapper((event) => {
+        const push = (event) => {
           ttfb ??= Date.now() - started;
           if (event.type === "tool_use") {
             committed = true;
@@ -6295,12 +6401,14 @@ async function* codexStep(req, model2, signal, options = {}) {
           }
           if (committed) queue.push(event);
           else pending.push(event);
-        });
+        };
+        const mapper = eventMapper(push);
         try {
           signal.throwIfAborted();
-          const response = await fromResponses(touching(await open(), arm), req.target, mapper.emit, {
+          const response = await fromResponses(touching(await open2(), arm), req.target, mapper.emit, {
             toolNames: originalToolNames(body),
-            inputTokens: estimateInputTokens(request2)
+            inputTokens: estimateInputTokens(request2),
+            ...req.native?.webSearch ? { onSearchSources: (evidence) => push({ type: "search_sources", ...evidence }) } : {}
           });
           clearTimeout(idleTimer);
           flush();
@@ -6377,7 +6485,7 @@ function startProcess(argv, cwd) {
   });
   const exited = new Promise((resolve2, reject) => {
     child.once("error", reject);
-    child.once("close", (code) => resolve2(code ?? 1));
+    child.once("close", (code2) => resolve2(code2 ?? 1));
   });
   void exited.catch(() => {
   });
@@ -6431,11 +6539,11 @@ function agyEvents(line) {
   if (line.event === "result" && isJson(line.result)) {
     const result = line.result;
     const usage = isJson(result.usage) ? result.usage : {};
-    const read = num(usage.cache_read_tokens);
+    const read2 = num(usage.cache_read_tokens);
     const events = [];
     if (typeof result.conversation_id === "string") events.push({ kind: "session", id: result.conversation_id });
     if (typeof result.response === "string" && result.response.trim() !== "") events.push({ kind: "answer", text: result.response.trim() });
-    events.push({ kind: "usage", in: Math.max(0, num(usage.input_tokens) - read), out: num(usage.output_tokens), cacheRead: read, cacheWrite: 0, reasoning: num(usage.thinking_tokens) });
+    events.push({ kind: "usage", in: Math.max(0, num(usage.input_tokens) - read2), out: num(usage.output_tokens), cacheRead: read2, cacheWrite: 0, reasoning: num(usage.thinking_tokens) });
     const ok = result.status === "SUCCESS";
     events.push(ok ? { kind: "done", ok } : { kind: "done", ok, error: `Antigravity ended with ${String(result.status)}` });
     return events;
@@ -6560,7 +6668,7 @@ async function* harnessStep(req, worker, model2, signal) {
       }
     }
     yield* handle(worker === "grok" ? grok.end() : []);
-    const code = await running.exited;
+    const code2 = await running.exited;
     const stderr = running.stderr();
     if (signal.aborted) {
       yield { type: "error", kind: "request", text: `rice-multi-models: ${worker} was stopped` };
@@ -6568,7 +6676,7 @@ async function* harnessStep(req, worker, model2, signal) {
       if (answer) yield { type: "text", text: answer };
       yield { type: "stop", reason: "end_turn" };
     } else {
-      const why = done?.kind === "done" && done.error ? done.error : `${worker} exited ${code}${stderr ? `: ${stderr}` : ""}`;
+      const why = done?.kind === "done" && done.error ? done.error : `${worker} exited ${code2}${stderr ? `: ${stderr}` : ""}`;
       if (answer) yield { type: "text", text: answer };
       yield { type: "error", kind: "response", text: `rice-multi-models: ${why}${/auth|log ?in|sign ?in/i.test(stderr) ? ` (run ${worker} login)` : ""}` };
     }
@@ -6598,7 +6706,7 @@ var HELPER_TIMEOUT_MS = 1e4;
 var KEY_MAX = 4096;
 var isUsableKey = (key) => key.length > 0 && key.length <= KEY_MAX && /^[\x21-\x7e]+$/.test(key);
 function createKeys(run2, now) {
-  const keys = /* @__PURE__ */ new Map();
+  const keys2 = /* @__PURE__ */ new Map();
   const failures = /* @__PURE__ */ new Map();
   const running = /* @__PURE__ */ new Map();
   async function helper(p, auth2, fp) {
@@ -6612,14 +6720,14 @@ function createKeys(run2, now) {
     if (r.exitCode !== 0) return failed(`rice-multi-models: ${p.id} key helper failed (exit ${r.exitCode}): keychain locked, or no key stored? Run security add-generic-password -U -s rice-multi-models -a ${p.id} -w`);
     const key = r.stdout.trim();
     if (!isUsableKey(key)) return failed(`rice-multi-models: ${p.id} key helper printed no usable key (empty, over 4 KiB, or holding spaces, control or non-ASCII characters); run security add-generic-password -U -s rice-multi-models -a ${p.id} -w`);
-    keys.set(fp, { key, until: now() + auth2.ttlSeconds * 1e3 });
+    keys2.set(fp, { key, until: now() + auth2.ttlSeconds * 1e3 });
     failures.delete(fp);
     return { key, cached: false };
   }
   return {
     // Forgets the key and failure of every provider not in `approved`.
     prune(approved) {
-      for (const map of [keys, failures]) for (const fp of map.keys()) if (!approved.has(fp)) map.delete(fp);
+      for (const map of [keys2, failures]) for (const fp of map.keys()) if (!approved.has(fp)) map.delete(fp);
     },
     // The provider's key: the cached one while its ttl lasts, else what its helper prints, trimmed. An
     // unapproved provider's helper never runs.
@@ -6627,23 +6735,23 @@ function createKeys(run2, now) {
       const fp = fingerprint(p);
       if (!approved.has(fp)) return { error: `rice-multi-models: ${p.id} not approved; run /rice-models approve ${p.id}` };
       if (p.auth === "none") return { key: null, cached: false };
-      const hit = keys.get(fp);
+      const hit = keys2.get(fp);
       if (hit !== void 0 && now() < hit.until) return { key: hit.key, cached: true };
-      keys.delete(fp);
+      keys2.delete(fp);
       let flight = running.get(fp);
       if (flight === void 0) running.set(fp, flight = helper(p, p.auth, fp).finally(() => running.delete(fp)));
       return flight;
     },
     // Drops a key its provider rejected, so the next use runs the helper again.
     drop(p) {
-      keys.delete(fingerprint(p));
+      keys2.delete(fingerprint(p));
     },
     // Each provider's key state.
     status(config) {
       return Object.values(config?.providers ?? {}).map((p) => {
         if (p.auth === "none") return { provider: p.id, key: "none" };
         const fp = fingerprint(p);
-        const [hit, failure] = [keys.get(fp), failures.get(fp)];
+        const [hit, failure] = [keys2.get(fp), failures.get(fp)];
         if (hit !== void 0 && now() < hit.until) return { provider: p.id, key: "cached" };
         return failure === void 0 ? { provider: p.id, key: "not-run" } : { provider: p.id, key: "failed", failure };
       });
@@ -6666,7 +6774,7 @@ function parseJson(text2) {
 var obj = (v) => isObject(v) ? v : {};
 var isIndex = (v) => typeof v === "number" && Number.isInteger(v) && v >= 0;
 var count = (v) => isIndex(v) ? v : 0;
-var joinUrl = (base, path5) => base.endsWith("/v1") && path5.startsWith("/v1/") ? `${base}${path5.slice(3)}` : `${base}${path5}`;
+var joinUrl = (base, path6) => base.endsWith("/v1") && path6.startsWith("/v1/") ? `${base}${path6.slice(3)}` : `${base}${path6}`;
 function merge(a, b) {
   const out = { ...a };
   for (const [k, v] of Object.entries(b)) {
@@ -6691,15 +6799,15 @@ function params2(base, p, m, effort) {
 var lostThinking = (thinking, messages) => isObject(thinking) && (thinking["type"] === "enabled" || thinking["type"] === "adaptive") && messages.slice(messages.findLastIndex((m) => m.role === "user" && !m.content.some((b) => b.type === "tool_result")) + 1).some((m) => m.unsealed);
 var lastUsers = (messages) => messages.filter((m) => m.role === "user").slice(-2);
 function thinkingReader() {
-  const open = /* @__PURE__ */ new Map();
+  const open2 = /* @__PURE__ */ new Map();
   return {
     add(index, part2) {
-      const block = open.get(index) ?? { text: "", signature: "", redacted: [] };
-      open.set(index, { text: block.text + (part2.text ?? ""), signature: block.signature + (part2.signature ?? ""), redacted: part2.redacted ? [...block.redacted, part2.redacted] : block.redacted });
+      const block = open2.get(index) ?? { text: "", signature: "", redacted: [] };
+      open2.set(index, { text: block.text + (part2.text ?? ""), signature: block.signature + (part2.signature ?? ""), redacted: part2.redacted ? [...block.redacted, part2.redacted] : block.redacted });
     },
     seal(index) {
-      const block = open.get(index);
-      open.delete(index);
+      const block = open2.get(index);
+      open2.delete(index);
       if (block === void 0) return void 0;
       const [first, ...rest] = block.redacted;
       if (first !== void 0) return { type: "redacted_thinking", data: rest.length === 0 ? first : btoa(block.redacted.map((p) => atob(p)).join("")) };
@@ -6733,7 +6841,7 @@ function sseReader() {
 }
 function decoderOver(source, item, end) {
   const s = { out: [], failed: false, fail: (message) => void (s.failed || (s.failed = true, s.out.push({ t: "error", message: message.slice(0, ERROR_TEXT_MAX) }))) };
-  const read = (items) => {
+  const read2 = (items) => {
     s.out = [];
     try {
       for (const x of items()) if (!s.failed) item(s, x);
@@ -6743,9 +6851,9 @@ function decoderOver(source, item, end) {
     return s.out;
   };
   return {
-    feed: (bytes) => read(() => source.feed(bytes)),
+    feed: (bytes) => read2(() => source.feed(bytes)),
     end() {
-      const out = read(() => source.end());
+      const out = read2(() => source.end());
       if (!s.failed) end(s);
       return out;
     }
@@ -6770,10 +6878,33 @@ function decoder() {
   const thinking = thinkingReader();
   const usage = { in: 0, out: 0, cacheRead: 0, cacheWrite: 0 };
   let finished = false;
+  const searchBlocks = /* @__PURE__ */ new Map();
+  const searchSources = [];
+  let searched = false;
+  function searchResult(s, block) {
+    if (block["type"] !== "web_search_tool_result") return false;
+    const content = block["content"];
+    if (isObject(content) && content["type"] === "web_search_tool_result_error") {
+      s.fail(`Anthropic web search failed: ${str(content["error_code"]) || "unknown"}`);
+      return true;
+    }
+    if (!Array.isArray(content)) {
+      s.fail("Anthropic web search result is malformed");
+      return true;
+    }
+    if (content.some((value) => !isObject(value) || value["type"] !== "web_search_result" || typeof value["url"] !== "string" || typeof value["title"] !== "string")) {
+      s.fail("Anthropic web search result is malformed");
+      return true;
+    }
+    searched = true;
+    searchSources.push(...content.map((value) => ({ title: value["title"], url: value["url"] })));
+    return true;
+  }
   function take(u) {
     for (const [key, field] of Object.entries(COUNTS)) usage[key] = Math.max(usage[key], count(u[field]));
   }
-  function event({ out, fail }, data) {
+  function event(s, data) {
+    const { out, fail } = s;
     const ev = parseJson(data);
     if (!isObject(ev)) return fail(`unparseable stream data: ${data.slice(0, 200)}`);
     const delta = obj(ev["delta"]);
@@ -6784,11 +6915,20 @@ function decoder() {
       case "message_start":
         return take(obj(obj(ev["message"])["usage"]));
       case "content_block_start":
+        if (block["type"] === "web_search_tool_result") {
+          searchBlocks.set(ev["index"], block);
+          searchResult(s, block);
+          return;
+        }
         if (block["type"] === "tool_use") held.set(ev["index"], { ...typeof block["id"] === "string" ? { id: block["id"] } : {}, name: typeof block["name"] === "string" ? block["name"] : "", json: "", input: block["input"] });
         else if (block["type"] === "thinking") thinking.add(ev["index"], { text: str(block["thinking"]), signature: str(block["signature"]) });
         else if (block["type"] === "redacted_thinking") thinking.add(ev["index"], { redacted: str(block["data"]) });
         return;
       case "content_block_delta": {
+        if (delta["type"] === "citations_delta" && isObject(delta["citation"]) && delta["citation"]["type"] === "web_search_result_location") {
+          searchSources.push({ title: delta["citation"]["title"], url: delta["citation"]["url"], content: delta["citation"]["cited_text"] });
+          return;
+        }
         if (delta["type"] === "text_delta" && nonEmpty(delta["text"])) out.push({ t: "text", text: delta["text"] });
         else if (delta["type"] === "thinking_delta" && nonEmpty(delta["thinking"])) {
           out.push({ t: "thinking", text: delta["thinking"] });
@@ -6798,6 +6938,10 @@ function decoder() {
         return;
       }
       case "content_block_stop": {
+        if (searchBlocks.has(ev["index"])) {
+          searchBlocks.delete(ev["index"]);
+          return;
+        }
         const block2 = thinking.seal(ev["index"]);
         if (block2 !== void 0) return void out.push({ t: "sealed", block: block2 });
         const h = held.get(ev["index"]);
@@ -6811,12 +6955,14 @@ function decoder() {
         out.push({ t: "usage", ...usage });
         if (typeof delta["stop_reason"] === "string") {
           finished = true;
+          if (searched) out.push({ t: "search_sources", sources: uniqueSearchSources(searchSources), searched: true });
           out.push({ t: "finish", reason: delta["stop_reason"] });
         }
     }
   }
   return decoderOver(sseReader(), event, ({ fail }) => {
-    if (held.size > 0) fail("the stream ended inside a tool call");
+    if (searchBlocks.size > 0) fail("the stream ended inside a web search result");
+    else if (held.size > 0) fail("the stream ended inside a tool call");
     else if (!finished) fail("the stream ended with no stop reason");
   });
 }
@@ -7050,6 +7196,8 @@ function decoder3() {
   let finish;
   let usage;
   let calls = 0;
+  let searched = false;
+  const searchSources = [];
   function chunk(s, data) {
     const c = parseJson(data);
     if (!isObject(c)) return s.fail(`unparseable stream data: ${data.slice(0, 200)}`);
@@ -7059,6 +7207,20 @@ function decoder3() {
     if (typeof blocked === "string") finish = "safety";
     const candidate = Array.isArray(c["candidates"]) ? c["candidates"][0] : void 0;
     if (!isObject(candidate)) return;
+    const grounding = candidate["groundingMetadata"];
+    if (isObject(grounding)) {
+      const queries = grounding["webSearchQueries"];
+      const chunks = grounding["groundingChunks"];
+      if (Array.isArray(queries) && queries.some((query) => typeof query === "string" && query.trim())) searched = true;
+      if (Array.isArray(chunks)) for (const [index, chunk2] of chunks.entries()) {
+        if (isObject(chunk2) && isObject(chunk2["web"])) {
+          searched = true;
+          const supports = Array.isArray(grounding["groundingSupports"]) ? grounding["groundingSupports"] : [];
+          const snippets = supports.flatMap((support) => isObject(support) && Array.isArray(support["groundingChunkIndices"]) && support["groundingChunkIndices"].includes(index) && isObject(support["segment"]) && typeof support["segment"]["text"] === "string" ? [support["segment"]["text"]] : []);
+          searchSources.push({ title: chunk2["web"]["title"], url: chunk2["web"]["uri"], ...snippets.length ? { content: snippets.join("\n") } : {} });
+        }
+      }
+    }
     const content = isObject(candidate["content"]) ? candidate["content"] : {};
     for (const part2 of Array.isArray(content["parts"]) ? content["parts"] : []) {
       if (!isObject(part2)) return s.fail("a part is not an object");
@@ -7082,6 +7244,7 @@ function decoder3() {
       const input = count2(usage["promptTokenCount"]) + count2(usage["toolUsePromptTokenCount"]);
       s.out.push({ t: "usage", in: Math.max(0, input - cached), out: count2(usage["candidatesTokenCount"]) + thoughts, cacheRead: cached, cacheWrite: 0, ...thoughts > 0 ? { reasoning: thoughts } : {} });
     }
+    if (searched) s.out.push({ t: "search_sources", sources: uniqueSearchSources(searchSources), searched: true });
     s.out.push({ t: "finish", reason: finish === "stop" && calls > 0 ? "tool_calls" : finish });
   }
   return decoderOver(sseReader(), chunk, end);
@@ -7319,7 +7482,14 @@ function decoder5() {
   const thought = /* @__PURE__ */ new Set();
   let calls = 0;
   let ended = false;
+  const searchItems = /* @__PURE__ */ new Map();
+  const searchAnnotations = [];
   function item(s, it, index) {
+    if (it["type"] === "web_search_call" || it["type"] === "message") {
+      searchItems.set(index, it);
+      const evidence = responsesSearchEvidence([it]);
+      if (evidence.error) return s.fail(evidence.error);
+    }
     if (it["type"] === "function_call") {
       const name = str2(it["name"]);
       const whole = typeof it["arguments"] === "string" && it["arguments"] !== "" ? it["arguments"] : args.get(index) ?? "";
@@ -7336,6 +7506,12 @@ function decoder5() {
   }
   function done(s, r, status) {
     ended = true;
+    const items = [...searchItems.values(), ...Array.isArray(r["output"]) ? r["output"] : [], ...searchAnnotations.length ? [{ type: "message", content: [{ type: "output_text", annotations: searchAnnotations }] }] : []];
+    if (items.some((it) => isObject(it) && (it["type"] === "web_search_call" || it["type"] === "message" && Array.isArray(it["content"]) && it["content"].some((part2) => isObject(part2) && Array.isArray(part2["annotations"]))))) {
+      const evidence = responsesSearchEvidence(items);
+      if (evidence.error) return s.fail(evidence.error);
+      s.out.push({ t: "search_sources", sources: evidence.sources, searched: evidence.searched });
+    }
     const u = r["usage"];
     if (isObject(u) && isIndex(u["input_tokens"]) && isIndex(u["output_tokens"])) {
       const cached = isObject(u["input_tokens_details"]) && isIndex(u["input_tokens_details"]["cached_tokens"]) ? u["input_tokens_details"]["cached_tokens"] : 0;
@@ -7352,6 +7528,9 @@ function decoder5() {
     const index = e["output_index"] ?? e["item_id"];
     if (type === "response.output_text.delta" || type === "response.refusal.delta") {
       if (str2(e["delta"]) !== "") s.out.push({ t: "text", text: str2(e["delta"]) });
+    } else if (type === "response.output_text.annotation.added") {
+      if (isObject(e["annotation"])) searchAnnotations.push(e["annotation"]);
+      else s.fail("Search citation metadata is malformed");
     } else if (type === "response.reasoning_summary_text.delta" || type === "response.reasoning_text.delta") {
       thought.add(index);
       if (str2(e["delta"]) !== "") s.out.push({ t: "thinking", text: str2(e["delta"]) });
@@ -7529,6 +7708,51 @@ function nativeConstraints(body, model2, native) {
     if (choice?.type === "none") delete sent.toolConfig;
     if (native.outputSchema) sent.outputConfig = { textFormat: { type: "json_schema", structure: { jsonSchema: { schema: JSON.stringify(native.outputSchema) } } } };
   }
+  if (native.webSearch) {
+    const search = native.webSearch;
+    if (search.maxUses !== void 0 && (!Number.isSafeInteger(search.maxUses) || search.maxUses < 1)) throw new Error("Invalid native search use limit");
+    if (model2.kind === "responses") {
+      sent.tools = [{
+        type: "web_search",
+        external_web_access: true,
+        ...search.allowedDomains?.length || search.blockedDomains?.length ? { filters: {
+          ...search.allowedDomains?.length ? { allowed_domains: search.allowedDomains } : {},
+          ...search.blockedDomains?.length ? { blocked_domains: search.blockedDomains } : {}
+        } } : {},
+        ...search.location ? { user_location: { ...search.location, type: "approximate" } } : {}
+      }];
+      sent.tool_choice = { type: "web_search" };
+      sent.include = [.../* @__PURE__ */ new Set([...Array.isArray(sent.include) ? sent.include.filter((value) => typeof value === "string") : [], "web_search_call.action.sources"])];
+      delete sent.parallel_tool_calls;
+      delete sent.text;
+      if (search.maxUses !== void 0) sent.max_tool_calls = search.maxUses;
+    } else if (model2.kind === "anthropic") {
+      if (search.allowedDomains?.length && search.blockedDomains?.length) throw new Error("Anthropic search supports one domain filter list per request");
+      sent.tools = [{
+        type: "web_search_20250305",
+        name: "web_search",
+        max_uses: search.maxUses ?? 8,
+        ...search.allowedDomains?.length ? { allowed_domains: search.allowedDomains } : {},
+        ...search.blockedDomains?.length ? { blocked_domains: search.blockedDomains } : {},
+        ...search.location ? { user_location: { ...search.location, type: "approximate" } } : {}
+      }];
+      sent.tool_choice = { type: "tool", name: "web_search" };
+      delete sent.thinking;
+      const output = { ...object(sent.output_config) };
+      delete output.format;
+      if (Object.keys(output).length) sent.output_config = output;
+      else delete sent.output_config;
+    } else if (model2.kind === "gemini") {
+      if (search.allowedDomains?.length || search.blockedDomains?.length || search.location || search.maxUses !== void 0) throw new Error("Gemini search cannot enforce these search restrictions");
+      sent.tools = [{ googleSearch: {} }];
+      delete sent.toolConfig;
+      const generation = { ...object(sent.generationConfig) };
+      delete generation.responseMimeType;
+      delete generation.responseJsonSchema;
+      delete generation.responseSchema;
+      sent.generationConfig = generation;
+    } else throw new Error("This provider protocol has no supported hosted search contract");
+  }
   return JSON.stringify(sent);
 }
 
@@ -7552,6 +7776,7 @@ function assembler(codec, provider2, ids, mint = mintToolId) {
           inText = d.t === "text";
           out.push({ type: d.t, text: d.text });
         } else if (d.t === "sealed") turn.blocks.push({ at: before, block: d.block });
+        else if (d.t === "search_sources") out.push({ type: "search_sources", sources: d.sources, searched: d.searched });
         else if (d.t === "usage") usage = { in: d.in, out: d.out, cacheRead: d.cacheRead, cacheWrite: d.cacheWrite, ...d.reasoning === void 0 ? {} : { reasoning: d.reasoning } };
         else if (d.t === "finish") finish = finishToken(d.reason);
         else if (d.t === "error") failure = d.message;
@@ -7594,7 +7819,7 @@ async function errorBody({ body, cancel }) {
   return text2.slice(0, ERROR_TEXT_MAX);
 }
 function createStepper(env) {
-  const keys = createKeys(env.run, env.now);
+  const keys2 = createKeys(env.run, env.now);
   const ids = remoteIds();
   const thinking = thinkingStore();
   let memo;
@@ -7631,9 +7856,9 @@ function createStepper(env) {
     const { provider: p, model: m } = t;
     const owner = `${p.id}/${m.id}`;
     const approved = new Set(w.approved);
-    keys.prune(approved);
+    keys2.prune(approved);
     const codec = CODECS[m.kind];
-    let key = await keys.get(p, approved);
+    let key = await keys2.get(p, approved);
     if ("error" in key) return yield* refuse(key.error);
     const conversationKey = createHash3("sha256").update(`${req.session}:${req.who}`).digest("hex");
     let enc;
@@ -7656,10 +7881,10 @@ function createStepper(env) {
     const post2 = (k) => env.post({ url: joinUrl(p.baseUrl, enc.path), allowHttp: p.allowHttp, headers: { ...headers2, ...k === null ? {} : keyed(k) }, body: enc.body, stallS, totalS }, signal);
     let answer = await post2(key.key);
     for (let retried = false; "status" in answer && (answer.status === 401 || answer.status === 403); retried = true) {
-      keys.drop(p);
+      keys2.drop(p);
       if (retried || !key.cached) break;
       answer.cancel();
-      key = await keys.get(p, approved);
+      key = await keys2.get(p, approved);
       if ("error" in key) return yield* refuse(key.error);
       answer = await post2(key.key);
     }
@@ -7691,8 +7916,8 @@ function createStepper(env) {
     yield* close(end.events, end.finish, end.finish === "error" ? void 0 : asm.usage(), end.note === void 0 ? "" : ` note=${logJson(end.note)}`);
   }
   function status(w) {
-    keys.prune(new Set(w.approved));
-    return keys.status(configOf(w.configText));
+    keys2.prune(new Set(w.approved));
+    return keys2.status(configOf(w.configText));
   }
   return { step, status, config: configOf };
 }
@@ -7874,8 +8099,8 @@ function serve(lifetime) {
   let inFlight = 0;
   const server = createServer(async (request2, response) => {
     try {
-      const path5 = request2.url?.split("?")[0];
-      if (request2.method !== "POST" || path5 !== "/step" && path5 !== "/status") {
+      const path6 = request2.url?.split("?")[0];
+      if (request2.method !== "POST" || path6 !== "/step" && path6 !== "/status") {
         response.writeHead(404).end("not found");
         return;
       }
@@ -7893,7 +8118,7 @@ function serve(lifetime) {
         response.writeHead(401).end("unauthorized");
         return;
       }
-      if (path5 === "/status") {
+      if (path6 === "/status") {
         response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ pid: process.pid, inFlight, sockets: pool.size }));
         return;
       }
@@ -7962,7 +8187,7 @@ function serve(lifetime) {
     process.stderr.write("rice-multi-models: local helper could not listen\n");
     process.exit(2);
   });
-  withLocalSocketPath(socketPath, (path5) => server.listen(path5, () => {
+  withLocalSocketPath(socketPath, (path6) => server.listen(path6, () => {
     if (dir) chmodSync(socketPath, 384);
     setInterval(() => {
       pool.sweep();
@@ -7982,7 +8207,7 @@ async function client(socketPath, body, lifetime) {
   let connected = false;
   let outgoing;
   try {
-    outgoing = withLocalSocketPath(socketPath, (path5) => request({ socketPath: path5, path: "/step", method: "POST", headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) } }));
+    outgoing = withLocalSocketPath(socketPath, (path6) => request({ socketPath: path6, path: "/step", method: "POST", headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) } }));
   } catch {
     return CLIENT_UNAVAILABLE;
   }
@@ -8234,12 +8459,12 @@ async function opencodeEntries(file) {
   }
 }
 async function opencodeKey(tier, file) {
-  const keys = tier === "zen" ? ["opencode", "opencode-go"] : tier === "go" ? ["opencode-go", "opencode"] : void 0;
-  if (!keys) throw new Error("Usage: opencode-key zen|go <authFile>");
+  const keys2 = tier === "zen" ? ["opencode", "opencode-go"] : tier === "go" ? ["opencode-go", "opencode"] : void 0;
+  if (!keys2) throw new Error("Usage: opencode-key zen|go <authFile>");
   const auth2 = await authObject(file).catch(() => {
     throw new Error("OpenCode auth file is missing, malformed or unreadable; run opencode auth login");
   });
-  for (const name of keys) {
+  for (const name of keys2) {
     const entry = auth2[name];
     if (entry && typeof entry === "object" && !Array.isArray(entry) && typeof entry.key === "string") {
       const key = entry.key.trim();
@@ -8313,10 +8538,10 @@ async function installedVersion(executable, signal) {
       if (Buffer.byteLength(stdout) > 4096) throw new CatalogueFailure("cli-version-invalid");
       signal.throwIfAborted();
     }
-    const code = await running.exited;
+    const code2 = await running.exited;
     signal.throwIfAborted();
     const version = /^codex-cli (\d+\.\d+\.\d+)(?:[-+][a-zA-Z0-9.-]+)?\s*$/.exec(stdout)?.[1];
-    if (code !== 0 || !version) throw new CatalogueFailure("cli-version-invalid");
+    if (code2 !== 0 || !version) throw new CatalogueFailure("cli-version-invalid");
     return version;
   } finally {
     signal.removeEventListener("abort", stop);
@@ -8459,19 +8684,19 @@ async function payloadOf2(response, signal, budget, maxBytes = MAX_BYTES) {
     reader.releaseLock();
   }
 }
-function nextPage(payload, provider2, endpoint) {
+function nextPage(payload, provider2, endpoint2) {
   if (provider2.kind === "gemini") {
     const token = payload.nextPageToken;
     if (token === void 0 || token === "") return void 0;
     if (typeof token !== "string" || token.length > 4096) throw new CatalogueFailure2("pagination-invalid");
-    const next2 = new URL(endpoint);
+    const next2 = new URL(endpoint2);
     next2.searchParams.set("pageToken", token);
     return next2;
   }
   if (payload.has_more !== void 0 && typeof payload.has_more !== "boolean") throw new CatalogueFailure2("pagination-invalid");
   if (payload.has_more === true) {
     if (!validId(payload.last_id)) throw new CatalogueFailure2("pagination-invalid");
-    const next2 = new URL(endpoint);
+    const next2 = new URL(endpoint2);
     next2.searchParams.set(provider2.kind === "anthropic" ? "after_id" : "after", payload.last_id);
     return next2;
   }
@@ -8480,19 +8705,19 @@ function nextPage(payload, provider2, endpoint) {
   if (typeof link !== "string" || link.length > 4096) throw new CatalogueFailure2("pagination-invalid");
   let next;
   try {
-    next = new URL(link, endpoint);
+    next = new URL(link, endpoint2);
   } catch {
     throw new CatalogueFailure2("pagination-invalid");
   }
-  if (next.origin !== endpoint.origin || next.pathname !== endpoint.pathname || next.username || next.password || next.hash) throw new CatalogueFailure2("pagination-invalid");
+  if (next.origin !== endpoint2.origin || next.pathname !== endpoint2.pathname || next.username || next.password || next.hash) throw new CatalogueFailure2("pagination-invalid");
   return next;
 }
-async function inventory(provider2, endpoint, source, headers2, signal, fetcher) {
+async function inventory(provider2, endpoint2, source, headers2, signal, fetcher) {
   const models = [];
   const ids = /* @__PURE__ */ new Set();
   const pages = /* @__PURE__ */ new Set();
   const budget = { bytes: 0 };
-  let url = endpoint;
+  let url = endpoint2;
   for (let page = 0; url; page++) {
     signal.throwIfAborted();
     if (page >= MAX_PAGES || pages.has(url.href)) throw new CatalogueFailure2("pagination-limit");
@@ -8517,7 +8742,7 @@ async function inventory(provider2, endpoint, source, headers2, signal, fetcher)
       ids.add(id);
       models.push({ model: `${provider2.id}/${id}`, label: `${id} (${provider2.id})`, execution: "native provider", source, observedAt: 0, metadata: metadataOf2(entry, provider2.kind) });
     }
-    url = nextPage(payload, provider2, endpoint);
+    url = nextPage(payload, provider2, endpoint2);
   }
   signal.throwIfAborted();
   const observedAt = Date.now();
@@ -8598,7 +8823,7 @@ async function discoverProviders(wire, options = {}) {
   if (options.signal?.aborted) cancel();
   const signal = controller.signal;
   const approved = new Set(wire.approved);
-  const keys = createKeys((argv, requestedMs) => {
+  const keys2 = createKeys((argv, requestedMs) => {
     signal.throwIfAborted();
     return (options.run ?? runCommand)(argv, Math.max(1, Math.min(requestedMs, deadline - Date.now())));
   }, Date.now);
@@ -8613,14 +8838,14 @@ async function discoverProviders(wire, options = {}) {
   });
   try {
     const results = await Promise.all(Object.values(config.providers).map(async (provider2) => {
-      const endpoint = new URL(`${provider2.baseUrl}${provider2.kind === "anthropic" && !provider2.baseUrl.endsWith("/v1") ? "/v1/models" : "/models"}`);
+      const endpoint2 = new URL(`${provider2.baseUrl}${provider2.kind === "anthropic" && !provider2.baseUrl.endsWith("/v1") ? "/v1/models" : "/models"}`);
       const source = `${provider2.id} ${provider2.kind} live /models endpoint`;
       if (!approved.has(fingerprint(provider2))) return { models: [], providers: [{ provider: provider2.id, status: "approval-required", source }] };
       if (provider2.kind === "bedrock") return { models: [], providers: [{ provider: provider2.id, status: "unavailable", source: "bedrock configured provider", error: "enumeration-unsupported" }] };
       try {
         const discover2 = async () => {
           signal.throwIfAborted();
-          const key = await keys.get(provider2, approved);
+          const key = await keys2.get(provider2, approved);
           signal.throwIfAborted();
           if ("error" in key) throw new CatalogueFailure2("auth-unavailable");
           const headers2 = new Headers(provider2.headers);
@@ -8631,7 +8856,7 @@ async function discoverProviders(wire, options = {}) {
             const auth2 = authHeaderOf(provider2, provider2);
             headers2.set(auth2 === "bearer" ? "authorization" : auth2, auth2 === "bearer" ? `Bearer ${key.key}` : key.key);
           }
-          return inventory(provider2, endpoint, source, headers2, signal, options.fetch ?? fetch);
+          return inventory(provider2, endpoint2, source, headers2, signal, options.fetch ?? fetch);
         };
         return await Promise.race([discover2(), aborted]);
       } catch (error) {
@@ -8679,9 +8904,9 @@ async function workerCatalogue(provider2, executable, signal) {
       if (Buffer.byteLength(text2) > 1024 * 1024) return unavailable("protocol-too-large");
       signal.throwIfAborted();
     }
-    const code = await running.exited;
+    const code2 = await running.exited;
     signal.throwIfAborted();
-    if (code !== 0) return unavailable(`cli-exit-${code}`);
+    if (code2 !== 0) return unavailable(`cli-exit-${code2}`);
     const ids = workerModelIds(provider2, text2);
     if (!ids) return unavailable("model-list-unavailable");
     const observedAt = Date.now();
@@ -8706,6 +8931,174 @@ async function discover(wire, lifetime) {
   for (const provider2 of ["agy", "grok"]) if (!config?.providers[provider2]) tasks.push(workerCatalogue(provider2, info.clis[provider2], signal));
   const results = await Promise.all(tasks);
   return { models: results.flatMap((result) => result.models), providers: results.flatMap((result) => result.providers) };
+}
+
+// helper/search-config.ts
+import { lstat, mkdir as mkdir3, open, rename as rename2, rm as rm2 } from "node:fs/promises";
+import { constants as constants2 } from "node:fs";
+import path5 from "node:path";
+import { randomUUID as randomUUID3 } from "node:crypto";
+
+// hooks/search-config.ts
+var SEARCH_KINDS = ["searxng", "brave", "tavily"];
+var MAX_SEARCH_CONFIG_BYTES = 64 * 1024;
+var NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$/;
+var ENV = /^[A-Za-z_][A-Za-z0-9_]*$/;
+var absoluteCommand = (value) => value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value) || /^\\\\[^\\]+\\[^\\]+/.test(value);
+var object3 = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+var keys = (value, allowed) => Object.keys(value).every((key) => allowed.includes(key));
+var emptySearchConfig = () => ({ version: 1, endpoints: [] });
+var searchPriority = (value) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+function endpoint(value) {
+  if (!object3(value) || !keys(value, ["name", "kind", "url", "priority", "auth"]) || typeof value.name !== "string" || !NAME.test(value.name) || !SEARCH_KINDS.includes(value.kind) || typeof value.url !== "string" || !searchPriority(value.priority)) return void 0;
+  try {
+    const url = new URL(value.url);
+    if (!/^https?:\/\//i.test(value.url) || !["http:", "https:"].includes(url.protocol) || !url.hostname || url.username || url.password || /[\\?#]/.test(value.url) || value.url.trim() !== value.url || /[\0\r\n]/.test(value.url)) return void 0;
+  } catch {
+    return void 0;
+  }
+  let auth2;
+  if (value.auth !== void 0) {
+    if (!object3(value.auth)) return void 0;
+    if (keys(value.auth, ["env"]) && typeof value.auth.env === "string" && ENV.test(value.auth.env)) auth2 = { env: value.auth.env };
+    else if (keys(value.auth, ["command"]) && Array.isArray(value.auth.command) && value.auth.command.length > 0 && value.auth.command.every((word) => typeof word === "string" && word.length > 0 && !/[\0\r\n]/.test(word)) && typeof value.auth.command[0] === "string" && absoluteCommand(value.auth.command[0])) auth2 = { command: [...value.auth.command] };
+    else return void 0;
+  }
+  return { name: value.name, kind: value.kind, url: value.url, priority: value.priority, ...auth2 ? { auth: auth2 } : {} };
+}
+function parseSearchConfig(text2) {
+  if (text2 === void 0) return { config: emptySearchConfig(), errors: [] };
+  const errors = [];
+  if (new TextEncoder().encode(text2).byteLength > MAX_SEARCH_CONFIG_BYTES) return { config: emptySearchConfig(), errors: ["Search configuration exceeds its size limit."] };
+  let value;
+  try {
+    value = JSON.parse(text2);
+  } catch {
+    return { config: emptySearchConfig(), errors: ["Search configuration is not valid JSON."] };
+  }
+  if (!object3(value) || !keys(value, ["version", "endpoints"]) || value.version !== 1 || !Array.isArray(value.endpoints)) return { config: emptySearchConfig(), errors: ["Search configuration must contain version 1 and an endpoints array, with no secret fields."] };
+  const endpoints = [], names = /* @__PURE__ */ new Set();
+  for (const [index, raw] of value.endpoints.entries()) {
+    const row = endpoint(raw);
+    if (!row) errors.push(`Search endpoint ${index + 1} is invalid. Use a name, supported kind, full HTTP(S) URL without credentials or query parameters, nonnegative integer priority, and an optional credential reference.`);
+    else if (names.has(row.name)) errors.push(`Search endpoint ${index + 1} repeats a saved name.`);
+    else {
+      names.add(row.name);
+      endpoints.push(row);
+    }
+  }
+  return { config: errors.length ? emptySearchConfig() : { version: 1, endpoints }, errors };
+}
+function editSearchConfig(config, edit) {
+  const checked = parseSearchConfig(JSON.stringify(config));
+  if (checked.errors.length) return checked;
+  const endpoints = checked.config.endpoints;
+  if (edit.op === "add") {
+    const row = endpoint(edit.endpoint);
+    if (!row) return { config, errors: ["The new search endpoint is invalid."] };
+    if (endpoints.some((saved) => saved.name === row.name)) return { config, errors: ["That search endpoint name is already saved."] };
+    return { config: { version: 1, endpoints: [...endpoints, row] }, errors: [] };
+  }
+  const index = endpoints.findIndex((row) => row.name === edit.name);
+  if (index < 0) return { config, errors: ["That search endpoint name is not saved."] };
+  if (edit.op === "remove") return { config: { version: 1, endpoints: endpoints.filter((_, position) => position !== index) }, errors: [] };
+  if (!searchPriority(edit.priority)) return { config, errors: ["Search priority must be a nonnegative safe integer."] };
+  return { config: { version: 1, endpoints: endpoints.map((row, position) => position === index ? { ...row, priority: edit.priority } : row) }, errors: [] };
+}
+function parseSearchEdit(value) {
+  if (!object3(value)) return void 0;
+  if (value.op === "add" && keys(value, ["op", "endpoint"])) {
+    const row = endpoint(value.endpoint);
+    return row ? { op: "add", endpoint: row } : void 0;
+  }
+  if (typeof value.name !== "string" || !NAME.test(value.name)) return void 0;
+  if (value.op === "remove" && keys(value, ["op", "name"])) return { op: "remove", name: value.name };
+  if (value.op === "priority" && keys(value, ["op", "name", "priority"]) && searchPriority(value.priority)) return { op: "priority", name: value.name, priority: value.priority };
+  return void 0;
+}
+
+// helper/search-config.ts
+var object4 = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+var code = (error) => object4(error) && typeof error.code === "string" ? error.code : void 0;
+async function read(file) {
+  try {
+    const before = await lstat(file, { bigint: true });
+    if (!before.isFile() || before.isSymbolicLink() || before.size > BigInt(MAX_SEARCH_CONFIG_BYTES)) throw new Error("unsafe-file");
+    const handle = await open(file, constants2.O_RDONLY | (constants2.O_NOFOLLOW ?? 0));
+    try {
+      const opened = await handle.stat({ bigint: true });
+      if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino || opened.size > BigInt(MAX_SEARCH_CONFIG_BYTES)) throw new Error("changed-file");
+      const bytes = Buffer.alloc(MAX_SEARCH_CONFIG_BYTES + 1);
+      let length = 0;
+      while (length < bytes.length) {
+        const result = await handle.read(bytes, length, bytes.length - length, length);
+        if (result.bytesRead === 0) break;
+        length += result.bytesRead;
+      }
+      if (length > MAX_SEARCH_CONFIG_BYTES) throw new Error("large-file");
+      const checked = parseSearchConfig(bytes.subarray(0, length).toString("utf8"));
+      return { ok: checked.errors.length === 0, ...checked };
+    } finally {
+      await handle.close();
+    }
+  } catch (error) {
+    if (code(error) === "ENOENT") return { ok: true, ...parseSearchConfig(void 0) };
+    return { ok: false, error: "search.json is not a readable regular file within the 64 KiB limit; nothing was overwritten." };
+  }
+}
+async function atomicWrite2(file, config) {
+  const temporary = `${file}.${randomUUID3()}.tmp`;
+  let owned = false;
+  try {
+    const handle = await open(temporary, "wx", 384);
+    owned = true;
+    try {
+      await handle.writeFile(`${JSON.stringify(config, null, 2)}
+`);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename2(temporary, file);
+  } finally {
+    if (owned) await rm2(temporary, { force: true }).catch(() => {
+    });
+  }
+}
+async function searchConfiguration(input) {
+  if (!object4(input) || Object.keys(input).some((key) => !["configDir", "edit"].includes(key)) || typeof input.configDir !== "string" || !path5.isAbsolute(input.configDir) || /[\0\r\n]/.test(input.configDir) || process.platform === "win32" && !/^(?:[A-Za-z]:[\\/]|\\\\[^\\]+\\[^\\]+)/.test(input.configDir)) return { ok: false, error: "Search configuration requires an absolute configDir and a valid edit." };
+  const edit = input.edit === void 0 ? void 0 : parseSearchEdit(input.edit);
+  if (input.edit !== void 0 && !edit) return { ok: false, error: "Invalid search edit. Use only endpoint details and credential references, with no key values." };
+  const directory = path5.join(input.configDir, "rice-multi-models"), file = path5.join(directory, "search.json");
+  if (!edit) return read(file);
+  const lock = path5.join(directory, ".search-config.lock");
+  let locked = false;
+  try {
+    await mkdir3(directory, { recursive: true });
+    const deadline = Date.now() + 3e3;
+    while (!locked) {
+      try {
+        await mkdir3(lock);
+        locked = true;
+      } catch (error) {
+        if (code(error) !== "EEXIST") throw error;
+        if (Date.now() >= deadline) return { ok: false, error: "Another search configuration edit is running. Retry after it finishes; if no session is editing, remove the stale rice-multi-models/.search-config.lock directory." };
+        await new Promise((resolve2) => setTimeout(resolve2, 25));
+      }
+    }
+    const current = await read(file);
+    if (!current.ok || !current.config) return current;
+    const next = editSearchConfig(current.config, edit);
+    if (next.errors.length) return { ok: false, ...next };
+    const changed = JSON.stringify(current.config) !== JSON.stringify(next.config);
+    if (changed) await atomicWrite2(file, next.config);
+    return { ok: true, changed, config: next.config };
+  } catch {
+    return { ok: false, error: "The search configuration could not be saved; no other configuration was changed." };
+  } finally {
+    if (locked) await rm2(lock, { recursive: true }).catch(() => {
+    });
+  }
 }
 
 // helper/main.ts
@@ -8779,6 +9172,11 @@ async function main(lifetime) {
     if (!result.ok) process.exitCode = 1;
   } else if (mode === "sync-picker") {
     const result = await syncPicker(JSON.parse(await readStdin()));
+    process.stdout.write(`${JSON.stringify(result)}
+`);
+    if (!result.ok) process.exitCode = 1;
+  } else if (mode === "search-config") {
+    const result = await searchConfiguration(JSON.parse(await readStdin()));
     process.stdout.write(`${JSON.stringify(result)}
 `);
     if (!result.ok) process.exitCode = 1;

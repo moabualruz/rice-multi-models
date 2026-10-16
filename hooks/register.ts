@@ -36,6 +36,8 @@ import type { Described } from './tools'
 import { handbackState, withTask } from './transcript'
 import { commandText, detectRuntime as probeRuntime, helperFile, setupSummary, startupNotice as publishNotice, syncPicker as synchronizePicker } from './setup'
 import type { PickerResult, Runtime } from './setup'
+import { searchConfigurationCommand } from './search-config'
+import type { SearchConfigurationResult, SearchEdit } from './search-config'
 
 const PLUGIN = 'rice-multi-models'
 /** Who the requests to declared providers say they come from (OpenCode Go asks each client to name itself). */
@@ -751,7 +753,7 @@ async function setupCommand($: EngineInterface, action: string | undefined, nati
     try {
       const result = await $.process.run([runtime.executable!, `${$.plugin.root}/dist/launch.mjs`, '--install', ...(nativeExecutable ? [nativeExecutable] : [])], { timeoutMs: 25_000 })
       return result.exitCode === 0 ? result.stdout.trim() : 'Native launcher setup could not verify or save its chosen Claude executable. Use /rice-models setup native <absolute path to a qualified Claude executable> (supported: 2.1.299). An unrelated rice-claude file is never replaced.'
-    } catch { return 'Native launcher installation did not complete; Node 22+, macOS or Linux, and the current plugin payload are required.' }
+    } catch { return 'Native launcher installation did not complete; Node 22+, macOS, Linux or native Windows, and the current plugin payload are required.' }
   }
   if (action === 'codex') {
     try {
@@ -775,7 +777,7 @@ async function setupCommand($: EngineInterface, action: string | undefined, nati
 async function doctorCommand($: EngineInterface): Promise<string> {
   const checked = await detectRuntime($)
   return JSON.stringify({ runtime: checked.info || { node: { executable: checked.executable, version: checked.version } }, error: checked.error || null,
-    nativeAdapter: { active: await nativeActive($), supportedClaude: ['2.1.299'], searchConfigured: !!await $.env.get('RICE_MULTI_MODELS_SEARCH_URL'), start: 'rice-claude', setup: '/rice-models setup native' },
+    nativeAdapter: { active: await nativeActive($), supportedClaude: ['2.1.299'], search: await searchCommand($, ''), legacySearchConfigured: !!await $.env.get('RICE_MULTI_MODELS_SEARCH_URL'), start: 'rice-claude', setup: '/rice-models setup native' },
     actions: checked.error ? ['/rice-models setup repair'] : ['/rice-models setup repair', ...(!await nativeActive($) ? ['/rice-models setup native', 'start a new session with rice-claude'] : []), ...(!checked.info?.auth.codex ? ['codex login', ...(!checked.info?.clis.codex ? ['/rice-models setup codex'] : [])] : [])] }, null, 2)
 }
 
@@ -824,8 +826,23 @@ async function opencodeCommand($: EngineInterface, words: readonly string[]): Pr
   return `${lines.join('\n')}\n\nWrote ${built.map(b => TIERS[b.tier].id).join(' and ')} into ${path}; other providers were kept. The first request asks to approve each one (or /rice-models approve <id>). /rice-models picker write lists the models in /model.`
 }
 
+async function searchCommand($: EngineInterface, args: string): Promise<string> {
+  const checked = await detectRuntime($)
+  if (checked.error || !checked.executable) return setupSummary(checked)
+  const configDir = (await $.env.get('CLAUDE_CONFIG_DIR')) || `${checked.info?.home || (await $.env.get('USERPROFILE')) || (await $.env.get('HOME')) || ''}/.claude`
+  const configuration = async (edit?: SearchEdit): Promise<SearchConfigurationResult> => {
+    try {
+      const result = await $.process.run([checked.executable!, helperFile($.plugin.root), 'search-config'], { stdin: JSON.stringify({ configDir, ...(edit ? { edit } : {}) }), timeoutMs: 10_000 })
+      const parsed: SearchConfigurationResult = JSON.parse(result.stdout)
+      return typeof parsed.ok === 'boolean' ? parsed : { ok: false, error: 'Search configuration helper returned an invalid result.' }
+    } catch { return { ok: false, error: 'Search configuration helper did not complete. Check /rice-models doctor.' } }
+  }
+  return searchConfigurationCommand(args, { read: () => configuration(), edit: edit => configuration(edit), ask: (question, options) => $.ui.ask(question, options) })
+}
+
 async function runCommand($: EngineInterface, args: string): Promise<string> {
   const [first, value] = args.trim().split(/\s+/)
+  if (first === 'search') return searchCommand($, args.trim().replace(/^search(?:\s+|$)/, ''))
   if (first === 'setup') {
     // The rest is one literal executable path, including spaces. It is never a
     // shell command; optional matching quotes only delimit the pasted path.
@@ -888,7 +905,7 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
     return `Routed requests use ${value === 'auto' ? 'a WebSocket, falling back to server-sent events' : value === 'ws' ? 'a WebSocket only' : 'server-sent events only'}.`
   }
 
-  return 'Usage: /rice-models [setup [repair|codex|native] | doctor | status | models | picker [write] | providers | approve <provider> | refresh | reload | opencode [zen|go] [write] | effort <level> | transport auto|ws|sse | helper session|once | workers read|write]'
+  return 'Usage: /rice-models [setup [repair|codex|native] | search [setup|add|remove|priority] | doctor | status | models | picker [write] | providers | approve <provider> | refresh | reload | opencode [zen|go] [write] | effort <level> | transport auto|ws|sse | helper session|once | workers read|write]'
 }
 
 export const register: Register = on => {
@@ -898,7 +915,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'rice-models',
       description: 'Native model setup, repair, read-only doctor, candidates, approvals and preferences',
-      argumentHint: '[setup [repair|codex|native] | doctor | status | models | picker [write] | providers | approve <provider> | refresh | reload | opencode [zen|go] [write] | effort <level> | transport auto|ws|sse | helper session|once | workers read|write]',
+      argumentHint: '[setup [repair|codex|native] | search [setup|add|remove|priority] | doctor | status | models | picker [write] | providers | approve <provider> | refresh | reload | opencode [zen|go] [write] | effort <level> | transport auto|ws|sse | helper session|once | workers read|write]',
     })
     runtime = await detectRuntime($)
     codexDefaults = await readCodexDefaults($)

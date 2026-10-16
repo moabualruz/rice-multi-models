@@ -447,9 +447,9 @@ var require_permessage_deflate = __commonJS({
        * @private
        */
       _decompress(data, fin, callback) {
-        const endpoint = this._isServer ? "client" : "server";
+        const endpoint2 = this._isServer ? "client" : "server";
         if (!this._inflate) {
-          const key2 = `${endpoint}_max_window_bits`;
+          const key2 = `${endpoint2}_max_window_bits`;
           const windowBits = typeof this.params[key2] !== "number" ? zlib.Z_DEFAULT_WINDOWBITS : this.params[key2];
           this._inflate = zlib.createInflateRaw({
             ...this._options.zlibInflateOptions,
@@ -482,7 +482,7 @@ var require_permessage_deflate = __commonJS({
           } else {
             this._inflate[kTotalLength] = 0;
             this._inflate[kBuffers] = [];
-            if (fin && this.params[`${endpoint}_no_context_takeover`]) {
+            if (fin && this.params[`${endpoint2}_no_context_takeover`]) {
               this._inflate.reset();
             }
           }
@@ -498,9 +498,9 @@ var require_permessage_deflate = __commonJS({
        * @private
        */
       _compress(data, fin, callback) {
-        const endpoint = this._isServer ? "server" : "client";
+        const endpoint2 = this._isServer ? "server" : "client";
         if (!this._deflate) {
-          const key2 = `${endpoint}_max_window_bits`;
+          const key2 = `${endpoint2}_max_window_bits`;
           const windowBits = typeof this.params[key2] !== "number" ? zlib.Z_DEFAULT_WINDOWBITS : this.params[key2];
           this._deflate = zlib.createDeflateRaw({
             ...this._options.zlibDeflateOptions,
@@ -526,7 +526,7 @@ var require_permessage_deflate = __commonJS({
           this._deflate[kCallback] = null;
           this._deflate[kTotalLength] = 0;
           this._deflate[kBuffers] = [];
-          if (fin && this.params[`${endpoint}_no_context_takeover`]) {
+          if (fin && this.params[`${endpoint2}_no_context_takeover`]) {
             this._deflate.reset();
           }
           callback(null, data2);
@@ -3730,12 +3730,24 @@ var number = (value) => Number.isSafeInteger(value) && Number(value) >= 0;
 var text = (value) => typeof value === "string" && value.length > 0 && value.length < 4096;
 var UNOWNED = Object.freeze({ unowned: true });
 var MAX_FRAMES = 4096;
+function searchInput(value) {
+  if (!record(value) || value.tool !== "WebSearch") return void 0;
+  const input = record(value.input) ? value.input : value;
+  if (typeof input.query !== "string" || !input.query.trim() || input.query.length > 2048) return void 0;
+  return {
+    query: input.query,
+    ...Array.isArray(input.allowed_domains) && input.allowed_domains.every((domain) => typeof domain === "string") ? { allowed_domains: input.allowed_domains } : {},
+    ...Array.isArray(input.blocked_domains) && input.blocked_domains.every((domain) => typeof domain === "string") ? { blocked_domains: input.blocked_domains } : {}
+  };
+}
 var NativeOwnership = class {
   context = new AsyncLocalStorage();
   workers = /* @__PURE__ */ new WeakMap();
   ports = /* @__PURE__ */ new WeakMap();
   pairs = /* @__PURE__ */ new WeakMap();
   models = /* @__PURE__ */ new Map();
+  // Queries stay in process memory and never enter routing metadata or trace frames.
+  searches = /* @__PURE__ */ new WeakMap();
   primary;
   session;
   constructor(initialModel) {
@@ -3765,6 +3777,15 @@ var NativeOwnership = class {
     this.pairs.set(first, second);
     this.pairs.set(second, first);
   }
+  search(owner) {
+    return owner ? this.searches.get(owner) : void 0;
+  }
+  withSearch(owner, input) {
+    if (!input) return owner;
+    const scoped = Object.freeze({ ...owner });
+    this.searches.set(scoped, input);
+    return scoped;
+  }
   owner(event, payload) {
     const inherited = this.context.getStore();
     const loop = ["turn.step", "turn.start", "turn.complete", "session.compact"].includes(event);
@@ -3775,7 +3796,8 @@ var NativeOwnership = class {
     }
     const selected = event === "turn.step" && !id && text(payload.model) && !nativeAlias(payload.model) ? payload.model : this.primary;
     const model2 = id ? this.models.get(id) ?? (inherited?.agentId === id ? inherited.model : void 0) : loop ? selected : inherited?.model ?? (inherited?.unowned ? void 0 : this.primary);
-    return Object.freeze({ ...model2 ? { model: model2 } : {}, ...id ? { agentId: id } : {}, ...this.session ? { sessionId: this.session } : {}, ...!model2 ? { unowned: true } : {} });
+    const owner = Object.freeze({ ...model2 ? { model: model2 } : {}, ...id ? { agentId: id } : {}, ...this.session ? { sessionId: this.session } : {}, ...!model2 ? { unowned: true } : {} });
+    return this.withSearch(owner, event === "tool.call" ? searchInput(payload) ?? this.search(inherited) : loop ? void 0 : this.search(inherited));
   }
   outgoing(worker, value) {
     if (!record(value)) return value;
@@ -3826,7 +3848,8 @@ var NativeOwnership = class {
     const state = this.worker(binding.worker);
     const frame = number(operation.dispatchId) ? state.frames.get(operation.dispatchId) : number(operation.serving) ? state.calls.get(operation.serving) : void 0;
     const selected = frame && frame.environments.has(binding.environment) ? frame.owner : UNOWNED;
-    const owner = operation.op === "model.fork" && !selected.unowned ? Object.freeze({ ...selected, purpose: "fork" }) : selected;
+    let owner = operation.op === "model.fork" && !selected.unowned ? Object.freeze({ ...selected, purpose: "fork" }) : selected;
+    owner = this.withSearch(owner, operation.op === "tool.call" ? searchInput(operation.args) ?? this.search(selected) : this.search(selected));
     if (binding.operations.size >= MAX_FRAMES) return UNOWNED;
     binding.operations.set(value.opId, { owner, stream: value.type === "op_pull" });
     return owner;
@@ -4013,7 +4036,7 @@ var HOST_RE = /^(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+$/;
 var RESERVED_ALIASES = /* @__PURE__ */ new Set(["fable", "opus", "sonnet", "haiku", "default", "inherit", "native"]);
 var PROVIDER_KEYS = ["kind", "baseUrl", "allowHttp", "auth", "authHeader", "headers", "params", "timeoutMs", "maxTools", "models", "sessionHeader"];
 var REQUEST_KEYS = ["params", "effort", "cache", "headers"];
-var MODEL_KEYS = ["kind", "contextWindow", "maxInputTokens", "maxOutputTokens", "tools", "vision", ...REQUEST_KEYS];
+var MODEL_KEYS = ["kind", "contextWindow", "maxInputTokens", "maxOutputTokens", "tools", "vision", "webSearch", ...REQUEST_KEYS];
 var KIND_NAMES = '"openai", "responses", "anthropic", "gemini" or "bedrock"';
 var KEY_TTL_S = 300;
 var MAX_TIMEOUT_MS = 2 ** 31 - 1;
@@ -4021,8 +4044,8 @@ var isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 var own = (map, key2) => Object.hasOwn(map, key2) ? map[key2] : void 0;
 var isCount = (v) => typeof v === "number" && Number.isInteger(v) && v > 0;
 var isKind = (v) => typeof v === "string" && Object.hasOwn(KINDS, v);
-function allowKeys(obj2, keys, path3, errors) {
-  for (const k of Object.keys(obj2)) if (!keys.includes(k)) errors.push(`${path3}.${k}: unknown key`);
+function allowKeys(obj2, keys3, path3, errors) {
+  for (const k of Object.keys(obj2)) if (!keys3.includes(k)) errors.push(`${path3}.${k}: unknown key`);
 }
 function params(v, kinds, path3, errors) {
   if (v === void 0) return {};
@@ -4122,6 +4145,7 @@ function model(id, providerKind, v, path3, errors) {
   allowKeys(v, [...MODEL_KEYS, ...spec.modelKeys], path3, errors);
   const mine = (k) => spec.modelKeys.includes(k) ? v[k] : void 0;
   const { contextWindow, maxInputTokens, maxOutputTokens } = v;
+  if (v.webSearch !== void 0 && !["auto", "native", "off"].includes(String(v.webSearch))) errors.push(`${path3}.webSearch: must be auto, native or off`);
   const maxTokensParam = mine("maxTokensParam");
   const systemRole = mine("systemRole");
   if (contextWindow !== void 0 && !isCount(contextWindow)) errors.push(`${path3}.contextWindow: must be a positive integer`);
@@ -4146,6 +4170,7 @@ function model(id, providerKind, v, path3, errors) {
     tools: toolsOf(v["tools"], `${path3}.tools`, errors),
     parallelToolCalls: bool(mine("parallelToolCalls"), true, `${path3}.parallelToolCalls`, errors),
     vision: bool(v["vision"], true, `${path3}.vision`, errors),
+    ...["auto", "native", "off"].includes(String(v.webSearch)) ? { webSearch: v.webSearch } : {},
     ...requests(v, kind, path3, errors, isCount(maxOutputTokens) ? maxOutputTokens : Infinity)
   };
   const budget = inputBudget(out);
@@ -4820,6 +4845,67 @@ function buildResults(requested, mode, content, provider2) {
   return [{ type: "dangerous_tool_use", status: { type: "available", tool_uses } }];
 }
 
+// helper/core/search.ts
+function searchSource(value) {
+  if (!isRecord(value) || typeof value.url !== "string") return void 0;
+  try {
+    const url = new URL(value.url);
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) return void 0;
+    return {
+      title: typeof value.title === "string" && value.title ? value.title.slice(0, 512) : url.hostname,
+      url: url.href,
+      ...typeof value.content === "string" ? { content: value.content.slice(0, 4e3) } : {}
+    };
+  } catch {
+    return void 0;
+  }
+}
+function uniqueSearchSources(values) {
+  const rows = /* @__PURE__ */ new Map();
+  for (const value of values) {
+    const source = searchSource(value);
+    if (!source) continue;
+    const previous = rows.get(source.url);
+    if (previous) rows.set(source.url, { ...previous, ...isRecord(value) && typeof value.title === "string" && value.title ? { title: source.title } : {}, ...source.content ? { content: source.content } : {} });
+    else if (rows.size < 100) rows.set(source.url, source);
+  }
+  return [...rows.values()];
+}
+function responsesSearchEvidence(items) {
+  const sources = [];
+  let searched = false;
+  for (const item of items) {
+    if (!isRecord(item)) continue;
+    if (item.type === "web_search_call") {
+      if (item.status !== "completed" || item.error !== void 0) return { sources: [], searched: false, error: "Provider web search did not complete successfully" };
+      searched = true;
+      if (isRecord(item.action) && item.action.sources !== void 0) {
+        if (!Array.isArray(item.action.sources)) return { sources: [], searched: false, error: "Provider web search sources are malformed" };
+        sources.push(...item.action.sources);
+      }
+    } else if (item.type === "message" && Array.isArray(item.content)) {
+      for (const part2 of item.content) if (isRecord(part2) && part2.type === "output_text" && Array.isArray(part2.annotations)) {
+        sources.push(...part2.annotations.filter((annotation) => isRecord(annotation) && annotation.type === "url_citation"));
+      }
+    }
+  }
+  return { sources: searched ? uniqueSearchSources(sources) : [], searched };
+}
+function responsesSearchAccounting(terminal, streamed) {
+  if (!Array.isArray(terminal) || terminal.some((item) => !isRecord(item) || typeof item.type !== "string")) return { complete: false };
+  const calls = /* @__PURE__ */ new Set();
+  for (const item of terminal) {
+    if (item.type !== "web_search_call") continue;
+    if (typeof item.id !== "string" || !item.id.trim() || item.status !== "completed" || calls.has(item.id)) return { complete: false };
+    calls.add(item.id);
+  }
+  for (const item of streamed) {
+    if (!isRecord(item) || item.type !== "web_search_call") continue;
+    if (typeof item.id !== "string" || !item.id.trim() || item.status !== "completed" || !calls.has(item.id)) return { complete: false };
+  }
+  return { calls: calls.size, complete: true };
+}
+
 // helper/core/responses.ts
 var OPENAI_SIGNATURE_PREFIX = "multi-openai:";
 var EFFORTS2 = ["low", "medium", "high", "xhigh", "max"];
@@ -4832,9 +4918,12 @@ function isOutputItem(value, done) {
       (key2) => value[key2] === void 0 ? !done : typeof value[key2] === "string"
     );
   }
+  if (value.type === "web_search_call") {
+    return (value.status === void 0 ? !done : typeof value.status === "string") && (value.action === void 0 || isRecord(value.action));
+  }
   if (value.type === "message") {
     return value.content === void 0 || Array.isArray(value.content) && value.content.every(
-      (part2) => isRecord(part2) && (part2.type === "output_text" ? typeof part2.text === "string" : part2.type === "refusal" && typeof part2.refusal === "string")
+      (part2) => isRecord(part2) && (part2.annotations === void 0 || Array.isArray(part2.annotations)) && (part2.type === "output_text" ? typeof part2.text === "string" : part2.type === "refusal" && typeof part2.refusal === "string")
     );
   }
   if (value.type === "reasoning") {
@@ -4886,6 +4975,9 @@ function isStreamEvent(value) {
     case "response.function_call_arguments.delta":
     case "response.reasoning_summary_text.delta":
       valid = indexed && typeof value.delta === "string";
+      break;
+    case "response.output_text.annotation.added":
+      valid = indexed && isRecord(value.annotation);
       break;
     case "response.failed":
     case "error":
@@ -5138,16 +5230,21 @@ function finalOutputItem(previous, item) {
   if (previous.type === "reasoning" && item.type === "reasoning") {
     return { ...previous, ...item };
   }
+  if (previous.type === "web_search_call" && item.type === "web_search_call") {
+    return { ...previous, ...item, ...previous.action || item.action ? { action: { ...previous.action, ...item.action } } : {} };
+  }
   return { ...item, id: item.id ?? previous.id };
 }
 function outputValue(item) {
   switch (item.type) {
     case "message":
-      return item.content;
+      return item.content?.map((part2) => [part2.type, part2.text, part2.refusal]);
     case "function_call":
       return [item.call_id, item.name, item.arguments];
     case "reasoning":
       return [item.summary ?? []];
+    case "web_search_call":
+      return [item.status, item.action && Object.fromEntries(Object.entries(item.action).filter(([key2]) => key2 !== "sources")), item.error];
   }
 }
 var ResponseStream = class {
@@ -5162,6 +5259,10 @@ var ResponseStream = class {
   model;
   emit;
   options;
+  terminalOutput;
+  searchEvidence() {
+    return responsesSearchEvidence([...this.slots.values()].flatMap((slot) => [slot.item, ...slot.annotations.length ? [{ type: "message", content: [{ type: "output_text", annotations: slot.annotations }] }] : []]));
+  }
   constructor(model2, emit, options) {
     this.model = model2;
     this.emit = emit;
@@ -5229,6 +5330,9 @@ var ResponseStream = class {
     if (!message) {
       throw new Error("OpenAI stream omitted response.created");
     }
+    const evidence = this.searchEvidence();
+    if (evidence.error) throw new Error(evidence.error);
+    this.options.onSearchSources?.({ sources: evidence.sources, searched: evidence.searched, ...responsesSearchAccounting(this.terminalOutput, [...this.slots.values()].map((slot) => slot.item)) });
     const cached = usage2?.input_tokens_details?.cached_tokens ?? 0;
     const written = usage2?.input_tokens_details?.cache_write_tokens ?? 0;
     message.usage = {
@@ -5264,6 +5368,7 @@ var ResponseStream = class {
     this.completed = true;
   }
   complete(event) {
+    this.terminalOutput = event.response.output;
     if (this.stopPending) {
       this.start(event.response);
       this.finish("stop_sequence", event.response.usage);
@@ -5283,7 +5388,7 @@ var ResponseStream = class {
       this.finish("stop_sequence", event.response.usage);
       return;
     }
-    if (!this.content.length || this.cursor !== this.slots.size) {
+    if (!this.content.length && !this.searchEvidence().searched || this.cursor !== this.slots.size) {
       throw new Error("OpenAI completed with missing output");
     }
     let stopReason = this.content.some((block) => block.type === "tool_use") ? "tool_use" : "end_turn";
@@ -5321,7 +5426,7 @@ var ResponseStream = class {
     if (this.slots.has(index)) {
       throw new Error("Duplicate OpenAI output item");
     }
-    const slot = { item, text: "", arguments: "", done: false, emitted: 0 };
+    const slot = { item, text: "", arguments: "", done: false, emitted: 0, annotations: [] };
     this.slots.set(index, slot);
     return slot;
   }
@@ -5336,6 +5441,11 @@ var ResponseStream = class {
       return;
     }
     const slot = this.slots.get(event.output_index);
+    if (event.type === "response.output_text.annotation.added") {
+      if (!slot || slot.item.type !== "message") throw new Error("Search citation without a message output item");
+      slot.annotations.push(event.annotation);
+      return;
+    }
     if (!slot || slot.done) {
       throw new Error("OpenAI event without an active output item");
     }
@@ -5354,10 +5464,12 @@ var ResponseStream = class {
   }
   finishItem(slot, item) {
     const final = finalOutputItem(slot.item, item);
+    if (final.type === "message") for (const part2 of final.content ?? []) slot.annotations.push(...part2.annotations ?? []);
     if (slot.done) {
       if (!isDeepStrictEqual(outputValue(slot.item), outputValue(final))) {
         throw new Error("OpenAI terminal output changed a completed item");
       }
+      slot.item = final;
       return;
     }
     if (final.type === "message") {
@@ -5371,7 +5483,7 @@ var ResponseStream = class {
         throw new Error("OpenAI function arguments changed after streaming");
       }
       slot.arguments = final.arguments;
-    } else if (!slot.text && Array.isArray(final.summary)) {
+    } else if (final.type === "reasoning" && !slot.text && Array.isArray(final.summary)) {
       slot.text = final.summary.map((part2) => part2.text).join("\n");
     }
     slot.item = final;
@@ -5379,6 +5491,7 @@ var ResponseStream = class {
   }
   createBlock(slot) {
     const item = slot.item;
+    if (item.type === "web_search_call") throw new Error("Hosted search is not a function call");
     if (item.type === "reasoning") {
       return { type: "thinking", thinking: "", signature: "" };
     }
@@ -5487,6 +5600,13 @@ var ResponseStream = class {
       const slot = this.slots.get(this.cursor);
       if (!slot) {
         return;
+      }
+      if (slot.item.type === "web_search_call") {
+        if (!slot.done) return;
+        const evidence = responsesSearchEvidence([slot.item]);
+        if (evidence.error) throw new Error(evidence.error);
+        this.cursor++;
+        continue;
       }
       if (slot.item.type === "function_call" && !slot.done) {
         return;
@@ -6233,7 +6353,7 @@ function messagesBody(req, model2) {
     model: model2,
     system: req.system,
     messages: req.transcript,
-    tools: req.tools.map((tool) => ({
+    tools: (req.native?.webSearch ? [] : req.tools).map((tool) => ({
       name: tool.name,
       description: tool.description,
       input_schema: tool.schema,
@@ -6242,8 +6362,8 @@ function messagesBody(req, model2) {
     stream: true,
     ...req.native?.maxTokens !== void 0 ? { max_tokens: req.native.maxTokens } : {},
     ...req.native?.stopSequences ? { stop_sequences: req.native.stopSequences } : {},
-    ...req.native?.toolChoice ? { tool_choice: req.native.toolChoice } : {},
-    ...req.native?.outputSchema ? { output_format: { type: "json_schema", schema: req.native.outputSchema } } : {}
+    ...req.native?.toolChoice && !req.native.webSearch ? { tool_choice: req.native.toolChoice } : {},
+    ...req.native?.outputSchema && !req.native.webSearch ? { output_format: { type: "json_schema", schema: req.native.outputSchema } } : {}
   };
   if (typeof req.effort === "string") body.output_config = { effort: req.effort };
   else if (typeof req.effort === "number") body.thinking = { type: "enabled", budget_tokens: req.effort };
@@ -6251,9 +6371,18 @@ function messagesBody(req, model2) {
 }
 function responsesRequest(req, model2, body) {
   const translated = toResponses(body, model2);
+  const search = req.native?.webSearch;
+  if (search?.blockedDomains?.length) throw new Error("Codex search cannot enforce these search restrictions");
+  if (search?.maxUses !== void 0 && (!Number.isSafeInteger(search.maxUses) || search.maxUses < 1 || search.maxUses > 20)) throw new Error("Codex search use limit must be an integer from 1 to 20");
   return {
     ...translated,
-    ...req.native?.outputSchema && translated.text ? { text: { format: { ...translated.text.format, strict: false } } } : {},
+    ...req.native?.outputSchema && !search && translated.text ? { text: { format: { ...translated.text.format, strict: false } } } : {},
+    ...search ? { tools: [{
+      type: "web_search",
+      external_web_access: true,
+      ...search.allowedDomains?.length ? { filters: { allowed_domains: search.allowedDomains } } : {},
+      ...search.location ? { user_location: { ...search.location, type: "approximate" } } : {}
+    }], tool_choice: "auto", parallel_tool_calls: false } : {},
     instructions: openaiInstructions(translated.instructions),
     prompt_cache_key: createHash2("sha256").update(JSON.stringify(["codex", req.session, req.who, model2])).digest("hex")
   };
@@ -6498,7 +6627,7 @@ async function* codexStep(req, model2, signal, options = {}) {
           idleTimer = setTimeout(() => attemptControl.abort(new ProviderFailure(`the Codex stream sent nothing for ${idleMs} ms`, { event: "stream.idle", code: "stream-idle", transient: true })), idleMs);
         };
         arm();
-        const mapper = eventMapper((event) => {
+        const push = (event) => {
           ttfb ??= Date.now() - started;
           if (event.type === "tool_use") {
             committed = true;
@@ -6506,12 +6635,14 @@ async function* codexStep(req, model2, signal, options = {}) {
           }
           if (committed) queue.push(event);
           else pending.push(event);
-        });
+        };
+        const mapper = eventMapper(push);
         try {
           signal.throwIfAborted();
           const response = await fromResponses(touching(await open(), arm), req.target, mapper.emit, {
             toolNames: originalToolNames(body),
-            inputTokens: estimateInputTokens(request)
+            inputTokens: estimateInputTokens(request),
+            ...req.native?.webSearch ? { onSearchSources: (evidence) => push({ type: "search_sources", ...evidence }) } : {}
           });
           clearTimeout(idleTimer);
           flush();
@@ -6809,7 +6940,7 @@ var HELPER_TIMEOUT_MS = 1e4;
 var KEY_MAX = 4096;
 var isUsableKey = (key2) => key2.length > 0 && key2.length <= KEY_MAX && /^[\x21-\x7e]+$/.test(key2);
 function createKeys(run, now) {
-  const keys = /* @__PURE__ */ new Map();
+  const keys3 = /* @__PURE__ */ new Map();
   const failures = /* @__PURE__ */ new Map();
   const running = /* @__PURE__ */ new Map();
   async function helper(p, auth2, fp) {
@@ -6823,14 +6954,14 @@ function createKeys(run, now) {
     if (r.exitCode !== 0) return failed(`rice-multi-models: ${p.id} key helper failed (exit ${r.exitCode}): keychain locked, or no key stored? Run security add-generic-password -U -s rice-multi-models -a ${p.id} -w`);
     const key2 = r.stdout.trim();
     if (!isUsableKey(key2)) return failed(`rice-multi-models: ${p.id} key helper printed no usable key (empty, over 4 KiB, or holding spaces, control or non-ASCII characters); run security add-generic-password -U -s rice-multi-models -a ${p.id} -w`);
-    keys.set(fp, { key: key2, until: now() + auth2.ttlSeconds * 1e3 });
+    keys3.set(fp, { key: key2, until: now() + auth2.ttlSeconds * 1e3 });
     failures.delete(fp);
     return { key: key2, cached: false };
   }
   return {
     // Forgets the key and failure of every provider not in `approved`.
     prune(approved) {
-      for (const map of [keys, failures]) for (const fp of map.keys()) if (!approved.has(fp)) map.delete(fp);
+      for (const map of [keys3, failures]) for (const fp of map.keys()) if (!approved.has(fp)) map.delete(fp);
     },
     // The provider's key: the cached one while its ttl lasts, else what its helper prints, trimmed. An
     // unapproved provider's helper never runs.
@@ -6838,23 +6969,23 @@ function createKeys(run, now) {
       const fp = fingerprint(p);
       if (!approved.has(fp)) return { error: `rice-multi-models: ${p.id} not approved; run /rice-models approve ${p.id}` };
       if (p.auth === "none") return { key: null, cached: false };
-      const hit = keys.get(fp);
+      const hit = keys3.get(fp);
       if (hit !== void 0 && now() < hit.until) return { key: hit.key, cached: true };
-      keys.delete(fp);
+      keys3.delete(fp);
       let flight = running.get(fp);
       if (flight === void 0) running.set(fp, flight = helper(p, p.auth, fp).finally(() => running.delete(fp)));
       return flight;
     },
     // Drops a key its provider rejected, so the next use runs the helper again.
     drop(p) {
-      keys.delete(fingerprint(p));
+      keys3.delete(fingerprint(p));
     },
     // Each provider's key state.
     status(config) {
       return Object.values(config?.providers ?? {}).map((p) => {
         if (p.auth === "none") return { provider: p.id, key: "none" };
         const fp = fingerprint(p);
-        const [hit, failure] = [keys.get(fp), failures.get(fp)];
+        const [hit, failure] = [keys3.get(fp), failures.get(fp)];
         if (hit !== void 0 && now() < hit.until) return { provider: p.id, key: "cached" };
         return failure === void 0 ? { provider: p.id, key: "not-run" } : { provider: p.id, key: "failed", failure };
       });
@@ -6981,10 +7112,33 @@ function decoder() {
   const thinking = thinkingReader();
   const usage2 = { in: 0, out: 0, cacheRead: 0, cacheWrite: 0 };
   let finished = false;
+  const searchBlocks2 = /* @__PURE__ */ new Map();
+  const searchSources = [];
+  let searched = false;
+  function searchResult(s, block) {
+    if (block["type"] !== "web_search_tool_result") return false;
+    const content = block["content"];
+    if (isObject(content) && content["type"] === "web_search_tool_result_error") {
+      s.fail(`Anthropic web search failed: ${str(content["error_code"]) || "unknown"}`);
+      return true;
+    }
+    if (!Array.isArray(content)) {
+      s.fail("Anthropic web search result is malformed");
+      return true;
+    }
+    if (content.some((value) => !isObject(value) || value["type"] !== "web_search_result" || typeof value["url"] !== "string" || typeof value["title"] !== "string")) {
+      s.fail("Anthropic web search result is malformed");
+      return true;
+    }
+    searched = true;
+    searchSources.push(...content.map((value) => ({ title: value["title"], url: value["url"] })));
+    return true;
+  }
   function take(u) {
     for (const [key2, field] of Object.entries(COUNTS)) usage2[key2] = Math.max(usage2[key2], count(u[field]));
   }
-  function event({ out, fail }, data) {
+  function event(s, data) {
+    const { out, fail } = s;
     const ev = parseJson(data);
     if (!isObject(ev)) return fail(`unparseable stream data: ${data.slice(0, 200)}`);
     const delta = obj(ev["delta"]);
@@ -6995,11 +7149,20 @@ function decoder() {
       case "message_start":
         return take(obj(obj(ev["message"])["usage"]));
       case "content_block_start":
+        if (block["type"] === "web_search_tool_result") {
+          searchBlocks2.set(ev["index"], block);
+          searchResult(s, block);
+          return;
+        }
         if (block["type"] === "tool_use") held.set(ev["index"], { ...typeof block["id"] === "string" ? { id: block["id"] } : {}, name: typeof block["name"] === "string" ? block["name"] : "", json: "", input: block["input"] });
         else if (block["type"] === "thinking") thinking.add(ev["index"], { text: str(block["thinking"]), signature: str(block["signature"]) });
         else if (block["type"] === "redacted_thinking") thinking.add(ev["index"], { redacted: str(block["data"]) });
         return;
       case "content_block_delta": {
+        if (delta["type"] === "citations_delta" && isObject(delta["citation"]) && delta["citation"]["type"] === "web_search_result_location") {
+          searchSources.push({ title: delta["citation"]["title"], url: delta["citation"]["url"], content: delta["citation"]["cited_text"] });
+          return;
+        }
         if (delta["type"] === "text_delta" && nonEmpty(delta["text"])) out.push({ t: "text", text: delta["text"] });
         else if (delta["type"] === "thinking_delta" && nonEmpty(delta["thinking"])) {
           out.push({ t: "thinking", text: delta["thinking"] });
@@ -7009,6 +7172,10 @@ function decoder() {
         return;
       }
       case "content_block_stop": {
+        if (searchBlocks2.has(ev["index"])) {
+          searchBlocks2.delete(ev["index"]);
+          return;
+        }
         const block2 = thinking.seal(ev["index"]);
         if (block2 !== void 0) return void out.push({ t: "sealed", block: block2 });
         const h = held.get(ev["index"]);
@@ -7022,12 +7189,14 @@ function decoder() {
         out.push({ t: "usage", ...usage2 });
         if (typeof delta["stop_reason"] === "string") {
           finished = true;
+          if (searched) out.push({ t: "search_sources", sources: uniqueSearchSources(searchSources), searched: true });
           out.push({ t: "finish", reason: delta["stop_reason"] });
         }
     }
   }
   return decoderOver(sseReader(), event, ({ fail }) => {
-    if (held.size > 0) fail("the stream ended inside a tool call");
+    if (searchBlocks2.size > 0) fail("the stream ended inside a web search result");
+    else if (held.size > 0) fail("the stream ended inside a tool call");
     else if (!finished) fail("the stream ended with no stop reason");
   });
 }
@@ -7261,6 +7430,8 @@ function decoder3() {
   let finish;
   let usage2;
   let calls = 0;
+  let searched = false;
+  const searchSources = [];
   function chunk(s, data) {
     const c = parseJson(data);
     if (!isObject(c)) return s.fail(`unparseable stream data: ${data.slice(0, 200)}`);
@@ -7270,6 +7441,20 @@ function decoder3() {
     if (typeof blocked === "string") finish = "safety";
     const candidate = Array.isArray(c["candidates"]) ? c["candidates"][0] : void 0;
     if (!isObject(candidate)) return;
+    const grounding = candidate["groundingMetadata"];
+    if (isObject(grounding)) {
+      const queries = grounding["webSearchQueries"];
+      const chunks = grounding["groundingChunks"];
+      if (Array.isArray(queries) && queries.some((query) => typeof query === "string" && query.trim())) searched = true;
+      if (Array.isArray(chunks)) for (const [index, chunk2] of chunks.entries()) {
+        if (isObject(chunk2) && isObject(chunk2["web"])) {
+          searched = true;
+          const supports = Array.isArray(grounding["groundingSupports"]) ? grounding["groundingSupports"] : [];
+          const snippets = supports.flatMap((support) => isObject(support) && Array.isArray(support["groundingChunkIndices"]) && support["groundingChunkIndices"].includes(index) && isObject(support["segment"]) && typeof support["segment"]["text"] === "string" ? [support["segment"]["text"]] : []);
+          searchSources.push({ title: chunk2["web"]["title"], url: chunk2["web"]["uri"], ...snippets.length ? { content: snippets.join("\n") } : {} });
+        }
+      }
+    }
     const content = isObject(candidate["content"]) ? candidate["content"] : {};
     for (const part2 of Array.isArray(content["parts"]) ? content["parts"] : []) {
       if (!isObject(part2)) return s.fail("a part is not an object");
@@ -7293,6 +7478,7 @@ function decoder3() {
       const input = count2(usage2["promptTokenCount"]) + count2(usage2["toolUsePromptTokenCount"]);
       s.out.push({ t: "usage", in: Math.max(0, input - cached), out: count2(usage2["candidatesTokenCount"]) + thoughts, cacheRead: cached, cacheWrite: 0, ...thoughts > 0 ? { reasoning: thoughts } : {} });
     }
+    if (searched) s.out.push({ t: "search_sources", sources: uniqueSearchSources(searchSources), searched: true });
     s.out.push({ t: "finish", reason: finish === "stop" && calls > 0 ? "tool_calls" : finish });
   }
   return decoderOver(sseReader(), chunk, end);
@@ -7530,7 +7716,14 @@ function decoder5() {
   const thought = /* @__PURE__ */ new Set();
   let calls = 0;
   let ended = false;
+  const searchItems = /* @__PURE__ */ new Map();
+  const searchAnnotations = [];
   function item(s, it, index) {
+    if (it["type"] === "web_search_call" || it["type"] === "message") {
+      searchItems.set(index, it);
+      const evidence = responsesSearchEvidence([it]);
+      if (evidence.error) return s.fail(evidence.error);
+    }
     if (it["type"] === "function_call") {
       const name = str2(it["name"]);
       const whole = typeof it["arguments"] === "string" && it["arguments"] !== "" ? it["arguments"] : args.get(index) ?? "";
@@ -7547,6 +7740,12 @@ function decoder5() {
   }
   function done(s, r, status) {
     ended = true;
+    const items = [...searchItems.values(), ...Array.isArray(r["output"]) ? r["output"] : [], ...searchAnnotations.length ? [{ type: "message", content: [{ type: "output_text", annotations: searchAnnotations }] }] : []];
+    if (items.some((it) => isObject(it) && (it["type"] === "web_search_call" || it["type"] === "message" && Array.isArray(it["content"]) && it["content"].some((part2) => isObject(part2) && Array.isArray(part2["annotations"]))))) {
+      const evidence = responsesSearchEvidence(items);
+      if (evidence.error) return s.fail(evidence.error);
+      s.out.push({ t: "search_sources", sources: evidence.sources, searched: evidence.searched });
+    }
     const u = r["usage"];
     if (isObject(u) && isIndex(u["input_tokens"]) && isIndex(u["output_tokens"])) {
       const cached = isObject(u["input_tokens_details"]) && isIndex(u["input_tokens_details"]["cached_tokens"]) ? u["input_tokens_details"]["cached_tokens"] : 0;
@@ -7563,6 +7762,9 @@ function decoder5() {
     const index = e["output_index"] ?? e["item_id"];
     if (type === "response.output_text.delta" || type === "response.refusal.delta") {
       if (str2(e["delta"]) !== "") s.out.push({ t: "text", text: str2(e["delta"]) });
+    } else if (type === "response.output_text.annotation.added") {
+      if (isObject(e["annotation"])) searchAnnotations.push(e["annotation"]);
+      else s.fail("Search citation metadata is malformed");
     } else if (type === "response.reasoning_summary_text.delta" || type === "response.reasoning_text.delta") {
       thought.add(index);
       if (str2(e["delta"]) !== "") s.out.push({ t: "thinking", text: str2(e["delta"]) });
@@ -7736,6 +7938,51 @@ function nativeConstraints(body, model2, native) {
     if (choice?.type === "none") delete sent.toolConfig;
     if (native.outputSchema) sent.outputConfig = { textFormat: { type: "json_schema", structure: { jsonSchema: { schema: JSON.stringify(native.outputSchema) } } } };
   }
+  if (native.webSearch) {
+    const search = native.webSearch;
+    if (search.maxUses !== void 0 && (!Number.isSafeInteger(search.maxUses) || search.maxUses < 1)) throw new Error("Invalid native search use limit");
+    if (model2.kind === "responses") {
+      sent.tools = [{
+        type: "web_search",
+        external_web_access: true,
+        ...search.allowedDomains?.length || search.blockedDomains?.length ? { filters: {
+          ...search.allowedDomains?.length ? { allowed_domains: search.allowedDomains } : {},
+          ...search.blockedDomains?.length ? { blocked_domains: search.blockedDomains } : {}
+        } } : {},
+        ...search.location ? { user_location: { ...search.location, type: "approximate" } } : {}
+      }];
+      sent.tool_choice = { type: "web_search" };
+      sent.include = [.../* @__PURE__ */ new Set([...Array.isArray(sent.include) ? sent.include.filter((value) => typeof value === "string") : [], "web_search_call.action.sources"])];
+      delete sent.parallel_tool_calls;
+      delete sent.text;
+      if (search.maxUses !== void 0) sent.max_tool_calls = search.maxUses;
+    } else if (model2.kind === "anthropic") {
+      if (search.allowedDomains?.length && search.blockedDomains?.length) throw new Error("Anthropic search supports one domain filter list per request");
+      sent.tools = [{
+        type: "web_search_20250305",
+        name: "web_search",
+        max_uses: search.maxUses ?? 8,
+        ...search.allowedDomains?.length ? { allowed_domains: search.allowedDomains } : {},
+        ...search.blockedDomains?.length ? { blocked_domains: search.blockedDomains } : {},
+        ...search.location ? { user_location: { ...search.location, type: "approximate" } } : {}
+      }];
+      sent.tool_choice = { type: "tool", name: "web_search" };
+      delete sent.thinking;
+      const output = { ...object(sent.output_config) };
+      delete output.format;
+      if (Object.keys(output).length) sent.output_config = output;
+      else delete sent.output_config;
+    } else if (model2.kind === "gemini") {
+      if (search.allowedDomains?.length || search.blockedDomains?.length || search.location || search.maxUses !== void 0) throw new Error("Gemini search cannot enforce these search restrictions");
+      sent.tools = [{ googleSearch: {} }];
+      delete sent.toolConfig;
+      const generation = { ...object(sent.generationConfig) };
+      delete generation.responseMimeType;
+      delete generation.responseJsonSchema;
+      delete generation.responseSchema;
+      sent.generationConfig = generation;
+    } else throw new Error("This provider protocol has no supported hosted search contract");
+  }
   return JSON.stringify(sent);
 }
 
@@ -7759,6 +8006,7 @@ function assembler(codec, provider2, ids, mint = mintToolId) {
           inText = d.t === "text";
           out.push({ type: d.t, text: d.text });
         } else if (d.t === "sealed") turn.blocks.push({ at: before, block: d.block });
+        else if (d.t === "search_sources") out.push({ type: "search_sources", sources: d.sources, searched: d.searched });
         else if (d.t === "usage") usage2 = { in: d.in, out: d.out, cacheRead: d.cacheRead, cacheWrite: d.cacheWrite, ...d.reasoning === void 0 ? {} : { reasoning: d.reasoning } };
         else if (d.t === "finish") finish = finishToken(d.reason);
         else if (d.t === "error") failure = d.message;
@@ -7801,7 +8049,7 @@ async function errorBody({ body, cancel }) {
   return text3.slice(0, ERROR_TEXT_MAX);
 }
 function createStepper(env) {
-  const keys = createKeys(env.run, env.now);
+  const keys3 = createKeys(env.run, env.now);
   const ids = remoteIds();
   const thinking = thinkingStore();
   let memo;
@@ -7838,9 +8086,9 @@ function createStepper(env) {
     const { provider: p, model: m } = t;
     const owner = `${p.id}/${m.id}`;
     const approved = new Set(w.approved);
-    keys.prune(approved);
+    keys3.prune(approved);
     const codec = CODECS[m.kind];
-    let key2 = await keys.get(p, approved);
+    let key2 = await keys3.get(p, approved);
     if ("error" in key2) return yield* refuse(key2.error);
     const conversationKey = createHash3("sha256").update(`${req.session}:${req.who}`).digest("hex");
     let enc;
@@ -7863,10 +8111,10 @@ function createStepper(env) {
     const post2 = (k) => env.post({ url: joinUrl(p.baseUrl, enc.path), allowHttp: p.allowHttp, headers: { ...headers2, ...k === null ? {} : keyed(k) }, body: enc.body, stallS, totalS }, signal);
     let answer = await post2(key2.key);
     for (let retried = false; "status" in answer && (answer.status === 401 || answer.status === 403); retried = true) {
-      keys.drop(p);
+      keys3.drop(p);
       if (retried || !key2.cached) break;
       answer.cancel();
-      key2 = await keys.get(p, approved);
+      key2 = await keys3.get(p, approved);
       if ("error" in key2) return yield* refuse(key2.error);
       answer = await post2(key2.key);
     }
@@ -7898,8 +8146,8 @@ function createStepper(env) {
     yield* close(end.events, end.finish, end.finish === "error" ? void 0 : asm.usage(), end.note === void 0 ? "" : ` note=${logJson(end.note)}`);
   }
   function status(w) {
-    keys.prune(new Set(w.approved));
-    return keys.status(configOf(w.configText));
+    keys3.prune(new Set(w.approved));
+    return keys3.status(configOf(w.configText));
   }
   return { step, status, config: configOf };
 }
@@ -8439,19 +8687,19 @@ async function payloadOf(response, signal, budget, maxBytes = MAX_BYTES) {
     reader.releaseLock();
   }
 }
-function nextPage(payload, provider2, endpoint) {
+function nextPage(payload, provider2, endpoint2) {
   if (provider2.kind === "gemini") {
     const token = payload.nextPageToken;
     if (token === void 0 || token === "") return void 0;
     if (typeof token !== "string" || token.length > 4096) throw new CatalogueFailure("pagination-invalid");
-    const next2 = new URL(endpoint);
+    const next2 = new URL(endpoint2);
     next2.searchParams.set("pageToken", token);
     return next2;
   }
   if (payload.has_more !== void 0 && typeof payload.has_more !== "boolean") throw new CatalogueFailure("pagination-invalid");
   if (payload.has_more === true) {
     if (!validId(payload.last_id)) throw new CatalogueFailure("pagination-invalid");
-    const next2 = new URL(endpoint);
+    const next2 = new URL(endpoint2);
     next2.searchParams.set(provider2.kind === "anthropic" ? "after_id" : "after", payload.last_id);
     return next2;
   }
@@ -8460,19 +8708,19 @@ function nextPage(payload, provider2, endpoint) {
   if (typeof link !== "string" || link.length > 4096) throw new CatalogueFailure("pagination-invalid");
   let next;
   try {
-    next = new URL(link, endpoint);
+    next = new URL(link, endpoint2);
   } catch {
     throw new CatalogueFailure("pagination-invalid");
   }
-  if (next.origin !== endpoint.origin || next.pathname !== endpoint.pathname || next.username || next.password || next.hash) throw new CatalogueFailure("pagination-invalid");
+  if (next.origin !== endpoint2.origin || next.pathname !== endpoint2.pathname || next.username || next.password || next.hash) throw new CatalogueFailure("pagination-invalid");
   return next;
 }
-async function inventory(provider2, endpoint, source, headers2, signal, fetcher) {
+async function inventory(provider2, endpoint2, source, headers2, signal, fetcher) {
   const models = [];
   const ids = /* @__PURE__ */ new Set();
   const pages = /* @__PURE__ */ new Set();
   const budget = { bytes: 0 };
-  let url = endpoint;
+  let url = endpoint2;
   for (let page = 0; url; page++) {
     signal.throwIfAborted();
     if (page >= MAX_PAGES || pages.has(url.href)) throw new CatalogueFailure("pagination-limit");
@@ -8497,7 +8745,7 @@ async function inventory(provider2, endpoint, source, headers2, signal, fetcher)
       ids.add(id);
       models.push({ model: `${provider2.id}/${id}`, label: `${id} (${provider2.id})`, execution: "native provider", source, observedAt: 0, metadata: metadataOf(entry, provider2.kind) });
     }
-    url = nextPage(payload, provider2, endpoint);
+    url = nextPage(payload, provider2, endpoint2);
   }
   signal.throwIfAborted();
   const observedAt = Date.now();
@@ -8578,7 +8826,7 @@ async function discoverProviders(wire, options = {}) {
   if (options.signal?.aborted) cancel();
   const signal = controller.signal;
   const approved = new Set(wire.approved);
-  const keys = createKeys((argv, requestedMs) => {
+  const keys3 = createKeys((argv, requestedMs) => {
     signal.throwIfAborted();
     return (options.run ?? runCommand)(argv, Math.max(1, Math.min(requestedMs, deadline - Date.now())));
   }, Date.now);
@@ -8593,14 +8841,14 @@ async function discoverProviders(wire, options = {}) {
   });
   try {
     const results = await Promise.all(Object.values(config.providers).map(async (provider2) => {
-      const endpoint = new URL(`${provider2.baseUrl}${provider2.kind === "anthropic" && !provider2.baseUrl.endsWith("/v1") ? "/v1/models" : "/models"}`);
+      const endpoint2 = new URL(`${provider2.baseUrl}${provider2.kind === "anthropic" && !provider2.baseUrl.endsWith("/v1") ? "/v1/models" : "/models"}`);
       const source = `${provider2.id} ${provider2.kind} live /models endpoint`;
       if (!approved.has(fingerprint(provider2))) return { models: [], providers: [{ provider: provider2.id, status: "approval-required", source }] };
       if (provider2.kind === "bedrock") return { models: [], providers: [{ provider: provider2.id, status: "unavailable", source: "bedrock configured provider", error: "enumeration-unsupported" }] };
       try {
         const discover = async () => {
           signal.throwIfAborted();
-          const key2 = await keys.get(provider2, approved);
+          const key2 = await keys3.get(provider2, approved);
           signal.throwIfAborted();
           if ("error" in key2) throw new CatalogueFailure("auth-unavailable");
           const headers2 = new Headers(provider2.headers);
@@ -8611,7 +8859,7 @@ async function discoverProviders(wire, options = {}) {
             const auth2 = authHeaderOf(provider2, provider2);
             headers2.set(auth2 === "bearer" ? "authorization" : auth2, auth2 === "bearer" ? `Bearer ${key2.key}` : key2.key);
           }
-          return inventory(provider2, endpoint, source, headers2, signal, options.fetch ?? fetch);
+          return inventory(provider2, endpoint2, source, headers2, signal, options.fetch ?? fetch);
         };
         return await Promise.race([discover(), aborted]);
       } catch (error2) {
@@ -8697,6 +8945,176 @@ function routedNativeModel(model2, state) {
   return remoteOf(nativeConfig(state), model2) !== void 0;
 }
 
+// helper/search/endpoints.ts
+import { readFileSync as readFileSync3, statSync } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { join as join2 } from "node:path";
+
+// hooks/search-config.ts
+var SEARCH_KINDS = ["searxng", "brave", "tavily"];
+var MAX_SEARCH_CONFIG_BYTES = 64 * 1024;
+var NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$/;
+var ENV = /^[A-Za-z_][A-Za-z0-9_]*$/;
+var absoluteCommand = (value) => value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value) || /^\\\\[^\\]+\\[^\\]+/.test(value);
+var object2 = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+var keys = (value, allowed) => Object.keys(value).every((key2) => allowed.includes(key2));
+var emptySearchConfig = () => ({ version: 1, endpoints: [] });
+var searchPriority = (value) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+function endpoint(value) {
+  if (!object2(value) || !keys(value, ["name", "kind", "url", "priority", "auth"]) || typeof value.name !== "string" || !NAME.test(value.name) || !SEARCH_KINDS.includes(value.kind) || typeof value.url !== "string" || !searchPriority(value.priority)) return void 0;
+  try {
+    const url = new URL(value.url);
+    if (!/^https?:\/\//i.test(value.url) || !["http:", "https:"].includes(url.protocol) || !url.hostname || url.username || url.password || /[\\?#]/.test(value.url) || value.url.trim() !== value.url || /[\0\r\n]/.test(value.url)) return void 0;
+  } catch {
+    return void 0;
+  }
+  let auth2;
+  if (value.auth !== void 0) {
+    if (!object2(value.auth)) return void 0;
+    if (keys(value.auth, ["env"]) && typeof value.auth.env === "string" && ENV.test(value.auth.env)) auth2 = { env: value.auth.env };
+    else if (keys(value.auth, ["command"]) && Array.isArray(value.auth.command) && value.auth.command.length > 0 && value.auth.command.every((word) => typeof word === "string" && word.length > 0 && !/[\0\r\n]/.test(word)) && typeof value.auth.command[0] === "string" && absoluteCommand(value.auth.command[0])) auth2 = { command: [...value.auth.command] };
+    else return void 0;
+  }
+  return { name: value.name, kind: value.kind, url: value.url, priority: value.priority, ...auth2 ? { auth: auth2 } : {} };
+}
+function parseSearchConfig(text3) {
+  if (text3 === void 0) return { config: emptySearchConfig(), errors: [] };
+  const errors = [];
+  if (new TextEncoder().encode(text3).byteLength > MAX_SEARCH_CONFIG_BYTES) return { config: emptySearchConfig(), errors: ["Search configuration exceeds its size limit."] };
+  let value;
+  try {
+    value = JSON.parse(text3);
+  } catch {
+    return { config: emptySearchConfig(), errors: ["Search configuration is not valid JSON."] };
+  }
+  if (!object2(value) || !keys(value, ["version", "endpoints"]) || value.version !== 1 || !Array.isArray(value.endpoints)) return { config: emptySearchConfig(), errors: ["Search configuration must contain version 1 and an endpoints array, with no secret fields."] };
+  const endpoints = [], names = /* @__PURE__ */ new Set();
+  for (const [index, raw] of value.endpoints.entries()) {
+    const row = endpoint(raw);
+    if (!row) errors.push(`Search endpoint ${index + 1} is invalid. Use a name, supported kind, full HTTP(S) URL without credentials or query parameters, nonnegative integer priority, and an optional credential reference.`);
+    else if (names.has(row.name)) errors.push(`Search endpoint ${index + 1} repeats a saved name.`);
+    else {
+      names.add(row.name);
+      endpoints.push(row);
+    }
+  }
+  return { config: errors.length ? emptySearchConfig() : { version: 1, endpoints }, errors };
+}
+function orderedSearchEndpoints(config) {
+  return config.endpoints.map((row, index) => ({ row, index })).sort((a, b) => a.row.priority - b.row.priority || a.index - b.index).map(({ row }) => row);
+}
+
+// helper/search/endpoints.ts
+var SearchUnavailable = class extends Error {
+};
+function searchEndpoints(environment = process.env) {
+  const file = join2(environment.CLAUDE_CONFIG_DIR ?? join2(homedir4(), ".claude"), "rice-multi-models/search.json");
+  let text3;
+  try {
+    if (statSync(file).size > MAX_SEARCH_CONFIG_BYTES) throw new SearchUnavailable("Search configuration exceeds its size limit.");
+    text3 = readFileSync3(file, "utf8");
+  } catch (error2) {
+    if (error2.code !== "ENOENT") throw new SearchUnavailable("Cannot read search configuration; run /rice-models search setup.");
+  }
+  const parsed = parseSearchConfig(text3);
+  if (parsed.errors.length) throw new SearchUnavailable("Invalid search configuration; run /rice-models search setup.");
+  const endpoints = orderedSearchEndpoints(parsed.config);
+  const legacy = environment.RICE_MULTI_MODELS_SEARCH_URL;
+  if (legacy && !endpoints.some((endpoint2) => endpoint2.url === legacy)) {
+    const checked = parseSearchConfig(JSON.stringify({ version: 1, endpoints: [{ name: "legacy-environment", kind: "searxng", url: legacy, priority: 0 }] }));
+    if (checked.errors.length) throw new SearchUnavailable("The legacy search endpoint is invalid; run /rice-models search setup.");
+    endpoints.push(...checked.config.endpoints);
+  }
+  return endpoints;
+}
+async function json(response) {
+  const reader = response.body?.getReader();
+  if (!reader) throw new SearchUnavailable("Search endpoint returned no response body.");
+  const parts = [];
+  let size = 0;
+  try {
+    while (true) {
+      const item = await reader.read();
+      if (item.done) break;
+      size += item.value.byteLength;
+      if (size > 2 * 1024 * 1024) throw new SearchUnavailable("Search response exceeds its size limit.");
+      parts.push(item.value);
+    }
+    return JSON.parse(Buffer.concat(parts).toString("utf8"));
+  } finally {
+    await reader.cancel();
+  }
+}
+var object3 = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
+function searchRecords(value, kind) {
+  const rows = object3(value) ? kind === "brave" ? object3(value.web) ? value.web.results : void 0 : value.results : void 0;
+  if (!Array.isArray(rows)) throw new SearchUnavailable("Search endpoint returned an invalid result list.");
+  const results = rows.filter(object3).flatMap((row) => {
+    if (typeof row.url !== "string" || typeof row.title !== "string") return [];
+    try {
+      const url = new URL(row.url);
+      if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) return [];
+      const content = kind === "brave" ? row.description : row.content;
+      return [{ title: row.title.slice(0, 512), url: url.href, content: typeof content === "string" ? content.slice(0, 4e3) : "" }];
+    } catch {
+      return [];
+    }
+  }).slice(0, 10);
+  if (rows.length && !results.length) throw new SearchUnavailable("Search endpoint returned no valid source records.");
+  return results;
+}
+async function endpointSearch(endpoint2, query, signal, request = fetch, environment = process.env) {
+  if (!query.trim() || query.length > 2048) throw new SearchUnavailable("Invalid search query.");
+  let key2;
+  if (endpoint2.auth) {
+    if ("env" in endpoint2.auth) key2 = environment[endpoint2.auth.env];
+    else {
+      const helper = await runCommand(endpoint2.auth.command, 15e3);
+      if (helper.exitCode === 0 && helper.stdout.length <= 16 * 1024) key2 = helper.stdout.trim();
+    }
+    if (!key2 || /[\0\r\n]/.test(key2)) throw new SearchUnavailable("Search endpoint credential is unavailable.");
+  }
+  if (endpoint2.kind !== "searxng" && !key2) throw new SearchUnavailable("Search endpoint requires a credential reference.");
+  if (endpoint2.kind === "brave" && (query.length > 600 || query.trim().split(/\s+/).length > 75)) throw new SearchUnavailable("Query exceeds this search service limit.");
+  const url = new URL(endpoint2.url), headers2 = { accept: "application/json" };
+  let body;
+  if (endpoint2.kind === "tavily") {
+    headers2["content-type"] = "application/json";
+    headers2.authorization = `Bearer ${key2}`;
+    body = JSON.stringify({ query, search_depth: "basic", max_results: 10, include_answer: false, include_raw_content: false });
+  } else {
+    url.searchParams.set("q", query);
+    if (endpoint2.kind === "searxng") url.searchParams.set("format", "json");
+    else url.searchParams.set("count", "10");
+    if (key2) headers2[endpoint2.kind === "brave" ? "x-subscription-token" : "authorization"] = endpoint2.kind === "brave" ? key2 : `Bearer ${key2}`;
+  }
+  const response = await request(url, { method: body ? "POST" : "GET", headers: headers2, ...body ? { body } : {}, redirect: "error", signal: AbortSignal.any([signal, AbortSignal.timeout(15e3)]) });
+  const status = response.status;
+  if (!response.ok) {
+    const reader = response.body?.getReader();
+    if (reader) try {
+      await reader.read();
+    } finally {
+      await reader.cancel();
+    }
+    throw Object.assign(new SearchUnavailable(`Search endpoint HTTP ${status}.`), { status });
+  }
+  return { results: searchRecords(await json(response), endpoint2.kind), http: status };
+}
+async function configuredSearch(query, signal, endpoints = searchEndpoints(), request = fetch, observe) {
+  for (const endpoint2 of endpoints) {
+    try {
+      const result = await endpointSearch(endpoint2, query, signal, request);
+      observe?.({ name: endpoint2.name, status: "success", http: result.http });
+      return result.results;
+    } catch (error2) {
+      signal.throwIfAborted();
+      observe?.({ name: endpoint2.name, status: "unavailable", ...error2.status ? { http: error2.status } : {} });
+    }
+  }
+  throw new SearchUnavailable("No configured search service is available.");
+}
+
 // helper/native/search.ts
 function domainMatches(value, rule) {
   try {
@@ -8715,48 +9133,9 @@ function domains(tool, name) {
   return value;
 }
 var retrieve = async (query, tool, signal) => {
-  const address = process.env.RICE_MULTI_MODELS_SEARCH_URL;
-  if (!address) throw new Error("configure RICE_MULTI_MODELS_SEARCH_URL for native WebSearch retrieval");
-  const url = new URL(address);
-  if (!["https:", "http:"].includes(url.protocol) || url.username || url.password) throw new Error("invalid direct search endpoint");
-  if (!query.trim() || query.length > 2048) throw new Error("invalid direct search query");
   const allow = domains(tool, "allowed_domains"), block = domains(tool, "blocked_domains");
   if (allow.length && block.length) throw new Error("native search allows one domain policy");
-  url.searchParams.set("q", query);
-  url.searchParams.set("format", "json");
-  const response = await fetch(url, { signal: AbortSignal.any([signal, AbortSignal.timeout(3e4)]) });
-  if (!response.ok) {
-    await response.body?.cancel();
-    throw new Error(`direct search retrieval HTTP ${response.status}`);
-  }
-  const reader = response.body?.getReader();
-  if (!reader) throw new Error("empty direct search response");
-  const chunks = [];
-  let size = 0;
-  try {
-    while (true) {
-      const item = await reader.read();
-      if (item.done) break;
-      size += item.value.byteLength;
-      if (size > 2 * 1024 * 1024) throw new Error("direct search response exceeds bound");
-      chunks.push(item.value);
-    }
-  } finally {
-    await reader.cancel();
-  }
-  const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-  if (!record(body) || !Array.isArray(body.results)) throw new Error("invalid direct search response");
-  return body.results.filter(record).flatMap((result) => {
-    if (typeof result.title !== "string" || typeof result.url !== "string") return [];
-    let location;
-    try {
-      location = new URL(result.url);
-    } catch {
-      return [];
-    }
-    if (!["http:", "https:"].includes(location.protocol) || location.username || location.password || allow.length && !allow.some((rule) => domainMatches(result.url, rule)) || block.some((rule) => domainMatches(result.url, rule))) return [];
-    return [{ title: result.title.slice(0, 512), url: location.href, content: typeof result.content === "string" ? result.content.slice(0, 4e3) : "" }];
-  }).slice(0, 10);
+  return (await configuredSearch(query, signal)).filter((result) => (!allow.length || allow.some((rule) => domainMatches(result.url, rule))) && !block.some((rule) => domainMatches(result.url, rule)));
 };
 async function* searchStep(wire, native, signal, direct, search = retrieve, toolCapable = true) {
   const tool = native.serverTools.find((tool2) => typeof tool2.type === "string" && tool2.type.startsWith("web_search_"));
@@ -8861,6 +9240,242 @@ ${JSON.stringify(results)}` }]
   }
 }
 
+// helper/search/provider.ts
+var keys2 = createKeys(runCommand, Date.now);
+function providerSearch(target, remote, restrictions) {
+  if (!remote) return splitTarget(target)?.provider === "codex" && !restrictions.blockedDomains?.length ? "hosted" : void 0;
+  if (remote.model.webSearch === "off") return void 0;
+  const url = new URL(remote.provider.baseUrl);
+  if (url.origin === "https://ollama.com" && remote.provider.auth !== "none") return "ollama";
+  const kind = remote.model.kind;
+  if (!["responses", "anthropic", "gemini"].includes(kind)) return void 0;
+  if (kind === "gemini" && (restrictions.maxUses !== void 0 || restrictions.allowedDomains?.length || restrictions.blockedDomains?.length || restrictions.location)) return void 0;
+  if (remote.model.webSearch === "native") return "hosted";
+  return kind === "responses" && url.origin === "https://api.openai.com" || kind === "anthropic" && url.origin === "https://api.anthropic.com" || kind === "gemini" && url.origin === "https://generativelanguage.googleapis.com" ? "hosted" : void 0;
+}
+async function ollamaSearch(wire, remote, query, signal) {
+  const credential = await keys2.get(remote.provider, new Set(wire.approved));
+  if ("error" in credential || !credential.key) throw new SearchUnavailable("Selected Ollama cloud account has no search credential.");
+  const response = await fetch("https://ollama.com/api/web_search", {
+    method: "POST",
+    headers: { authorization: `Bearer ${credential.key}`, "content-type": "application/json" },
+    body: JSON.stringify({ query, max_results: 10 }),
+    redirect: "error",
+    signal: AbortSignal.any([signal, AbortSignal.timeout(15e3)])
+  });
+  if (!response.ok) {
+    const status = response.status;
+    await response.body?.cancel();
+    throw new SearchUnavailable(`Selected Ollama search HTTP ${status}.`);
+  }
+  const reader = response.body?.getReader();
+  if (!reader) throw new SearchUnavailable("Selected Ollama search has no response.");
+  const chunks = [];
+  let size = 0;
+  try {
+    while (true) {
+      const item = await reader.read();
+      if (item.done) break;
+      size += item.value.byteLength;
+      if (size > 2 * 1024 * 1024) throw new SearchUnavailable("Selected Ollama search response exceeds its size limit.");
+      chunks.push(item.value);
+    }
+  } finally {
+    await reader.cancel();
+  }
+  const sources = searchRecords(JSON.parse(Buffer.concat(chunks).toString("utf8")), "searxng");
+  return [{ type: "search_sources", searched: true, sources }, { type: "stop", reason: "end_turn" }];
+}
+
+// helper/native/search-policy.ts
+function searchRestrictions(tool) {
+  const list = (key2) => {
+    const value = tool[key2];
+    if (value === void 0) return void 0;
+    if (!Array.isArray(value) || !value.every((rule) => typeof rule === "string" && !!rule && !/^[a-z]+:\/\//i.test(rule) && !/[?#@\s]/.test(rule))) throw new SearchUnavailable("Invalid native search domain filter.");
+    return value;
+  };
+  const max = tool.max_uses;
+  if (max !== void 0 && (!Number.isSafeInteger(max) || Number(max) < 1 || Number(max) > 20)) throw new SearchUnavailable("Invalid native search use bound.");
+  const allowedDomains = list("allowed_domains"), blockedDomains = list("blocked_domains");
+  if (allowedDomains?.length && blockedDomains?.length) throw new SearchUnavailable("Native search supports one domain filter list.");
+  return { ...allowedDomains ? { allowedDomains } : {}, ...blockedDomains ? { blockedDomains } : {}, ...typeof max === "number" ? { maxUses: max } : {}, ...record(tool.user_location) ? { location: tool.user_location } : {} };
+}
+async function collectSearch(events, signal, evidenceRequired) {
+  const found = [];
+  let bytes = 0, stopped = false, searched = false;
+  for await (const event of events) {
+    signal.throwIfAborted();
+    bytes += Buffer.byteLength(JSON.stringify(event));
+    if (found.length >= 2048 || bytes > 2 * 1024 * 1024) throw new SearchUnavailable("Search response exceeds its size limit.");
+    if (event.type === "error") throw new SearchUnavailable("Provider search is unavailable.");
+    if (event.type === "search_sources" && event.searched) searched = true;
+    if (event.type === "stop") stopped = true;
+    found.push(event);
+  }
+  if (!stopped || evidenceRequired && !searched) throw new SearchUnavailable("Provider did not complete a web search.");
+  return found;
+}
+function searchBlocks(query, sources, text3) {
+  const id = `srvtoolu_rice_${crypto.randomUUID().replaceAll("-", "")}`;
+  return [
+    { type: "native_block", block: { type: "server_tool_use", id, name: "web_search", input: { query } } },
+    { type: "native_block", block: { type: "web_search_tool_result", tool_use_id: id, content: sources.map((source) => ({ type: "web_search_result", title: source.title, url: source.url, encrypted_content: "" })) } },
+    { type: "text", text: text3 || (sources.length ? sources.map((source) => `${source.title}
+${source.url}${source.content ? `
+${source.content}` : ""}`).join("\n\n") : "No web search results were found.") },
+    { type: "stop", reason: "end_turn" }
+  ];
+}
+async function directSearch(wire, native, input, remote, signal, direct, observe) {
+  const tool = native.serverTools[0], restrictions = searchRestrictions(tool);
+  observe?.({ phase: "search", stage: "query", queryKnown: !!input });
+  const method = providerSearch(wire.req.target, remote, restrictions);
+  if (method) {
+    try {
+      let events;
+      if (method === "ollama") {
+        if (!input || !remote || restrictions.location) throw new SearchUnavailable("Selected cloud search cannot execute this request.");
+        events = await ollamaSearch(wire, remote, input.query, signal);
+      } else {
+        const req = { ...wire.req, tools: [], native: { ...wire.req.native, webSearch: restrictions, toolChoice: void 0, outputSchema: void 0 } };
+        const attempt = AbortSignal.any([signal, AbortSignal.timeout(3e4)]);
+        events = await collectSearch(direct({ ...wire, req }, attempt), attempt, true);
+        if (!remote && splitTarget(wire.req.target)?.provider === "codex" && restrictions.maxUses !== void 0) {
+          const accounting = events.findLast((event) => event.type === "search_sources");
+          if (accounting?.type !== "search_sources" || accounting.complete !== true || !Number.isSafeInteger(accounting.calls) || Number(accounting.calls) < 1 || Number(accounting.calls) > restrictions.maxUses) throw new SearchUnavailable("Provider search invocation accounting cannot satisfy the native bound.");
+        }
+      }
+      const sources = events.flatMap((event) => event.type === "search_sources" && event.searched ? event.sources : []).filter((source) => (!restrictions.allowedDomains?.length || restrictions.allowedDomains.some((rule) => domainMatches(source.url, rule))) && !restrictions.blockedDomains?.some((rule) => domainMatches(source.url, rule)));
+      const answer = restrictions.allowedDomains?.length || restrictions.blockedDomains?.length ? void 0 : events.filter((event) => event.type === "text").map((event) => event.text).join("");
+      observe?.({ phase: "search", stage: "provider", status: "success" });
+      return [...events.filter((event) => ["usage", "limits", "stats"].includes(event.type)), ...searchBlocks(input?.query ?? "Web search", sources, answer)];
+    } catch {
+      signal.throwIfAborted();
+      observe?.({ phase: "search", stage: "provider", status: "unavailable" });
+    }
+  }
+  try {
+    if (!searchEndpoints().length) throw new SearchUnavailable("No search service is configured.");
+    const events = input ? searchBlocks(input.query, await retrieve(input.query, tool, signal)) : await collectSearch(searchStep(wire, native, signal, direct, retrieve, remote?.model.tools !== false), signal, false);
+    observe?.({ phase: "search", stage: "configured", status: "success" });
+    return events;
+  } catch {
+    signal.throwIfAborted();
+    observe?.({ phase: "search", stage: "configured", status: "unavailable" });
+  }
+  throw new SearchUnavailable("Provider and configured web search are unavailable.");
+}
+async function nativeSearchResponse(response, signal) {
+  if (!response.ok) return { response, ok: false };
+  const reader = response.body?.getReader();
+  if (!reader) return { response, ok: false };
+  const chunks = [];
+  let size = 0;
+  try {
+    while (true) {
+      signal.throwIfAborted();
+      const item = await reader.read();
+      if (item.done) break;
+      size += item.value.byteLength;
+      if (size > 4 * 1024 * 1024) throw new SearchUnavailable("Native search response exceeds its size limit.");
+      chunks.push(item.value);
+    }
+  } finally {
+    await reader.cancel();
+  }
+  const bytes = Buffer.concat(chunks), text3 = bytes.toString("utf8");
+  let failed = false, searched = false, completed = false;
+  const visit = (value) => {
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (!record(value)) return;
+    if (value.type === "error" || value.type === "web_search_tool_result_error") failed = true;
+    if (value.type === "message_stop" || value.type === "message" && typeof value.stop_reason === "string") completed = true;
+    if (value.type === "web_search_tool_result" && Array.isArray(value.content)) searched = true;
+    if (value.type === "message_delta" && value.delta && record(value.delta) && value.delta.stop_reason === "refusal") failed = true;
+    for (const key2 of ["message", "content", "content_block"]) if (value[key2]) visit(value[key2]);
+  };
+  if (response.headers.get("content-type")?.includes("text/event-stream")) {
+    for (const line of text3.split("\n")) if (line.startsWith("data: ")) {
+      try {
+        visit(JSON.parse(line.slice(6)));
+      } catch {
+        failed = true;
+      }
+    }
+  } else {
+    try {
+      visit(JSON.parse(text3));
+    } catch {
+      failed = true;
+    }
+  }
+  return { response: new Response(bytes, { status: response.status, statusText: response.statusText, headers: response.headers }), ok: searched && completed && !failed };
+}
+
+// helper/native/search-model.ts
+var NativeSearchModelError = class extends Error {
+  constructor(reason) {
+    super(`Native Claude search model is unavailable (${reason}). Run /rice-models setup native with a qualified Claude 2.1.299 executable.`);
+    this.reason = reason;
+    this.name = "NativeSearchModelError";
+  }
+  code = "RICE_NATIVE_SEARCH_MODEL";
+};
+var BINDINGS = {
+  "darwin-arm64": {
+    module: "/$bunfs/root/chunk-fk9f23h5.js",
+    name: "_E",
+    source: String.raw`function _E(){let e=a.ANTHROPIC_SMALL_FAST_MODEL;if(e!==void 0)return Dv(yC(e));if(!fpt()){let n=Oe();if((n==="bedrock"||n==="vertex")&&Vh()==null&&!h1e()){let r=Da();if(!r.opus||r.sonnet){let s=vm();if((bC(s)??Xr(s))&&!nG(s,rG()))return s}}return Qe()}return a.ANTHROPIC_DEFAULT_HAIKU_MODEL!==void 0?Dv(oG()):$v(oG())}`
+  },
+  "linux-x64": {
+    module: "/$bunfs/root/chunk-xywp7esx.js",
+    name: "yv",
+    source: String.raw`function yv(){let e=a.ANTHROPIC_SMALL_FAST_MODEL;if(e!==void 0)return Ov(mC(e));if(!spt()){let n=Oe();if((n==="bedrock"||n==="vertex")&&zh()==null&&!aBe()){let r=Da();if(!r.opus||r.sonnet){let s=Em();if((yC(s)??Xr(s))&&!Gz(s,Vz()))return s}}return Qe()}return a.ANTHROPIC_DEFAULT_HAIKU_MODEL!==void 0?Ov(Kz()):Fv(Kz())}`
+  },
+  "win32-x64": {
+    module: "B:/~BUN/root/chunk-v7m9g1fp.js",
+    name: "Sv",
+    source: String.raw`function Sv(){let e=a.ANTHROPIC_SMALL_FAST_MODEL;if(e!==void 0)return Ev(gR(e));if(!apt()){let n=Ie();if((n==="bedrock"||n==="vertex")&&jh()==null&&!aBe()){let r=Da();if(!r.opus||r.sonnet){let s=km();if((_R(s)??Xr(s))&&!qz(s,Kz()))return s}}return Ze()}return a.ANTHROPIC_DEFAULT_HAIKU_MODEL!==void 0?Ev(Yz()):Iv(Yz())}`
+  }
+};
+function nativeSearchModelBinding(version, platform, architecture) {
+  if (version !== "2.1.299") throw new NativeSearchModelError("unsupported-version");
+  const key2 = `${platform}-${architecture}`;
+  if (!Object.hasOwn(BINDINGS, key2)) throw new NativeSearchModelError("unsupported-platform");
+  return BINDINGS[key2];
+}
+function assertNativeSearchResolverSource(binding, source) {
+  if (source !== binding.source) throw new NativeSearchModelError("changed-resolver");
+}
+function assertNativeSearchModel(value) {
+  if (typeof value !== "string" || value.length > 256 || !/^claude-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value)) {
+    throw new NativeSearchModelError("invalid-model");
+  }
+}
+async function resolveNativeSearchModel() {
+  const binding = nativeSearchModelBinding(process.env.RICE_MULTI_MODELS_NATIVE_VERSION, process.platform, process.arch);
+  let candidate;
+  try {
+    candidate = (await import(binding.module))[binding.name];
+  } catch {
+    throw new NativeSearchModelError("unavailable-resolver");
+  }
+  if (typeof candidate !== "function") throw new NativeSearchModelError("unavailable-resolver");
+  assertNativeSearchResolverSource(binding, Function.prototype.toString.call(candidate));
+  let model2;
+  try {
+    model2 = candidate();
+  } catch {
+    throw new NativeSearchModelError("unavailable-resolver");
+  }
+  assertNativeSearchModel(model2);
+  return model2;
+}
+
 // helper/native/contracts.ts
 async function* nativeContracts(events, constraints) {
   const stops = constraints?.stopSequences ?? [];
@@ -8901,13 +9516,13 @@ function nativeEndpoint(url) {
   if (/\/messages\/?$/.test(url.pathname)) return "messages";
   return void 0;
 }
-function nativeFetch(original, ownership, direct = runStep, observe) {
+function nativeFetch(original, ownership, direct = runStep, observe, searchModel = resolveNativeSearchModel) {
   const providerCall = new AsyncLocalStorage2();
   return async (input, init) => {
     if (providerCall.getStore()) return original(input, init);
     const request = new Request(input, init);
-    const endpoint = request.method === "POST" ? nativeEndpoint(new URL(request.url)) : void 0;
-    if (!endpoint) return original(input, init);
+    const endpoint2 = request.method === "POST" ? nativeEndpoint(new URL(request.url)) : void 0;
+    if (!endpoint2) return original(input, init);
     const state = nativeState();
     if (state) ownership.publish(state);
     const scope = ownership.context.getStore();
@@ -8923,14 +9538,20 @@ function nativeFetch(original, ownership, direct = runStep, observe) {
         return nativeFailure();
       }
     }
+    let routed = false, dedicatedSearch = false;
     try {
-      if (!owner.unowned && !routedNativeModel(owner.model, state)) return original(request);
+      routed = routedNativeModel(owner.model, state);
+      if (endpoint2 === "messages") {
+        body ??= await request.clone().json();
+        dedicatedSearch = record(body) && Array.isArray(body.tools) && body.tools.length === 1 && record(body.tools[0]) && body.tools[0].name === "web_search" && String(body.tools[0].type).startsWith("web_search_");
+      }
+      if (!owner.unowned && !routed && !dedicatedSearch) return original(request);
     } catch {
       return nativeFailure();
     }
     try {
-      body ??= await request.json();
-      if (endpoint === "count") {
+      body ??= await request.clone().json();
+      if (endpoint2 === "count") {
         return Response.json({ type: "error", error: { type: "not_found_error", message: "Direct provider token counting uses local estimation" } }, { status: 404, headers: { "x-should-retry": "false" } });
       }
       const native = nativeRequest(body, owner);
@@ -8943,7 +9564,7 @@ function nativeFetch(original, ownership, direct = runStep, observe) {
         stream: native.stream
       });
       const approved = nativeApprovals(state);
-      const config = await nativeWireConfig(native.req.target, state, approved, request.signal);
+      const config = routed ? await nativeWireConfig(native.req.target, state, approved, request.signal) : nativeConfig(state);
       const bound = nativeInputBound(config, native.req.target, state);
       const size = estimateTokens(native.req);
       observe?.({
@@ -8957,15 +9578,54 @@ function nativeFetch(original, ownership, direct = runStep, observe) {
       });
       if (bound !== null && size > 0.95 * bound) return nativeFailure(`rice-multi-models: estimated request exceeds the local 95% safety threshold of the ${bound} token input bound; compact or reduce context (token estimates are approximate)`);
       if (state?.transport) native.req.transport = state.transport;
-      const capability = remoteOf(config, native.req.target)?.model.tools;
       if (native.req.native?.maxTokens === 0 && remoteOf(config, native.req.target)?.model.kind !== "anthropic") throw new Error("native cache-only requests require a provider with cache population support");
-      const toolCapable = capability !== false && (!Array.isArray(capability) || capability.includes("web_search")) && !["agy", "grok"].includes(splitTarget(native.req.target)?.provider ?? "");
       const controller = new AbortController();
       const signal = AbortSignal.any([request.signal, controller.signal]);
       const wire = { req: native.req, configText: config.text, approved, userAgent: "rice-multi-models/native" };
+      if (dedicatedSearch) {
+        const query = ownership.search(scope) ?? ownership.search(owner);
+        const searchSignal = AbortSignal.any([signal, AbortSignal.timeout(9e4)]);
+        let nativeAttempt;
+        const claude = async () => {
+          const model2 = routed ? await searchModel() : native.model;
+          const headers2 = new Headers(request.headers);
+          headers2.delete("content-length");
+          const response = await providerCall.run(true, () => original(new Request(request, { headers: headers2, body: JSON.stringify({ ...body, model: model2 }), signal: AbortSignal.any([searchSignal, AbortSignal.timeout(3e4)]) })));
+          const checked = await nativeSearchResponse(response, searchSignal);
+          nativeAttempt = checked.response;
+          observe?.({ phase: "search", stage: "claude", status: checked.ok ? "success" : "unavailable" });
+          return checked.ok;
+        };
+        if (!routed) {
+          try {
+            if (await claude()) return nativeAttempt;
+          } catch {
+            request.signal.throwIfAborted();
+          }
+        }
+        try {
+          const found = await providerCall.run(true, () => directSearch(wire, native, query, remoteOf(config, native.req.target), searchSignal, direct, observe));
+          await nativeAttempt?.body?.cancel();
+          const events2 = { async *[Symbol.asyncIterator]() {
+            yield* found;
+          } };
+          return await providerResponse(native.model, nativeContracts(events2, native.req.native), signal, () => controller.abort(), native.stream);
+        } catch {
+          request.signal.throwIfAborted();
+        }
+        if (routed) {
+          try {
+            if (await claude()) return nativeAttempt;
+          } catch {
+            request.signal.throwIfAborted();
+          }
+        }
+        return nativeAttempt ?? nativeFailure("rice-multi-models: provider search, configured services and native Claude search are unavailable; run /rice-models search setup");
+      }
       const events = {
         async *[Symbol.asyncIterator]() {
-          const iterator = providerCall.run(true, () => nativeContracts(native.serverTools.length ? searchStep(wire, native, signal, direct, void 0, toolCapable) : direct(wire, signal), native.req.native)[Symbol.asyncIterator]());
+          if (native.serverTools.length) throw new Error("native server tool requires a direct implementation");
+          const iterator = providerCall.run(true, () => nativeContracts(direct(wire, signal), native.req.native)[Symbol.asyncIterator]());
           try {
             while (true) {
               const item = await providerCall.run(true, () => iterator.next());
