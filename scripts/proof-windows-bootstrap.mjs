@@ -7,6 +7,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { basename, isAbsolute, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { Script } from 'node:vm'
 
 assert.equal(process.platform, 'win32', 'this proof requires the actual Windows runtime')
 const helper = process.argv[2], native = process.env.RICE_CLAUDE_EXECUTABLE
@@ -22,9 +23,9 @@ try {
     env: { ...process.env, RICE_NATIVE_PARSE_SOURCE: WINDOWS_BOOTSTRAP_SCRIPT }, encoding: 'utf8', timeout: 15000, windowsHide: true,
   })
   assert.equal(parser.status, 0, 'the native PowerShell parser accepts the complete helper before execution')
-  function probe(name, options) {
+  function probe(name, options, directoryFor = windowsBootstrapDirectory) {
     const filename = `${createHash('sha256').update(randomUUID()).digest('hex')}.mjs`
-    const directory = windowsBootstrapDirectory(filename, options)
+    const directory = directoryFor(filename, options)
     assert(!/\s/.test(directory), 'the Bun preload directory has no whitespace')
     const file = join(directory, filename), marker = join(fixture, `${name}.json`)
     ownedFiles.push(file)
@@ -42,6 +43,19 @@ try {
     assert.match(result.stdout, /^2\.1\.299 \(Claude Code\)\s*$/)
     return directory
   }
+  // Match the nested protocol fixture's stripped environment, including its
+  // isolated USERPROFILE. Ordinary terminal bootstrap proofs do not cover it.
+  const reducedProbe = `const {pathToFileURL}=require('node:url');(async()=>{const {windowsBootstrapDirectory}=await import(pathToFileURL(process.argv[1]).href);process.stdout.write(JSON.stringify({directory:windowsBootstrapDirectory(process.argv[2])}))})().catch(error=>{process.stderr.write(error.code==='RICE_NATIVE_SELECTION'?error.message:'owned reduced-environment bootstrap failed');process.exitCode=1})`
+  new Script(reducedProbe)
+  probe('isolated-profile-reduced-environment', undefined, filename => {
+    const environment = Object.fromEntries(['PATH', 'TMPDIR', 'LANG', 'SystemRoot', 'WINDIR', 'ComSpec', 'TEMP', 'TMP'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]))
+    Object.assign(environment, { HOME: fixture, USERPROFILE: fixture })
+    const result = spawnSync(process.execPath, ['-e', reducedProbe, helper, filename], { env: environment, encoding: 'utf8', timeout: 20000, windowsHide: true })
+    assert.equal(result.status, 0, `reduced-environment bootstrap exits successfully; ${result.stderr.slice(-300)}`)
+    const parsed = JSON.parse(result.stdout)
+    assert.equal(typeof parsed.directory, 'string')
+    return parsed.directory
+  })
   probe('shortened-directory-lowercase-file', { temporaryDirectory: fixture })
   const blocker = join(fixture, 'not-a-directory')
   writeFileSync(blocker, 'owned fallback trigger\n', { flag: 'wx' })
