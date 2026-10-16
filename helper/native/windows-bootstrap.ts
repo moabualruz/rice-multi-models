@@ -22,7 +22,14 @@ try {
     $sections = [System.Security.AccessControl.AccessControlSections]'Access,Owner'
     $acl = if ($directory) { [System.IO.Directory]::GetAccessControl($path, $sections) } else { [System.IO.File]::GetAccessControl($path, $sections) }
     $script:stage = 'private-path-owner'
-    if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $sid -or ($directory -and -not $acl.AreAccessRulesProtected)) { throw 'unsafe bootstrap owner' }
+    $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+    # Elevated Windows tokens can create files owned by their TokenOwner group.
+    # Directories have our explicit user owner; files still require the private DACL.
+    $owners = @($sid)
+    if (-not $directory) { $owners += $identity.Owner.Value }
+    if ($owner -notin $owners) { throw 'unsafe bootstrap owner' }
+    $script:stage = 'private-directory-inheritance'
+    if ($directory -and -not $acl.AreAccessRulesProtected) { throw 'unsafe bootstrap inheritance' }
     $write = [System.Security.AccessControl.FileSystemRights]::Write -bor [System.Security.AccessControl.FileSystemRights]::Delete -bor [System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor [System.Security.AccessControl.FileSystemRights]::TakeOwnership
     foreach ($rule in $acl.Access) {
       $script:stage = 'private-path-writers'
