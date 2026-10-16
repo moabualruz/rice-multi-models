@@ -43,6 +43,11 @@ try {
   const saved = readFileSync(selection, 'utf8')
   assert.deepEqual(JSON.parse(saved), { format: 1, executable: native, claudeVersion: '2.1.299' })
   const version = cmd(['--version'])
+  if (version.status !== 0) process.stdout.write(`${JSON.stringify({ phase: 'managed-version', status: version.status, errorCode: version.error?.code,
+    controlledError: version.stderr.match(/rice-multi-models: [^\r\n]{1,600}/)?.[0],
+    moduleNotFound: /MODULE_NOT_FOUND|ERR_MODULE_NOT_FOUND/.test(version.stderr), shellPathFailure: /not recognized|cannot find|not found/i.test(version.stderr),
+    nodePresent: existsSync(process.execPath), entryPresent: existsSync(entry), commandPresent: existsSync(command), selectionPresent: existsSync(selection),
+  })}\n`)
   assert.equal(version.status, 0, 'plain managed .cmd launcher uses the saved qualified runtime')
   assert.match(version.stdout, /^2\.1\.299 \(Claude Code\)\s*$/)
   assert.equal(run(join(plugin, 'dist/launch.mjs'), ['--install']).status, 0, 'setup repeats with the verified saved runtime')
