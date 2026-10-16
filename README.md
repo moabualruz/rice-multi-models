@@ -1,17 +1,37 @@
 # rice-multi-models
 
-A Claude Code mod that adds models from other subscriptions, APIs and local
-servers as ordinary session and subagent models, with Claude Code's own tools,
-permissions and transcript.
-Main turns, native compaction, tool-internal inference and evaluators use each
-conversation's selected provider. The native adapter runs inside the official
-Claude executable and calls providers directly. It opens no inference listener,
-proxy or gateway. Start with `rice-claude` to activate it before native startup.
+A Claude Code mod for models from other subscriptions, APIs and local servers.
+Its function hooks can route main and subagent turns through direct provider
+calls while retaining Claude Code's tools, permissions and transcript.
+
+**Current status:** published **0.8.0** does not meet the full requirement inside
+ordinary, unmodified `claude`. Its complete native inference coverage relied on
+a startup preload integration that is no longer an accepted installation
+mechanism. The previous launcher-based installation path is withdrawn.
+It must not be recreated as part of setup. There is currently no recommended
+activation command that restores that coverage through the exposed plugin API.
+
+Main and subagent turn routing can work through function hooks. Native
+compaction, tool-internal inference, automatic evaluators and the complete native
+WebSearch fallback chain do not have equivalent coverage without the rejected
+adapter. `/reload-plugins` reloads function hooks; it does not install that
+adapter. The full plugin-only requirement remains unresolved. See the
+[plugin API findings](docs/research/plugin-only-activation-20261016.md).
+
+| Capability in ordinary Claude | Current status |
+| --- | --- |
+| Provider setup, approvals and fresh model discovery | Available through the plugin's commands and helper. Discovery does not establish entitlement. |
+| Main and subagent turn routing | Available through exposed `turn.step` hooks on compatible builds. This does not cover every native inference path. |
+| Selected-provider native compaction | Incomplete without the rejected adapter; guarded routed compaction refuses when it is absent. |
+| Internal skill/tool inference and automatic evaluators | Full selected-provider coverage is incomplete. Exposed auxiliary hooks cover only the calls that reach them. |
+| Search endpoint configuration and retrieval helper | Available; saving or testing an endpoint does not establish native WebSearch integration. |
+| Complete native WebSearch and WebFetch inference routing | Incomplete without the rejected adapter. |
 
 Use this mod for ChatGPT/Codex, API keys, local models and provider configuration.
-For switching Anthropic OAuth accounts, use
+For managing saved Anthropic OAuth accounts, see
 [rice-session-accounts](https://github.com/moabualruz/rice-session-accounts), whose
-account picker shows saved account names, emails and subscription tiers. Both
+account picker shows saved account names, emails and subscription tiers. Its
+named switching is also blocked without the rejected bridge. Both
 mods use your existing Claude configuration; extra account login folders are
 only for authentication.
 
@@ -31,189 +51,84 @@ Providers:
 
 ## Install and start
 
-Release **0.8.0** runs its native adapter in the official compiled **Claude Code
-2.1.299** on macOS, Linux (including WSL), and native Windows, with **Node.js 22 or newer**. Your
-usual `claude` command can stay on another version. Setup saves a separate
-qualified executable for `rice-claude`; it does not upgrade or downgrade your
-normal Claude installation. Other versions, including 2.1.300, are not qualified
-for the adapter. Check `node --version` before starting.
-
-Run this one command in a terminal on the machine where Claude runs:
+Use your machine's ordinary `claude` command with Node.js 22 or newer available
+in its environment. Run this in a terminal on the machine where Claude runs:
 
 ```sh
 claude plugin install rice-multi-models --marketplace moabualruz/rice-mods
 ```
 
 The command adds the Rice marketplace if needed and installs the mod. Its helper
-and dependencies are bundled. **No build, Bun, TypeScript compiler, curl, jq or
-dependency installation inside the plugin cache is needed.**
+and dependencies are bundled. **No consumer build or dependency installation
+inside the plugin cache is needed.** This installation exposes the available
+function hooks; it does not resolve the native coverage limitations above.
 
-1. Start a Claude Code session with `claude`, approve the mod's requested
+1. Start ordinary Claude Code with `claude`, approve the mod's requested
    capabilities when prompted, then run:
 
    ```text
    /rice-models setup
    ```
 
-   Setup checks the runtime, reports login requirements, refreshes model
-   discovery and synchronizes `/model`. For ChatGPT/Codex, reuse your existing
-   Codex login. If you need to sign in, run the exact login command setup prints
-   in a terminal. If Codex is missing, `/rice-models setup codex` installs a
-   private copy and prints its login command. For another provider, follow the
-   [provider setup table](#provider-specific-setup) below.
+   Setup checks Node and the bundled helper, reports login requirements,
+   refreshes discovery and synchronizes model-picker candidates. For Codex,
+   reuse your existing login or run the exact login command setup prints in a
+   terminal. If Codex is missing, `/rice-models setup codex` installs a private
+   copy and prints its login command. For another provider, follow the
+   [provider setup table](#provider-specific-setup).
 
-2. In that Claude session, install the native launcher. If your usual `claude`
-   command is already 2.1.299, run:
-
-   ```text
-   /rice-models setup native
-   ```
-
-   Otherwise, select an existing official 2.1.299 executable by its full path:
-
-   ```text
-   /rice-models setup native /absolute/path/to/claude-2.1.299
-   ```
-
-   See [private native runtime](#private-native-runtime) below if you need a
-   separate copy. Paths containing spaces may be quoted. Use the actual absolute
-   path: `$HOME` and `~` are not expanded in this slash command.
-
-   Setup verifies the native adapter before saving the choice and creates the
-   managed `rice-claude` command in `~/.local/bin`. Future plain `rice-claude`
-   launches reuse that choice. The official `claude` command and updater stay
-   intact.
-
-3. Start a **new** terminal session with:
-
-   ```sh
-   rice-claude
-   ```
-
-   If the command is not on PATH, use `"$HOME/.local/bin/rice-claude"` on macOS/Linux,
-   or `& "$HOME/.local/bin/rice-claude.cmd"` in Windows PowerShell. An already
-   running Claude process cannot load the native adapter. For a declared API or
-   local provider, run `/rice-models providers` in this new session, then
-   `/rice-models approve <provider>` with its configured provider name. Next run:
+2. For a declared API or local provider, run `/rice-models providers`, then
+   `/rice-models approve <provider>` with its configured provider name. Refresh
+   the available catalogue:
 
    ```text
    /rice-models setup
    /rice-models models
    ```
 
-4. Choose an exact model ID returned by that catalogue and enter
-   `/model <id>`. Run `/rice-models doctor` to confirm
-   `nativeAdapter.active: true`, then make an ordinary coding request. With a
-   native provider model, keep using Claude's ordinary tools, permissions,
-   subagents and native compaction. Each conversation uses its selected provider;
-   an explicitly different subagent model uses its own provider. CLI workers
-   retain their own tool loops, as described below.
+3. Choose an exact model ID returned by that catalogue with `/model <id>`.
+   Use `/rice-models doctor` and `/rice-models status` to inspect current state.
+   A successful main turn confirms that route only; it does not establish
+   compaction, internal-tool, evaluator or full native-search coverage.
 
-Use `rice-claude` for later sessions too. `/model` changes the model within the
-current session. When you already know an available model ID, you can start with
-`rice-claude --model <id>`. Discovery lists candidates; a live request establishes
-whether your account currently has access.
-
-### Private native runtime
-
-You can select a retained official native executable, such as
-`/Users/your-name/.local/share/claude/versions/2.1.299`, without changing the
-normal Claude command. Verify the actual path exists on your machine.
-
-If you need a separate copy and have npm installed, run this in your terminal:
-
-```sh
-npm install --prefix "$HOME/.claude/rice-multi-models/runtimes/claude-2.1.299" @anthropic-ai/claude-code@2.1.299 --no-audit --no-fund
-printf '/rice-models setup native "%s"\n' "$HOME/.claude/rice-multi-models/runtimes/claude-2.1.299/node_modules/.bin/claude"
-```
-
-The first command installs the pinned official package into that private prefix.
-It is not a global CLI installation. The second prints a setup command with your
-actual absolute path. Copy that printed command into Claude Code. On WSL, run
-the terminal commands inside the same Linux distribution as your Claude session.
-
-On native Windows, use PowerShell instead:
-
-```powershell
-$nativePrefix = Join-Path $HOME '.claude/rice-multi-models/runtimes/claude-2.1.299'
-npm install --prefix $nativePrefix '@anthropic-ai/claude-code@2.1.299' --no-audit --no-fund
-$nativeExecutable = Join-Path $nativePrefix 'node_modules/@anthropic-ai/claude-code/bin/claude.exe'
-Write-Output ('/rice-models setup native "' + $nativeExecutable + '"')
-```
-
-Copy the printed slash command into Claude. Setup creates the managed pair
-`rice-claude.cmd` and `rice-claude.mjs` in `$HOME/.local/bin`. Keep both files.
-The launcher uses your verified Node executable and handles native Windows paths.
-
-The verified selection lives in
-`~/.claude/rice-multi-models/native-launcher.json`, or under your active
-`CLAUDE_CONFIG_DIR`. Setup without an executable argument preserves an existing
-valid selection. Every launch verifies it again; a missing, changed or invalid
-selection fails with a repair command. An explicit `RICE_CLAUDE_EXECUTABLE`
-environment override takes precedence, followed by the saved selection, then
-`claude` on PATH when no selection exists. No environment override is needed
-after setup saves your choice.
+For later sessions, continue using ordinary `claude`. Discovery lists candidates;
+a live request establishes whether your account currently has access. No new
+startup command, alias, wrapper, global preload or replacement executable is
+recommended. Do not use the published version's historical native setup path.
 
 ### What setup does
 
-Fresh installation activates the function hooks in the current terminal session.
-On every session startup, the mod checks Node and the bundled helper, fetches
-fresh supported model catalogues and metadata, starts its private session helper,
-and synchronizes discovered candidates into `/model`. It preserves your other
-settings and model rows, including rows you customized. Cached models, bundled
-model names and configured defaults are not discovery fallbacks. Failed discovery
-reports an unavailable source rather than inventing candidates. Installing through the standalone CLI
-prepares the mod for your next Claude Code session; after an update, use
-`/reload-plugins` or restart to load the updated copy.
+At session startup, the function hooks check Node and the bundled helper, fetch
+fresh supported model catalogues and metadata, start a private session helper,
+and synchronize discovered candidates into `/model`. Setup preserves other
+settings and model rows, including customized rows. Cached names and configured
+defaults are not discovery fallbacks; failed discovery reports an unavailable
+source rather than inventing candidates.
 
-The first interactive activation explains what was configured and what still
-needs your attention. Account login and provider approval are not automated:
-installing a mod cannot grant a subscription, credit, API key or model entitlement.
-Use `/rice-models setup` to recheck and repair setup, or `/rice-models doctor` for
-read-only diagnostics. Neither changes your selected session model.
-
-For full native inference, run `/rice-models setup native [absolute-executable]`
-once, then start a new terminal session with `rice-claude`. This installs an owned launcher in
-`~/.local/bin`; it preserves the official `claude` executable and updater. The
-launcher finds the current installed plugin on every invocation, validates native
-adapter activation, and refuses an unverified host version. An already running
-process needs a new launch to load the adapter.
-
-`rice-claude` accepts Claude's normal arguments, including
-`rice-claude --model codex/gpt-6.1-sol` and `rice-claude --resume <session-id>`.
-An explicit model takes precedence. UUID resumes from adapter sessions retain
-their saved primary selection before startup compaction runs. When resuming an
-older session or using an interactive resume picker, pass `--model <id>` to bind
-its provider before startup inference. Provider approvals are stored in the
-native inline plugin scope used by the launcher. Approve declared providers in
-that session with `/rice-models approve <provider>`.
-
-With Rice Accounts 0.3 or newer installed, the same launcher also accepts:
-
-```sh
-rice-claude --account personal-live --resume <session-id> --model <provider/model>
-```
-
-Use a saved browser OAuth account name. Its credential folder is selected before
-resume or startup compaction; the machine's settings, MCP configuration and model
-providers still apply. Ordinary independent launches start with the machine login.
-Within a running session, `/rice-account <name>` changes that session and its
-descendants. `/reload-plugins` updates function hooks; a process that lacks the
-native cache hook needs a launcher restart to update account usage reporting.
+Installing through the standalone Claude plugin CLI prepares the mod for your
+next Claude Code session. After an update, `/reload-plugins` or an ordinary
+restart can load updated function hooks. Neither supplies the missing native
+integration. Account login and provider approval remain explicit user actions;
+installing a plugin cannot grant a subscription, credit, API key or entitlement.
+`/rice-models setup` rechecks setup. `/rice-models doctor` provides read-only
+diagnostics. Neither changes the selected session model.
 
 ### Web search
 
-Native WebSearch tries these options in order, independently for each conversation:
+The published 0.8.0 native adapter implemented the following search order. This
+is reference material for its search contracts, not a claim that ordinary
+Claude currently runs the complete chain:
 
 1. Search supplied by the selected provider and account, when its endpoint and model support the request.
 2. Your saved search services, in ascending priority order. Put a self-hosted or free service first and cloud services after it.
 3. Claude Code's native WebSearch, using the Anthropic account currently selected for this session.
 
-This final fallback applies only to the dedicated WebSearch operation. It does not
-change the session model, account selection, compaction provider or subagents.
-If Claude's quota is exhausted, a working provider search or saved retrieval
-service still completes the search. If all three options fail, the tool reports
-the failure. A successful search with no results stops the chain.
+The final Anthropic fallback is specific to dedicated WebSearch. It is not a
+fallback for ordinary inference, compaction or subagents. The complete chain
+depended on the rejected adapter, so native WebSearch through ordinary Claude
+must not be promised to work when Claude's quota is exhausted. The configured
+retrieval helper can query a working saved service independently of Anthropic
+inference; that result alone does not prove native-tool integration.
 
 Add services from inside the mod:
 
@@ -236,8 +151,8 @@ You can also configure it directly:
 Use your actual SearXNG URL with JSON results enabled. Supply cloud keys through
 the named environment variable or an absolute credential-helper argv in
 `<CLAUDE_CONFIG_DIR>/rice-multi-models/search.json`. Enter only variable names in
-the session. Each service receives its own credential. Edits apply on the next
-search; no restart is needed. Existing `RICE_MULTI_MODELS_SEARCH_URL` configuration
+the session. Each service receives its own credential. Edits apply on the next helper
+retrieval; no restart is needed. Existing `RICE_MULTI_MODELS_SEARCH_URL` configuration
 remains a SearXNG fallback after saved services.
 
 Official OpenAI Responses, Anthropic Messages and Google GenerateContent endpoints
@@ -255,8 +170,9 @@ next search option. Codex accepts a bounded result only when its completed
 response provides sufficient search-call accounting; that check cannot cap
 already consumed server work. Provider/service output is buffered before failover,
 and cancellation stops the chain. See the [provider research](docs/research/provider-web-search-20261016.md)
-for contracts and limitations. WebFetch keeps native page retrieval and routes its
-summarizer through the conversation's selected provider.
+for contracts and limitations. The adapter also routed WebFetch summarization
+through the conversation's selected provider while retaining native page
+retrieval. That native inference coverage is incomplete in ordinary Claude.
 
 ### Provider-specific setup
 
@@ -302,10 +218,10 @@ quota remain unknown until the provider supplies that evidence.
 - **An update appears inactive:** update the marketplace and plugin, then run
   `/reload-plugins` or restart. Editing a source checkout does not update an
   already-installed Git-backed copy.
-- **The launcher refuses your Claude version or saved executable:** select a
-  qualified 2.1.299 copy with `/rice-models setup native <absolute-executable>`.
-  Your ordinary Claude command can keep its current version. Reloading does not
-  qualify another native version or repair a removed saved executable.
+- **Diagnostics report an inactive native adapter:** this is expected with
+  ordinary Claude under the current limitation. Do not follow historical
+  native-setup instructions in the published command output. Reloading or
+  restarting cannot supply the missing API coverage.
 - **You are using headless mode:** startup remains deterministic and does not
   open interactive setup/login prompts. Inspect setup status and complete login
   in an interactive terminal before retrying.
@@ -325,18 +241,18 @@ actually resolves; do not reinstall Codex when its login is already present.
 
 | Where | How |
 | --- | --- |
-| Main session | `/model codex/gpt-6.1-sol` (or any id from `/rice-models models`), `rice-claude --model codex/...` |
+| Main session | `/model <id>` using an actual id from `/rice-models models` in ordinary Claude |
 | A subagent type of yours | `model: codex/gpt-6.1-sol` in its agent file (`.claude/agents/*.md`) |
 | Ad hoc | the agent types `rice-multi-models:codex` and `rice-multi-models:codex-explore` |
 | Mixed | a Claude session with Codex subagents, or a Codex session with Claude subagents (`model: haiku`) |
 
-`/effort` and `--effort` reach the selected provider. Reasoning and tool calls
-retain their native stream shapes. With the adapter active, manual and automatic
-compaction use the host's actual prompt, transcript selection and bookkeeping.
-Temporary skill aliases, background model aliases, and auxiliary requests keep
-the selected owner. An explicitly different child model owns its own provider.
-Without the adapter, legacy main-turn routing remains available and routed
-compaction refuses with a launcher instruction.
+For routed turn hooks, `/effort` and `--effort` reach the selected provider, and
+reasoning and tool calls retain their stream shapes. The required behavior also
+includes native compaction, temporary skill aliases, background model aliases,
+and every auxiliary request using its conversation's selected provider. That
+complete behavior remains unresolved through the exposed plugin API. A routed
+compaction refusal may still print a historical activation instruction in
+0.8.0; that instruction is no longer recommended.
 
 `/rice-models` shows the helper, transport, effort, ChatGPT rate limits and
 the last step. `/rice-models effort <level>`, `/rice-models transport auto|ws|sse`
@@ -368,16 +284,21 @@ removes their obsolete `behavesAs: claude-sonnet-4-6` alias, which otherwise mak
 the native engine enforce Sonnet's context window for a routed model. Custom rows,
 rows with extra fields and rows marked edited in the ownership record are retained.
 
-The adapter correlates native Worker instances, dispatch IDs and operation ports,
+The historical native adapter correlates Worker instances, dispatch IDs and
+operation ports,
 then retains immutable ownership across asynchronous continuations. It routes
 native Messages requests inside the host process using the existing direct
 clients. Concurrent children keep distinct owners; child completions,
 classification and transcript forks do not borrow the parent's provider.
-Unknown ownership fails closed. Ordinary inference keeps its provider on failure;
-dedicated WebSearch follows the explicit search fallback order above.
+Unknown ownership fails closed. This describes the rejected startup integration,
+which ordinary Claude does not load. It is not evidence of full plugin-only
+ownership coverage. Ordinary routed turn inference keeps its provider on failure;
+the dedicated WebSearch exception is described above.
 
-Native request caps, named tool choice, structured output, domain restrictions,
-cancellation and exact stop strings are preserved across protocol families.
+The adapter's protocol contracts preserve native request caps, named tool choice,
+structured output, domain restrictions, cancellation and exact stop strings across
+protocol families. Their native-path acceptance tests are historical evidence
+for that integration, not full ordinary-Claude acceptance.
 Configured ceilings remain in force. Codex subscription inference has no server
 output-cap field; a reported overrun fails the native contract, while local stop
 handling cancels the owned stream. This cannot guarantee a cap on billed server
@@ -393,8 +314,8 @@ A switch allowed by this guard is not proof that the next request fits (for exam
 new instructions and output also need room). Server-side search/fetch transcript
 blocks are retained as historical data rather than rerun as client tools.
 
-**Native primary-window integration:** For the main routed native-provider model,
-the mod synchronizes Claude Code 2.1.299's supported process-local
+**Primary context-window metadata:** For the main routed native-provider model,
+the published function hooks synchronize Claude Code 2.1.299's process-local
 `CLAUDE_CODE_MAX_CONTEXT_TOKENS` override from fresh metadata for the exact active
 model, using `contextWindow ?? maxContextWindow`. This sets the native context
 meter's window and automatic compaction threshold, not provider entitlement or
@@ -402,7 +323,9 @@ available input/output capacity. An existing explicit owner override remains
 authoritative. On unknown routes, discovery failure or `session.end`, the mod
 restores the value it owns; ownership state is preserved across hot reload.
 External status-line output can retain its pre-reload text until the next normal
-engine refresh; `/context` reads the current native window immediately.
+engine refresh. This meter integration does not route native compaction or
+establish complete provider coverage, and its historical build checks do not
+qualify every current host version.
 
 **Remaining host limitations:** The exposed plugin API still cannot register
 numeric per-model limits or capabilities. This process-global override does not
@@ -582,15 +505,11 @@ Codex CLI on the same account. The session helper accepts up to 64 concurrent st
 
 ## Update
 
-Release **0.8.0** adds the native Windows launcher, translates Claude's positional
-tool additions and removals, and composes Rice Accounts' native cache and explicit
-startup account selection. It also adds provider-native web search, an in-session
-search configurator and ordered retrieval services before native Claude fallback.
-Launcher setup still saves the verified native
-executable, so plain `rice-claude` reuses a private qualified 2.1.299 copy while the
-machine's ordinary Claude command keeps its version. The native adapter, direct
-compaction, web inference, prompt/agent evaluators, concurrent child ownership,
-temporary skill aliases, startup approvals and UUID resume binding remain available.
+Published **0.8.0** remains a historical release. Its complete native behavior
+used the startup integration rejected by the current requirement. This README
+correction does not supply a compliant replacement or announce a new runtime
+release. Ordinary plugin updates do not remove the API coverage limitation.
+
 The `rice-mods` marketplace tracks this repository's `main` without a
 tag pin. Update both the marketplace and your installed mod, then reload or restart
 the session:
@@ -602,23 +521,19 @@ claude plugin update rice-multi-models@rice-mods
 
 ## Requirements and platform scope
 
-**Consumers:** The full native adapter is qualified for the official compiled
-Claude Code **2.1.299** executable on macOS, Linux (including WSL), and native Windows, with
-Node.js 22 or newer. Other host versions refuse until their compatibility proof
-is added. Launch through `rice-claude`; IDE, desktop and SDK clients must use this
-verified entry point rather than an unmodified launch path. Optional provider CLIs,
-account access and credentials depend on the providers you actually use; Codex
-login is not a requirement for using a declared local endpoint. The compiled
-helper, authenticated WebSocket implementation and provider instruction asset
-are included in the plugin payload. No consumer dependency installation is needed.
+**Consumers:** Use ordinary Claude Code with Node.js 22 or newer. Optional
+provider CLIs, account access and credentials depend on the providers you use;
+Codex login is not required for a declared local endpoint. The compiled helper,
+authenticated WebSocket implementation and provider instruction asset are
+included in the plugin payload. No consumer dependency installation is needed.
 
-The Node helper handles macOS/Linux paths and Unix sockets, and Windows paths,
-npm shims and named pipes. Native Windows uses an owned `.cmd`/`.mjs` launcher
-pair and a private bootstrap directory protected by Windows ACLs. Its actual
-native executor checks cover path spaces, fallback transport and normal plugin
-updates. WSL uses the Linux runtime. Claude's Chrome integration remains subject
-to its native browser-login and OS requirements; WSL Chrome control is outside
-this mod's scope.
+The Node helper handles macOS/Linux paths and Unix sockets, plus native Windows
+paths, npm shims and named pipes. WSL uses the Linux environment. These helper
+capabilities do not establish complete native inference coverage through the
+plugin API. Historical adapter qualification for Claude 2.1.299 on macOS, Linux
+and Windows used the rejected startup integration. It is not an ordinary-Claude
+compatibility guarantee. Claude's Chrome integration retains its native OS and
+browser-login requirements; WSL Chrome control is outside this mod's scope.
 
 **Contributors:** pinned npm development tools build and typecheck the Node
 helper. Bun is retained only for the existing contributor test suite, not for
@@ -627,6 +542,10 @@ installed sessions. Tool schemas are generated for a Claude Code build with
 that is release maintenance, not an installation step for every user.
 
 ## Build and tests
+
+These contributor checks exercise the published implementation, including its
+historical startup integration. They do not certify full functionality through
+ordinary Claude's exposed plugin API.
 
 - `npm install --ignore-scripts` installs development/build tools using the
   committed npm lockfile; never run it inside an installed plugin cache.

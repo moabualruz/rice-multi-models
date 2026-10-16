@@ -1,6 +1,8 @@
 # Direct native inference
 
-Status: implementation specification, 2026-10-14. Baseline: 0.6.4.
+Status: incomplete under the owner's no-launcher requirement, 2026-10-16.
+The 0.8.0 startup-preload integration is historical implementation evidence and
+does not satisfy the current activation contract.
 
 ## Outcome
 
@@ -16,7 +18,14 @@ clients. Native compaction keeps the host's prompt, transcript selection and
 bookkeeping; the mod supplies the provider response rather than a replacement
 summary algorithm.
 
-## Established implementation seam
+Users start the ordinary, unmodified `claude` command. Installing or enabling a
+mod must activate its supported behavior through the host's plugin API. Do not
+introduce a separate command, replacement launcher, shell wrapper or alias. Do
+not substitute global preload configuration or a native binary patch for the
+rejected launcher. The original direct-provider, account-isolation and inference
+coverage requirements remain required; partial turn routing is insufficient.
+
+## Historical implementation seam
 
 Claude Code 2.1.299 is a compiled Bun executable. Bun's documented `BUN_OPTIONS`
 preload executes an owned module before the embedded program. A native runtime
@@ -30,19 +39,21 @@ The adapter must cover this path. The proven fetch accessor supplies an owned
 delegate with a distinct identity on each read; unrelated requests still invoke
 the original fetch. Test this behavior on each supported native version.
 
-`BUN_OPTIONS` does not decode shell or JSON quotation around a preload filename
-in the tested binary. The launcher must validate its actual path transport,
-including paths with spaces, and require a successful preload handshake.
+`BUN_OPTIONS` did not decode shell or JSON quotation around a preload filename
+in the tested binary. The former launcher validated its actual path transport,
+including paths with spaces, and required a successful preload handshake. This
+is retained evidence about that rejected activation path, not installation
+guidance or a conforming implementation.
 
 Sources and alternative interfaces are recorded in
 [the primary-source research](../research/native-inference-routing-20261014.md).
 
 ## Modules
 
-Use TypeScript and the existing esbuild and Node 22+ workflow. The runtime adapter
-is bundled JavaScript executed by the native host's Bun runtime. The launcher is
-Node, using argument-vector process execution. No additional runtime installation
-or native binary patch is required.
+Use TypeScript and the existing esbuild and Node 22+ workflow. The following
+modules describe the 0.8.0 adapter. Reuse their provider codecs and ownership
+logic only behind a conforming host API; their existing launcher cannot be the
+production activation mechanism.
 
 1. `native/ownership.ts`: immutable owners and correlation for actual Worker
    instances, dispatch IDs, environment ports, operations and continuations.
@@ -52,8 +63,8 @@ or native binary patch is required.
    JSON or SSE responses, retaining text, tools, usage, errors and cancellation.
 4. `native/preload.ts`: initialize ownership tracking and transport interception
    before native startup. It opens no network listener.
-5. `native/launch.ts`: find the official executable, validate preload activation,
-   preserve the caller's arguments/environment and bind the plugin payload.
+5. `native/launch.ts`: historical startup-preload installer, excluded from the
+   current production activation contract.
 6. Existing hooks publish current selection, catalogue and approved provider
    identities, use trusted caller metadata for exposed auxiliary operations, and
    allow authentic native compaction only when the adapter is healthy.
@@ -103,28 +114,48 @@ declared execution model and capability limits. Do not claim an unavailable mode
 capability merely because its provider has been configured.
 
 Streaming responses must contain the complete native message/block sequence and
-terminal message events. Preserve tool identities and JSON arguments. Errors must
-retain a useful nonsecret class and phase, disable unsafe native replay, and never
-trigger an Anthropic or different-provider fallback. Abort the direct request when
-the native request is abandoned.
+terminal message events. Preserve tool identities and JSON arguments. Ordinary
+inference errors must retain a useful nonsecret class and phase, disable unsafe
+native replay, and never trigger an Anthropic or different-provider fallback.
+The dedicated WebSearch chain below is the owner's explicit exception. Abort the
+direct request when the native request is abandoned.
 
 Native token-count and quota probes must use the routed provider's supported
 contract or the host's documented local estimation fallback. They must not contact
 an exhausted Claude subscription to authorize unrelated inference.
 
 Native web extraction keeps the host's retrieval behavior and routes its authentic
-summarizer request. Server web search needs a supported direct provider capability
-or a configured direct retrieval backend. Implement any required server-tool loop
-within the same owner; preserve native search result shapes and domain constraints.
-Retrieval endpoints are search/content services, never inference gateways.
+summarizer request. Dedicated WebSearch first tries the selected provider's native
+search capability with that provider's selected account. If unavailable, it tries
+the explicitly configured retrieval services in priority order. The final fallback
+is native Claude WebSearch using the current selected Anthropic account. This
+exception does not apply to ordinary inference. Preserve native search result
+shapes, domain constraints, cancellation and bounded execution. Retrieval endpoints
+are search/content services, never inference gateways. Owner SearXNG configuration
+and live tests are restricted to this Mac and mkh-pc; WSL and other machines are
+excluded.
 
 ## Launch and compatibility
 
-The adapter must be present before process startup. A plugin cannot preload into
-an already running native process. Supply an explicit owned launcher for terminal
-and SDK use, preserving the managed native executable and its updater. Supported
-background launches inherit or invoke that launcher. Do not silently certify
-desktop, IDE or other launch paths until their actual environment is verified.
+Use the normal `claude` executable and updater on every platform. Plugin reload
+does not retroactively load a main-process preload, and a second startup command
+is not an accepted remedy. Terminal, SDK, IDE, desktop and background launches
+need the actual supported plugin activation contract, rather than environment
+inheritance from a special entry point.
+
+The current 2.1.301 inspection and ordinary-command plugin proof are recorded in
+[plugin-only activation research](../research/plugin-only-activation-20261016.md).
+Two required host capabilities remain unavailable through the inspected plugin
+API: a caller-owned interception boundary for every native inference request and
+response, and an atomic session-local account transition that invalidates native
+credential caches and retires old-account quota responses. These boundaries are
+dependencies, not permission to reduce the feature requirements.
+
+Before another release is described as complete, demonstrate those capabilities
+inside ordinary `claude`, without preload variables, wrappers, aliases or a
+replacement executable. Repeat actual native compaction, auxiliary-inference,
+concurrent-provider and account-cache acceptance against that path. The retained
+launcher-based receipts do not establish this new activation requirement.
 
 Probe actual native versions on macOS and Linux/WSL. Declare Windows support only
 with meaningful native evidence. Unsupported or missing adapter activation is
@@ -151,22 +182,26 @@ installation merely because this specification is new.
 
 ## Acceptance
 
-Test actual native entry points with Anthropic inference denied and independently
-observed selected-provider requests. Deterministic fixtures prove routing and
-native contracts. Separate live checks prove configured entitlement and output.
+Test ordinary native inference entry points with Anthropic inference denied and
+independently observed selected-provider requests. Test dedicated WebSearch's
+explicit native-Claude fallback separately. Deterministic fixtures prove routing
+and native contracts. Separate live checks prove entitlement and output.
 
 - Main, child, nested, resumed and messaged loops retain their selected providers.
 - Overlapping children from different providers keep distinct auxiliary owners.
 - Skill loading, temporary model overrides and deferred ToolSearch work.
 - Completion, classification and appropriate transcript forks use their owners.
 - Manual, automatic and precomputed compaction use native requests/bookkeeping.
-- WebFetch and WebSearch complete through direct selected-provider inference.
+- WebFetch synthesis uses the conversation's direct selected-provider inference.
+- Dedicated WebSearch follows selected provider/account, configured services by
+  priority, then native Claude/current Anthropic account, with each step observed.
 - Auto classifiers and configured prompt/agent evaluators retain their native
   decisions while using the requesting conversation's provider.
 - Resume summaries, prompt suggestions, titles, goals and scheduled/incoming turns
   follow their owner's route where enabled in the tested host.
-- Token/quota probes, failure, cancellation and retry paths do not leak to Claude
-  or replay committed provider work.
+- Ordinary inference token/quota probes, failure, cancellation and retry paths
+  do not leak to Claude or replay committed provider work. Dedicated WebSearch
+  follows only its explicitly authorized fallback chain.
 - All declared protocol families have meaningful contract tests; live configured
   provider results retain their actual availability and capability scope.
 - The full gate and hosted checks pass for the assembled revision, and the published
