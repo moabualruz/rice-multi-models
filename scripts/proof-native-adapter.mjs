@@ -175,8 +175,9 @@ try {
     }
   `)
   writeFileSync(file, source)
-  const env = Object.fromEntries(['PATH', 'TMPDIR', 'LANG', 'SystemRoot', 'WINDIR', 'ComSpec', 'TEMP', 'TMP', 'RICE_CLAUDE_EXECUTABLE'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]))
-  Object.assign(env, { HOME: fixture, USERPROFILE: fixture, CLAUDE_CONFIG_DIR: configDir, CODEX_HOME: join(fixture, '.codex'), ANTHROPIC_API_KEY: 'owned-no-account', ANTHROPIC_BASE_URL: base,
+  // ProgramFiles and CLAUDE_CODE_GIT_BASH_PATH let native Windows find Git Bash, whose absence removes the Bash tool.
+  const env = Object.fromEntries(['PATH', 'PATHEXT', 'TMPDIR', 'LANG', 'LC_ALL', 'SystemRoot', 'SystemDrive', 'WINDIR', 'ComSpec', 'ProgramFiles', 'ProgramFiles(x86)', 'CLAUDE_CODE_GIT_BASH_PATH', 'TEMP', 'TMP', 'RICE_CLAUDE_EXECUTABLE'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]))
+  Object.assign(env, { ...(process.platform === 'win32' ? { OS: 'Windows_NT' } : {}), HOME: fixture, USERPROFILE: fixture, CLAUDE_CONFIG_DIR: configDir, CODEX_HOME: join(fixture, '.codex'), ANTHROPIC_API_KEY: 'owned-no-account', ANTHROPIC_BASE_URL: base,
     RICE_MULTI_MODELS_SEARCH_URL: `http://127.0.0.1:${search.address().port}/search`, ENABLE_TOOL_SEARCH: 'true', DISABLE_AUTOUPDATER: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1' })
   // Public hooks answer a refusal or a failed response as the step's own text,
   // so the host reports an ordinary result: exit 0 and is_error false. Exit 1
