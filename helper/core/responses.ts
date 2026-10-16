@@ -103,6 +103,7 @@ type ResponseStreamEvent =
   | { type: 'response.output_item.done'; output_index: number; item: ResponsesOutputItem }
   | { type: 'response.output_text.delta'; output_index: number; delta: string }
   | { type: 'response.output_text.annotation.added'; output_index: number; annotation: Record<string, unknown> }
+  | { type: 'response.web_search_call.completed'; output_index: number; item_id: string }
   | { type: 'response.refusal.delta'; output_index: number; delta: string }
   | { type: 'response.function_call_arguments.delta'; output_index: number; delta: string }
   | { type: 'response.reasoning_summary_text.delta'; output_index: number; delta: string }
@@ -225,6 +226,9 @@ function isStreamEvent(value: unknown): value is ResponseStreamEvent {
       break;
     case 'response.output_text.annotation.added':
       valid = indexed && isRecord(value.annotation);
+      break;
+    case 'response.web_search_call.completed':
+      valid = indexed && typeof value.item_id === 'string' && value.item_id.trim().length > 0;
       break;
     case 'response.failed':
     case 'error':
@@ -625,6 +629,8 @@ class ResponseStream {
   private emit: Emit;
   private options: ResponseOptions;
   private terminalOutput?: ResponsesOutputItem[];
+  private terminalSucceeded = false;
+  private completedSearchIds = new Map<number, string>();
 
   private searchEvidence() {
     return responsesSearchEvidence([...this.slots.values()].flatMap(slot => [slot.item, ...(slot.annotations.length ? [{ type: 'message', content: [{ type: 'output_text', annotations: slot.annotations }] }] : [])]));
@@ -656,6 +662,12 @@ class ResponseStream {
       case 'response.incomplete':
         this.complete(event);
         return;
+      case 'response.web_search_call.completed': {
+        const slot = this.slots.get(event.output_index);
+        if (!slot || slot.item.type !== 'web_search_call' || slot.item.id && slot.item.id !== event.item_id || this.completedSearchIds.has(event.output_index) && this.completedSearchIds.get(event.output_index) !== event.item_id) throw new Error('Search completion event changed its output identity');
+        this.completedSearchIds.set(event.output_index, event.item_id);
+        return;
+      }
       default:
         if (!this.message) {
           throw new Error('OpenAI stream omitted response.created');
@@ -704,7 +716,12 @@ class ResponseStream {
     }
     const evidence = this.searchEvidence();
     if (evidence.error) throw new Error(evidence.error);
-    this.options.onSearchSources?.({ sources: evidence.sources, searched: evidence.searched, ...responsesSearchAccounting(this.terminalOutput, [...this.slots.values()].map(slot => slot.item)) });
+    const slots = [...this.slots.entries()];
+    this.options.onSearchSources?.({ sources: evidence.sources, searched: evidence.searched, ...responsesSearchAccounting(this.terminalOutput, slots.map(([, slot]) => slot.item), {
+      successful: this.terminalSucceeded,
+      slots: slots.map(([index, slot]) => ({ index, done: slot.done })),
+      completedIds: [...this.completedSearchIds.values()],
+    }) });
     const cached = usage?.input_tokens_details?.cached_tokens ?? 0;
     const written = usage?.input_tokens_details?.cache_write_tokens ?? 0;
     message.usage = {
@@ -747,6 +764,7 @@ class ResponseStream {
     >,
   ) {
     this.terminalOutput = event.response.output;
+    this.terminalSucceeded = event.type !== 'response.incomplete' && (event.response.status === undefined || event.response.status === 'completed');
     if (this.stopPending) {
       this.start(event.response);
       this.finish('stop_sequence', event.response.usage);
@@ -826,7 +844,7 @@ class ResponseStream {
     return slot;
   }
 
-  private update(event: Extract<ResponseStreamEvent, { output_index: number }>) {
+  private update(event: Exclude<Extract<ResponseStreamEvent, { output_index: number }>, { type: 'response.web_search_call.completed' }>) {
     if (event.type === 'response.output_item.added') {
       this.addSlot(event.output_index, event.item);
       return;

@@ -5,9 +5,9 @@ import { NativeOwnership, nativeAlias, record } from './ownership.ts'
 import { nativeRequest } from './requests.ts'
 import { nativeFailure, providerResponse } from './responses.ts'
 import { nativeApprovals, nativeConfig, nativeInputBound, nativeState, nativeWireConfig, routedNativeModel } from './state.ts'
-import { directSearch, nativeSearchResponse } from './search-policy.ts'
+import { directSearch, nativeSearchResponse, searchRestrictions } from './search-policy.ts'
 import type { SearchObservation } from './search-policy.ts'
-import { resolveNativeSearchModel } from './search-model.ts'
+import { NativeSearchModelError, resolveNativeSearchModel } from './search-model.ts'
 import { nativeContracts } from './contracts.ts'
 import { estimateTokens, remoteOf } from '../../hooks/providers.ts'
 import { splitTarget } from '../../hooks/protocol.ts'
@@ -86,9 +86,15 @@ export function nativeFetch(original: typeof fetch, ownership: NativeOwnership, 
       const signal = AbortSignal.any([request.signal, controller.signal])
       const wire: StepWire = { req: native.req, configText: config.text, approved, userAgent: 'rice-multi-models/native' }
       if (dedicatedSearch) {
+        // Invalid input is a request failure, not a reason to try another service.
+        searchRestrictions(native.serverTools[0])
         const query = ownership.search(scope) ?? ownership.search(owner)
         const searchSignal = AbortSignal.any([signal, AbortSignal.timeout(90_000)])
         let nativeAttempt: Response | undefined
+        const failedClaude = (error: unknown) => {
+          request.signal.throwIfAborted()
+          observe?.({ phase: 'search', stage: 'claude', status: 'unavailable', reason: error instanceof NativeSearchModelError ? error.reason : 'request-failed' })
+        }
         const claude = async () => {
           const model = routed ? await searchModel() : native.model
           const headers = new Headers(request.headers)
@@ -101,7 +107,7 @@ export function nativeFetch(original: typeof fetch, ownership: NativeOwnership, 
         }
         // Native Claude is already the selected provider, so it occupies step1.
         if (!routed) {
-          try { if (await claude()) return nativeAttempt! } catch { request.signal.throwIfAborted() }
+          try { if (await claude()) return nativeAttempt! } catch (error) { failedClaude(error) }
         }
         try {
           const found = await providerCall.run(true, () => directSearch(wire, native, query, remoteOf(config, native.req.target), searchSignal, direct, observe))
@@ -110,7 +116,7 @@ export function nativeFetch(original: typeof fetch, ownership: NativeOwnership, 
           return await providerResponse(native.model, nativeContracts(events, native.req.native), signal, () => controller.abort(), native.stream)
         } catch { request.signal.throwIfAborted() }
         if (routed) {
-          try { if (await claude()) return nativeAttempt! } catch { request.signal.throwIfAborted() }
+          try { if (await claude()) return nativeAttempt! } catch (error) { failedClaude(error) }
         }
         return nativeAttempt ?? nativeFailure('rice-multi-models: provider search, configured services and native Claude search are unavailable; run /rice-models search setup')
       }

@@ -4891,7 +4891,14 @@ function responsesSearchEvidence(items) {
   }
   return { sources: searched ? uniqueSearchSources(sources) : [], searched };
 }
-function responsesSearchAccounting(terminal, streamed) {
+function responsesSearchAccounting(terminal, streamed, stream) {
+  if (stream && !stream.successful) return { complete: false };
+  if (terminal === void 0 || Array.isArray(terminal) && terminal.length === 0) {
+    if (!stream?.successful || !streamed.length || stream.slots.length !== streamed.length) return { complete: false };
+    const indices = [...stream.slots].sort((a, b) => a.index - b.index);
+    if (indices.some((slot, index) => slot.index !== index || !slot.done)) return { complete: false };
+    terminal = streamed;
+  }
   if (!Array.isArray(terminal) || terminal.some((item) => !isRecord(item) || typeof item.type !== "string")) return { complete: false };
   const calls = /* @__PURE__ */ new Set();
   for (const item of terminal) {
@@ -4902,6 +4909,10 @@ function responsesSearchAccounting(terminal, streamed) {
   for (const item of streamed) {
     if (!isRecord(item) || item.type !== "web_search_call") continue;
     if (typeof item.id !== "string" || !item.id.trim() || item.status !== "completed" || !calls.has(item.id)) return { complete: false };
+  }
+  if (stream?.completedIds?.length) {
+    const completed = new Set(stream.completedIds);
+    if (completed.size !== calls.size || [...completed].some((id) => !calls.has(id))) return { complete: false };
   }
   return { calls: calls.size, complete: true };
 }
@@ -4978,6 +4989,9 @@ function isStreamEvent(value) {
       break;
     case "response.output_text.annotation.added":
       valid = indexed && isRecord(value.annotation);
+      break;
+    case "response.web_search_call.completed":
+      valid = indexed && typeof value.item_id === "string" && value.item_id.trim().length > 0;
       break;
     case "response.failed":
     case "error":
@@ -5260,6 +5274,8 @@ var ResponseStream = class {
   emit;
   options;
   terminalOutput;
+  terminalSucceeded = false;
+  completedSearchIds = /* @__PURE__ */ new Map();
   searchEvidence() {
     return responsesSearchEvidence([...this.slots.values()].flatMap((slot) => [slot.item, ...slot.annotations.length ? [{ type: "message", content: [{ type: "output_text", annotations: slot.annotations }] }] : []]));
   }
@@ -5287,6 +5303,12 @@ var ResponseStream = class {
       case "response.incomplete":
         this.complete(event);
         return;
+      case "response.web_search_call.completed": {
+        const slot = this.slots.get(event.output_index);
+        if (!slot || slot.item.type !== "web_search_call" || slot.item.id && slot.item.id !== event.item_id || this.completedSearchIds.has(event.output_index) && this.completedSearchIds.get(event.output_index) !== event.item_id) throw new Error("Search completion event changed its output identity");
+        this.completedSearchIds.set(event.output_index, event.item_id);
+        return;
+      }
       default:
         if (!this.message) {
           throw new Error("OpenAI stream omitted response.created");
@@ -5332,7 +5354,12 @@ var ResponseStream = class {
     }
     const evidence = this.searchEvidence();
     if (evidence.error) throw new Error(evidence.error);
-    this.options.onSearchSources?.({ sources: evidence.sources, searched: evidence.searched, ...responsesSearchAccounting(this.terminalOutput, [...this.slots.values()].map((slot) => slot.item)) });
+    const slots = [...this.slots.entries()];
+    this.options.onSearchSources?.({ sources: evidence.sources, searched: evidence.searched, ...responsesSearchAccounting(this.terminalOutput, slots.map(([, slot]) => slot.item), {
+      successful: this.terminalSucceeded,
+      slots: slots.map(([index, slot]) => ({ index, done: slot.done })),
+      completedIds: [...this.completedSearchIds.values()]
+    }) });
     const cached = usage2?.input_tokens_details?.cached_tokens ?? 0;
     const written = usage2?.input_tokens_details?.cache_write_tokens ?? 0;
     message.usage = {
@@ -5369,6 +5396,7 @@ var ResponseStream = class {
   }
   complete(event) {
     this.terminalOutput = event.response.output;
+    this.terminalSucceeded = event.type !== "response.incomplete" && (event.response.status === void 0 || event.response.status === "completed");
     if (this.stopPending) {
       this.start(event.response);
       this.finish("stop_sequence", event.response.usage);
@@ -9189,7 +9217,7 @@ async function* searchStep(wire, native, signal, direct, search = retrieve, tool
       const id = `srvtoolu_rice_${crypto.randomUUID().replaceAll("-", "")}`;
       yield { type: "native_block", block: { type: "server_tool_use", id, name: "web_search", input: call.input } };
       const found = uses++ < Number(max) ? await search(call.input.query, tool, signal) : void 0;
-      const content = found ? found.map((result) => ({ type: "web_search_result", title: result.title, url: result.url, encrypted_content: `rice_retrieval_${id}` })) : { type: "web_search_tool_result_error", error_code: "max_uses_exceeded" };
+      const content = found ? found.map((result) => ({ type: "web_search_result", title: result.title, url: result.url })) : { type: "web_search_tool_result_error", error_code: "max_uses_exceeded" };
       yield { type: "native_block", block: { type: "web_search_tool_result", tool_use_id: id, content } };
       results.push({ type: "tool_result", tool_use_id: call.id, content: JSON.stringify(found ?? { error: "max_uses_exceeded" }) });
     }
@@ -9226,7 +9254,7 @@ async function* textSearch(wire, tool, signal, direct, search) {
   const id = `srvtoolu_rice_${crypto.randomUUID().replaceAll("-", "")}`;
   yield { type: "native_block", block: { type: "server_tool_use", id, name: "web_search", input: { query: chosen.query } } };
   const results = await search(chosen.query, tool, signal);
-  yield { type: "native_block", block: { type: "web_search_tool_result", tool_use_id: id, content: results.map((result) => ({ type: "web_search_result", title: result.title, url: result.url, encrypted_content: `rice_retrieval_${id}` })) } };
+  yield { type: "native_block", block: { type: "web_search_tool_result", tool_use_id: id, content: results.map((result) => ({ type: "web_search_result", title: result.title, url: result.url })) } };
   const req = {
     ...wire.req,
     tools: [],
@@ -9320,7 +9348,7 @@ function searchBlocks(query, sources, text3) {
   const id = `srvtoolu_rice_${crypto.randomUUID().replaceAll("-", "")}`;
   return [
     { type: "native_block", block: { type: "server_tool_use", id, name: "web_search", input: { query } } },
-    { type: "native_block", block: { type: "web_search_tool_result", tool_use_id: id, content: sources.map((source) => ({ type: "web_search_result", title: source.title, url: source.url, encrypted_content: "" })) } },
+    { type: "native_block", block: { type: "web_search_tool_result", tool_use_id: id, content: sources.map((source) => ({ type: "web_search_result", title: source.title, url: source.url })) } },
     { type: "text", text: text3 || (sources.length ? sources.map((source) => `${source.title}
 ${source.url}${source.content ? `
 ${source.content}` : ""}`).join("\n\n") : "No web search results were found.") },
@@ -9341,6 +9369,8 @@ async function directSearch(wire, native, input, remote, signal, direct, observe
         const req = { ...wire.req, tools: [], native: { ...wire.req.native, webSearch: restrictions, toolChoice: void 0, outputSchema: void 0 } };
         const attempt = AbortSignal.any([signal, AbortSignal.timeout(3e4)]);
         events = await collectSearch(direct({ ...wire, req }, attempt), attempt, true);
+        const ceiling = Math.min(wire.req.native?.maxTokens ?? Infinity, remote?.model.maxOutputTokens ?? Infinity);
+        if (events.some((event) => event.type === "usage" && event.out > ceiling)) throw new SearchUnavailable("Provider search exceeded its native output limit.");
         if (!remote && splitTarget(wire.req.target)?.provider === "codex" && restrictions.maxUses !== void 0) {
           const accounting = events.findLast((event) => event.type === "search_sources");
           if (accounting?.type !== "search_sources" || accounting.complete !== true || !Number.isSafeInteger(accounting.calls) || Number(accounting.calls) < 1 || Number(accounting.calls) > restrictions.maxUses) throw new SearchUnavailable("Provider search invocation accounting cannot satisfy the native bound.");
@@ -9357,7 +9387,8 @@ async function directSearch(wire, native, input, remote, signal, direct, observe
   }
   try {
     if (!searchEndpoints().length) throw new SearchUnavailable("No search service is configured.");
-    const events = input ? searchBlocks(input.query, await retrieve(input.query, tool, signal)) : await collectSearch(searchStep(wire, native, signal, direct, retrieve, remote?.model.tools !== false), signal, false);
+    const attempt = AbortSignal.any([signal, AbortSignal.timeout(3e4)]);
+    const events = input ? searchBlocks(input.query, await retrieve(input.query, tool, attempt)) : await collectSearch(searchStep(wire, native, attempt, direct, retrieve, remote?.model.tools !== false), attempt, false);
     observe?.({ phase: "search", stage: "configured", status: "success" });
     return events;
   } catch {
@@ -9428,18 +9459,18 @@ var NativeSearchModelError = class extends Error {
 var BINDINGS = {
   "darwin-arm64": {
     module: "/$bunfs/root/chunk-fk9f23h5.js",
-    name: "_E",
-    source: String.raw`function _E(){let e=a.ANTHROPIC_SMALL_FAST_MODEL;if(e!==void 0)return Dv(yC(e));if(!fpt()){let n=Oe();if((n==="bedrock"||n==="vertex")&&Vh()==null&&!h1e()){let r=Da();if(!r.opus||r.sonnet){let s=vm();if((bC(s)??Xr(s))&&!nG(s,rG()))return s}}return Qe()}return a.ANTHROPIC_DEFAULT_HAIKU_MODEL!==void 0?Dv(oG()):$v(oG())}`
+    name: "oG",
+    source: String.raw`function oG(){let e=a.ANTHROPIC_DEFAULT_HAIKU_MODEL;if(e!==void 0)return yC(e);return Ua("haiku")??kc()}`
   },
   "linux-x64": {
     module: "/$bunfs/root/chunk-xywp7esx.js",
-    name: "yv",
-    source: String.raw`function yv(){let e=a.ANTHROPIC_SMALL_FAST_MODEL;if(e!==void 0)return Ov(mC(e));if(!spt()){let n=Oe();if((n==="bedrock"||n==="vertex")&&zh()==null&&!aBe()){let r=Da();if(!r.opus||r.sonnet){let s=Em();if((yC(s)??Xr(s))&&!Gz(s,Vz()))return s}}return Qe()}return a.ANTHROPIC_DEFAULT_HAIKU_MODEL!==void 0?Ov(Kz()):Fv(Kz())}`
+    name: "Kz",
+    source: String.raw`function Kz(){let e=a.ANTHROPIC_DEFAULT_HAIKU_MODEL;if(e!==void 0)return mC(e);return La("haiku")??wc()}`
   },
   "win32-x64": {
     module: "B:/~BUN/root/chunk-v7m9g1fp.js",
-    name: "Sv",
-    source: String.raw`function Sv(){let e=a.ANTHROPIC_SMALL_FAST_MODEL;if(e!==void 0)return Ev(gR(e));if(!apt()){let n=Ie();if((n==="bedrock"||n==="vertex")&&jh()==null&&!aBe()){let r=Da();if(!r.opus||r.sonnet){let s=km();if((_R(s)??Xr(s))&&!qz(s,Kz()))return s}}return Ze()}return a.ANTHROPIC_DEFAULT_HAIKU_MODEL!==void 0?Ev(Yz()):Iv(Yz())}`
+    name: "Yz",
+    source: String.raw`function Yz(){let e=a.ANTHROPIC_DEFAULT_HAIKU_MODEL;if(e!==void 0)return gR(e);return La("haiku")??kc()}`
   }
 };
 function nativeSearchModelBinding(version, platform, architecture) {
@@ -9583,9 +9614,14 @@ function nativeFetch(original, ownership, direct = runStep, observe, searchModel
       const signal = AbortSignal.any([request.signal, controller.signal]);
       const wire = { req: native.req, configText: config.text, approved, userAgent: "rice-multi-models/native" };
       if (dedicatedSearch) {
+        searchRestrictions(native.serverTools[0]);
         const query = ownership.search(scope) ?? ownership.search(owner);
         const searchSignal = AbortSignal.any([signal, AbortSignal.timeout(9e4)]);
         let nativeAttempt;
+        const failedClaude = (error2) => {
+          request.signal.throwIfAborted();
+          observe?.({ phase: "search", stage: "claude", status: "unavailable", reason: error2 instanceof NativeSearchModelError ? error2.reason : "request-failed" });
+        };
         const claude = async () => {
           const model2 = routed ? await searchModel() : native.model;
           const headers2 = new Headers(request.headers);
@@ -9599,8 +9635,8 @@ function nativeFetch(original, ownership, direct = runStep, observe, searchModel
         if (!routed) {
           try {
             if (await claude()) return nativeAttempt;
-          } catch {
-            request.signal.throwIfAborted();
+          } catch (error2) {
+            failedClaude(error2);
           }
         }
         try {
@@ -9616,8 +9652,8 @@ function nativeFetch(original, ownership, direct = runStep, observe, searchModel
         if (routed) {
           try {
             if (await claude()) return nativeAttempt;
-          } catch {
-            request.signal.throwIfAborted();
+          } catch (error2) {
+            failedClaude(error2);
           }
         }
         return nativeAttempt ?? nativeFailure("rice-multi-models: provider search, configured services and native Claude search are unavailable; run /rice-models search setup");

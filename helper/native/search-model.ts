@@ -10,20 +10,22 @@ export class NativeSearchModelError extends Error {
   }
 }
 
-// Exact function sources were qualified by native Bun imports on each official
-// 2.1.299 build. The returned model is deliberately absent from this table.
+// Qualified native Haiku-family defaults honor DEFAULT_HAIKU_MODEL without
+// following the selected external model or SMALL_FAST_MODEL. Function sources
+// were verified through native Bun imports on each official 2.1.299 build; the
+// returned model is deliberately absent from this table.
 const BINDINGS: Readonly<Record<NativeSearchPlatform, Binding>> = {
   'darwin-arm64': {
-    module: '/$bunfs/root/chunk-fk9f23h5.js', name: '_E',
-    source: String.raw`function _E(){let e=a.ANTHROPIC_SMALL_FAST_MODEL;if(e!==void 0)return Dv(yC(e));if(!fpt()){let n=Oe();if((n==="bedrock"||n==="vertex")&&Vh()==null&&!h1e()){let r=Da();if(!r.opus||r.sonnet){let s=vm();if((bC(s)??Xr(s))&&!nG(s,rG()))return s}}return Qe()}return a.ANTHROPIC_DEFAULT_HAIKU_MODEL!==void 0?Dv(oG()):$v(oG())}`,
+    module: '/$bunfs/root/chunk-fk9f23h5.js', name: 'oG',
+    source: String.raw`function oG(){let e=a.ANTHROPIC_DEFAULT_HAIKU_MODEL;if(e!==void 0)return yC(e);return Ua("haiku")??kc()}`,
   },
   'linux-x64': {
-    module: '/$bunfs/root/chunk-xywp7esx.js', name: 'yv',
-    source: String.raw`function yv(){let e=a.ANTHROPIC_SMALL_FAST_MODEL;if(e!==void 0)return Ov(mC(e));if(!spt()){let n=Oe();if((n==="bedrock"||n==="vertex")&&zh()==null&&!aBe()){let r=Da();if(!r.opus||r.sonnet){let s=Em();if((yC(s)??Xr(s))&&!Gz(s,Vz()))return s}}return Qe()}return a.ANTHROPIC_DEFAULT_HAIKU_MODEL!==void 0?Ov(Kz()):Fv(Kz())}`,
+    module: '/$bunfs/root/chunk-xywp7esx.js', name: 'Kz',
+    source: String.raw`function Kz(){let e=a.ANTHROPIC_DEFAULT_HAIKU_MODEL;if(e!==void 0)return mC(e);return La("haiku")??wc()}`,
   },
   'win32-x64': {
-    module: 'B:/~BUN/root/chunk-v7m9g1fp.js', name: 'Sv',
-    source: String.raw`function Sv(){let e=a.ANTHROPIC_SMALL_FAST_MODEL;if(e!==void 0)return Ev(gR(e));if(!apt()){let n=Ie();if((n==="bedrock"||n==="vertex")&&jh()==null&&!aBe()){let r=Da();if(!r.opus||r.sonnet){let s=km();if((_R(s)??Xr(s))&&!qz(s,Kz()))return s}}return Ze()}return a.ANTHROPIC_DEFAULT_HAIKU_MODEL!==void 0?Ev(Yz()):Iv(Yz())}`,
+    module: 'B:/~BUN/root/chunk-v7m9g1fp.js', name: 'Yz',
+    source: String.raw`function Yz(){let e=a.ANTHROPIC_DEFAULT_HAIKU_MODEL;if(e!==void 0)return gR(e);return La("haiku")??kc()}`,
   },
 }
 
@@ -44,7 +46,7 @@ export function assertNativeSearchModel(value: unknown): asserts value is string
   }
 }
 
-/** Resolve only inside the qualified native host, before the fallback request. */
+/** Resolve the native family default inside the qualified host, then reject external overrides. */
 export async function resolveNativeSearchModel(): Promise<string> {
   const binding = nativeSearchModelBinding(process.env.RICE_MULTI_MODELS_NATIVE_VERSION, process.platform, process.arch)
   let candidate: unknown

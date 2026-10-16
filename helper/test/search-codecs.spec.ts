@@ -170,18 +170,52 @@ test('reported search-call accounting deduplicates stream/terminal IDs and never
   }
 })
 
-test('incremental search without complete terminal accounting stays explicitly unknown', async () => {
+test('successful terminal omission uses fully finished stream accounting; ambiguous IDs stay unknown', async () => {
   const evidence: unknown[] = []
   await fromResponses(stream(
     { type: 'response.created', response: { id: 'resp_fixture' } },
     { type: 'response.output_item.done', output_index: 0, item: call },
     { type: 'response.completed', response: { id: 'resp_fixture', status: 'completed' } },
   ), 'test-model', () => {}, { onSearchSources: result => evidence.push(result) })
-  expect(evidence).toEqual([{ sources: [{ title: 'source.example', url: source.url }], searched: true, complete: false }])
+  expect(evidence).toEqual([{ sources: [{ title: 'source.example', url: source.url }], searched: true, calls: 1, complete: true }])
   const ambiguous: unknown[] = []
   await fromResponses(stream(
     { type: 'response.created', response: { id: 'resp_fixture' } },
     { type: 'response.completed', response: { id: 'resp_fixture', output: [{ ...call, id: undefined }] } },
   ), 'test-model', () => {}, { onSearchSources: result => ambiguous.push(result) })
   expect(ambiguous).toEqual([{ sources: [{ title: 'source.example', url: source.url }], searched: true, complete: false }])
+})
+
+test('actual Codex empty terminal output accounts two completed hosted invocations and never counts citations', async () => {
+  const open = { ...call, id: 'ws_open_fixture', action: { type: 'open_page', url: source.url } }
+  const evidence: unknown[] = []
+  await fromResponses(stream(
+    { type: 'response.created', response: { id: 'resp_fixture' } },
+    { type: 'response.output_item.added', output_index: 0, item: { id: call.id, type: 'web_search_call', status: 'in_progress' } },
+    { type: 'response.web_search_call.completed', output_index: 0, item_id: call.id },
+    { type: 'response.output_item.done', output_index: 0, item: call },
+    { type: 'response.output_item.added', output_index: 1, item: { id: open.id, type: 'web_search_call', status: 'in_progress' } },
+    { type: 'response.web_search_call.completed', output_index: 1, item_id: open.id },
+    { type: 'response.output_item.done', output_index: 1, item: open },
+    { type: 'response.output_item.done', output_index: 2, item: message },
+    { type: 'response.completed', response: { id: 'resp_fixture', status: 'completed', output: [] } },
+  ), 'test-model', () => {}, { onSearchSources: result => evidence.push(result) })
+  expect(evidence).toEqual([{ sources: [source], searched: true, calls: 2, complete: true }])
+})
+
+test('unfinished, gapped, duplicated or uncorrelated stream accounting remains unknown; cut streams never emit success', async () => {
+  const slots = [{ index: 0, done: true }]
+  for (const context of [
+    { successful: false, slots },
+    { successful: true, slots: [{ index: 0, done: false }] },
+    { successful: true, slots: [{ index: 1, done: true }] },
+    { successful: true, slots, completedIds: ['wrong-id'] },
+  ]) expect(responsesSearchAccounting([], [call], context)).toEqual({ complete: false })
+  expect(responsesSearchAccounting([], [call, call], { successful: true, slots: [{ index: 0, done: true }, { index: 1, done: true }] })).toEqual({ complete: false })
+  const evidence: unknown[] = []
+  await expect(fromResponses(stream(
+    { type: 'response.created', response: { id: 'resp_fixture' } },
+    { type: 'response.output_item.done', output_index: 0, item: call },
+  ), 'test-model', () => {}, { onSearchSources: result => evidence.push(result) })).rejects.toThrow('before completion')
+  expect(evidence).toEqual([])
 })

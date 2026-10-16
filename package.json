@@ -13,7 +13,7 @@
     "test:routing": "node scripts/proof-native-routing.mjs",
     "test:adapter": "node scripts/proof-native-adapter.mjs",
     "test:launcher": "node scripts/proof-native-launcher.mjs",
-    "test:search": "node scripts/proof-native-search.mjs",
+    "test:search": "node scripts/proof-native-search.mjs && node scripts/proof-native-search.mjs fallback",
     "check": "bun run test && bun run typecheck && npm run build:check && npm run test:node && npm run test:install && npm run test:native && npm run test:routing && npm run test:adapter && npm run test:launcher && npm run test:search && git diff --check"
   },
   "devDependencies": {

@@ -4624,7 +4624,14 @@ function responsesSearchEvidence(items) {
   }
   return { sources: searched ? uniqueSearchSources(sources) : [], searched };
 }
-function responsesSearchAccounting(terminal, streamed) {
+function responsesSearchAccounting(terminal, streamed, stream) {
+  if (stream && !stream.successful) return { complete: false };
+  if (terminal === void 0 || Array.isArray(terminal) && terminal.length === 0) {
+    if (!stream?.successful || !streamed.length || stream.slots.length !== streamed.length) return { complete: false };
+    const indices = [...stream.slots].sort((a, b) => a.index - b.index);
+    if (indices.some((slot, index) => slot.index !== index || !slot.done)) return { complete: false };
+    terminal = streamed;
+  }
   if (!Array.isArray(terminal) || terminal.some((item) => !isRecord(item) || typeof item.type !== "string")) return { complete: false };
   const calls = /* @__PURE__ */ new Set();
   for (const item of terminal) {
@@ -4635,6 +4642,10 @@ function responsesSearchAccounting(terminal, streamed) {
   for (const item of streamed) {
     if (!isRecord(item) || item.type !== "web_search_call") continue;
     if (typeof item.id !== "string" || !item.id.trim() || item.status !== "completed" || !calls.has(item.id)) return { complete: false };
+  }
+  if (stream?.completedIds?.length) {
+    const completed = new Set(stream.completedIds);
+    if (completed.size !== calls.size || [...completed].some((id) => !calls.has(id))) return { complete: false };
   }
   return { calls: calls.size, complete: true };
 }
@@ -4711,6 +4722,9 @@ function isStreamEvent(value) {
       break;
     case "response.output_text.annotation.added":
       valid = indexed && isRecord(value.annotation);
+      break;
+    case "response.web_search_call.completed":
+      valid = indexed && typeof value.item_id === "string" && value.item_id.trim().length > 0;
       break;
     case "response.failed":
     case "error":
@@ -4993,6 +5007,8 @@ var ResponseStream = class {
   emit;
   options;
   terminalOutput;
+  terminalSucceeded = false;
+  completedSearchIds = /* @__PURE__ */ new Map();
   searchEvidence() {
     return responsesSearchEvidence([...this.slots.values()].flatMap((slot) => [slot.item, ...slot.annotations.length ? [{ type: "message", content: [{ type: "output_text", annotations: slot.annotations }] }] : []]));
   }
@@ -5020,6 +5036,12 @@ var ResponseStream = class {
       case "response.incomplete":
         this.complete(event);
         return;
+      case "response.web_search_call.completed": {
+        const slot = this.slots.get(event.output_index);
+        if (!slot || slot.item.type !== "web_search_call" || slot.item.id && slot.item.id !== event.item_id || this.completedSearchIds.has(event.output_index) && this.completedSearchIds.get(event.output_index) !== event.item_id) throw new Error("Search completion event changed its output identity");
+        this.completedSearchIds.set(event.output_index, event.item_id);
+        return;
+      }
       default:
         if (!this.message) {
           throw new Error("OpenAI stream omitted response.created");
@@ -5065,7 +5087,12 @@ var ResponseStream = class {
     }
     const evidence = this.searchEvidence();
     if (evidence.error) throw new Error(evidence.error);
-    this.options.onSearchSources?.({ sources: evidence.sources, searched: evidence.searched, ...responsesSearchAccounting(this.terminalOutput, [...this.slots.values()].map((slot) => slot.item)) });
+    const slots = [...this.slots.entries()];
+    this.options.onSearchSources?.({ sources: evidence.sources, searched: evidence.searched, ...responsesSearchAccounting(this.terminalOutput, slots.map(([, slot]) => slot.item), {
+      successful: this.terminalSucceeded,
+      slots: slots.map(([index, slot]) => ({ index, done: slot.done })),
+      completedIds: [...this.completedSearchIds.values()]
+    }) });
     const cached = usage?.input_tokens_details?.cached_tokens ?? 0;
     const written = usage?.input_tokens_details?.cache_write_tokens ?? 0;
     message.usage = {
@@ -5102,6 +5129,7 @@ var ResponseStream = class {
   }
   complete(event) {
     this.terminalOutput = event.response.output;
+    this.terminalSucceeded = event.type !== "response.incomplete" && (event.response.status === void 0 || event.response.status === "completed");
     if (this.stopPending) {
       this.start(event.response);
       this.finish("stop_sequence", event.response.usage);

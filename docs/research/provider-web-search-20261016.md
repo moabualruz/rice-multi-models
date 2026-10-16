@@ -41,27 +41,22 @@ These three adapters cover self-hosted/free software and managed search services
 | Brave Web Search | GET `https://api.search.brave.com/res/v1/web/search?q=...&count=N`; normalize `web.results[].title/url/description`. | Header `X-Subscription-Token`. Query maximum 600 characters and 75 words; `count` 1-20 and `offset` 0-9. Explicit country/language/freshness fields are preferable to query-string guessing. Return provider status and quota classification. [Brave search](https://api-dashboard.search.brave.com/api-reference/web/search/get), [authentication](https://api-dashboard.search.brave.com/documentation/guides/authentication). |
 | Tavily Search | POST `https://api.tavily.com/search`, JSON `{query,max_results,search_depth:"basic",include_answer:false,include_raw_content:false}`. Normalize `results[].title/url/content`. | Bearer API-key header. `max_results` is 0-20. Domain lists support inclusion/exclusion; use `include_domains_mode:"restrict"`, not `prefer`, for a hard allowlist. Keep automatic parameter selection off to avoid an implicit depth/credit change. [Tavily API](https://docs.tavily.com/documentation/api-reference/endpoint/search). |
 
-Suggested maintained configuration, with existing credential references rather than inline secrets:
+The maintained service configuration in `<CLAUDE_CONFIG_DIR>/rice-multi-models/search.json` uses credential references rather than inline secrets:
 
 ```json
 {
-  "search": {
-    "providerNative": "auto",
-    "services": [
-      { "id": "home", "kind": "searxng", "url": "https://search.example/search", "auth": "none" },
-      { "id": "brave", "kind": "brave", "auth": { "env": "BRAVE_SEARCH_API_KEY" } },
-      { "id": "tavily", "kind": "tavily", "auth": { "env": "TAVILY_API_KEY" } }
-    ],
-    "fallback": "harness",
-    "maxResults": 5,
-    "timeoutMs": 15000
-  }
+  "version": 1,
+  "endpoints": [
+    { "name": "home", "kind": "searxng", "url": "https://search.example/search", "priority": 0 },
+    { "name": "brave", "kind": "brave", "url": "https://api.search.brave.com/res/v1/web/search", "priority": 10, "auth": { "env": "BRAVE_SEARCH_API_KEY" } },
+    { "name": "tavily", "kind": "tavily", "url": "https://api.tavily.com/search", "priority": 20, "auth": { "env": "TAVILY_API_KEY" } }
+  ]
 }
 ```
 
-This is a proposed Rice schema, not a provider API schema. Array order is the configured priority; require unique IDs and known adapter kinds. Cloud adapters should use their canonical origin by default. An alternate endpoint is an explicit configured service requiring existing endpoint trust validation. Preserve the old SearXNG environment variable as one compatibility entry only when the structured list is absent. Reject contradictory configuration rather than reorder it silently.
+This is a Rice schema, not a provider API schema. Lower priority numbers run first; equal numbers preserve saved order. Names are unique and adapter kinds are validated. Cloud adapters suggest their official URLs during setup. An alternate endpoint is an explicitly configured service. The old SearXNG environment variable follows saved services as a compatibility entry. Invalid configuration never overwrites a saved document. Provider capability is separate: each declared model can set `webSearch` to `auto`, `native` or `off`.
 
-Normalize retrieval to `{title,url,content}` plus `{stage,service,status,errorClass}` metadata. Bound response bytes, result count, individual snippets, elapsed time and search rounds; proposed local limits are 2 MiB, 20 results and one configured timeout per attempt. These are Rice limits, not claims about provider quotas. Preserve AbortSignal cancellation. An adapter may send native domain filters where supported, but always validate normalized result URLs locally. Avoid forwarding credentials across redirects. Report the selected search stage without logging keys or private query text.
+Normalize retrieval to `{title,url,content}` and metadata-only stage/service/status observations. Current local limits include 2 MiB responses, 10 results, 15 seconds per service and 30 seconds for the configured-service stage, reserving time for native fallback. These are Rice limits, not claims about provider quotas. Preserve AbortSignal cancellation. An adapter may send native domain filters where supported, but always validate normalized result URLs locally. Avoid forwarding credentials across redirects. Report the selected search stage without logging keys or private query text.
 
 ## Native Claude 2.1.299 fallback seam
 
@@ -69,25 +64,25 @@ The inspected official 2.1.299 implementation builds WebSearch using a `web_sear
 
 Rice already captures the original host fetch in [preload.ts](../../helper/native/preload.ts) and its [transport.ts](../../helper/native/transport.ts) uses a private `AsyncLocalStorage` scope to bypass interception during provider I/O. That is the in-process seam, with no HTTP listener or gateway.
 
-An owned no-auth, no-inference native Bun import/call proof qualified these 2.1.299 helper resolver exports. Each full function source matched its platform's installed implementation before invocation:
+Owned native Bun import/call proofs qualified these 2.1.299 Haiku-family default exports, including an actual external-model WebSearch context. Each full function source matched its platform's installed implementation before invocation:
 
 | Qualified native build | Model resolver module | Export |
 | --- | --- | --- |
-| macOS arm64 | `/$bunfs/root/chunk-fk9f23h5.js` | `_E` |
-| Linux x64 | `/$bunfs/root/chunk-xywp7esx.js` | `yv` |
-| Windows x64 | `B:/~BUN/root/chunk-v7m9g1fp.js` | `Sv` |
+| macOS arm64 | `/$bunfs/root/chunk-fk9f23h5.js` | `oG` |
+| Linux x64 | `/$bunfs/root/chunk-xywp7esx.js` | `Kz` |
+| Windows x64 | `B:/~BUN/root/chunk-v7m9g1fp.js` | `Yz` |
 
-All three returned `claude-haiku-5-5` in the isolated fixture. That value is an observed result, not a maintained default: use the qualified resolver's current result and validate it. The same functions can honor environment/provider overrides, so reject a result outside the native Claude namespace. Retained private evidence is named `search-contracts-20261016-u3DHgI`, containing exact source maps and actual native result receipts.
+The returned model is observed at runtime, not hardcoded. The helpers honor `ANTHROPIC_DEFAULT_HAIKU_MODEL`, so reject a result outside the native Claude namespace. The earlier small/fast getters `_E`/`yv`/`Sv` were inadequate: an actual external-model session showed them following the current main model. Retained qualification evidence includes `native-leaf-active.Gh5Fp7` and `search-leaf-20261016-vVNPZV`; native default overrides passed and external overrides were rejected.
 
 The proposed exact fallback operation is:
 
-1. Recognize the native WebSearch-purpose request by its native request class and its actual server search tool. A normal inference request must never acquire the exception merely because it mentions search.
-2. Obtain a verified stock Claude model ID before any inference. No public 299 model resolver was established in this investigation; use the qualified version/platform-specific native resolver above. `_E()` honors `ANTHROPIC_SMALL_FAST_MODEL` and other defaults, so its result must still be checked as an allowed native Claude ID. Never hardcode a remembered current model or reuse `codex/...` as an Anthropic model.
+1. Recognize the dedicated native WebSearch server-tool request. The qualified host may label it `auxiliary`. A normal inference request must never acquire the exception merely because it mentions search.
+2. Obtain a verified stock Claude model ID before any inference. No public 299 model resolver was established in this investigation; use the qualified version/platform-specific native default above and validate its result. Never hardcode a remembered current model or reuse `codex/...` as an Anthropic model.
 3. Clone the already-built native SDK request, preserving its current account's authorization, original endpoint, native search tool, forced choice, domain restrictions, signal and relevant beta headers. Replace only the external routed model with the verified native model. Do not read or substitute another account's credential, set a global model, or mutate `CLAUDE_CONFIG_DIR`.
 4. Invoke the captured original fetch directly under the private bypass scope. Calling the intercepted global fetch or `runStep` would re-enter search routing. The bypass is internal and purpose-scoped, not a caller-settable request header.
 5. Return the authentic native response to the stock WebSearch consumer, or extract its completed cited evidence and let the selected external model synthesize it. A buffered failure must keep its real HTTP/tool-error classification. A stream with already emitted content cannot be replayed through another stage.
 
-This mechanism preserves SDK-selected account headers and avoids recursion. Native resolver import/call is qualified for the three builds above; an owned request-level proof of the complete fallback path remains required. Public OpenAI/Anthropic API documents cannot prove a private Claude host resolver. Research alone does not qualify fallback activation.
+This mechanism preserves SDK-selected account headers and avoids recursion. Native resolver import/call is qualified for the three builds above. The maintained `npm run test:search` executes the real 2.1.299 consumer with isolated configuration and synthetic native authentication: configured retrieval completes without Anthropic inference, and native fallback sends exactly one request with the verified native model and unchanged SDK authentication. The actual Codex backend separately completed two accounted search invocations and returned the official authentication documentation. These proofs establish their stated controlled/live scopes; public API documents alone cannot qualify a private Claude host resolver.
 
 ## Required acceptance cases
 
@@ -98,7 +93,7 @@ This mechanism preserves SDK-selected account headers and avoids recursion. Nati
 5. Configured service order is stable: first success stops the chain; no implicit alphabetical sorting, parallel credential fan-out or extra paid request. Wrong credentials stay confined to their endpoint.
 6. Each retrieval adapter has one recorded successful response and representative native error fixture. Assert auth header, request shape, provider bounds, domain filtering and normalized source fields.
 7. Local Ollama has no configured cloud account: no hidden Ollama cloud request. Explicit selected cloud account uses its own credential only. Bedrock Converse never receives the Mantle-only search schema.
-8. Native fallback receives the current selected Claude OAuth/account headers and a verified native model ID. Both `web_search_tool` request class and server-tool shape are required. Assert one original native request, zero recursive adapter calls and unchanged session/default-model settings.
+8. Native fallback receives the current selected Claude OAuth/account headers and a verified native model ID. Qualify the dedicated server-tool shape: the actual 2.1.299 WebSearch path can use request class `auxiliary`. Assert one original native request, zero recursive adapter calls and unchanged session/default-model settings.
 9. After switching the Claude account, the next fallback request uses the new account. A concurrent older attempt cannot overwrite current usage/account state.
 10. Buffer bounds and partial-output failure are enforced. No invented search citations or opaque provider tokens; no fallback after already committed output. Search remains a direct provider/service call with no proxy or gateway.
 

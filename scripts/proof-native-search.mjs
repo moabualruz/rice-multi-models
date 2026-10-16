@@ -9,6 +9,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
+const fallback = process.argv[2] === 'fallback'
 const fixture = mkdtempSync(join(tmpdir(), 'rice-native-search space-'))
 const plugin = join(fixture, 'plugin space'), configDir = join(fixture, '.claude')
 const query = 'RICE_NATIVE_SEARCH_OWNED_QUERY'
@@ -16,7 +17,7 @@ const sourceUrl = 'https://code.claude.com/docs/en/plugins/mods'
 const sourceTitle = 'Owned primary search source'
 const sourceText = 'RICE_NATIVE_SEARCH_SOURCE_CONTENT'
 const synthesis = `RICE_NATIVE_SEARCH_SYNTHESIS [${sourceTitle}](${sourceUrl}). ${sourceText}`
-const searches = [], providers = [], denied = []
+const searches = [], providers = [], denied = [], nativeCalls = []
 let child, timer, forceTimer, stdout = '', stderr = ''
 
 function json(response, value) { response.setHeader('content-type', 'application/json'); response.end(JSON.stringify(value)) }
@@ -45,6 +46,26 @@ const provider = createServer(async (request, response) => {
     response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 20, completion_tokens: 10 } })}\n\n`)
     response.end('data: [DONE]\n\n')
     return
+  }
+  if (fallback && request.method === 'POST' && /\/messages(?:\?|$)/.test(request.url)) {
+    nativeCalls.push({ nativeModel: /^claude-[a-z0-9-]+$/.test(body.model), authPreserved: request.headers['x-api-key'] === 'owned-no-account', searchTool: body.tools?.length === 1 && body.tools[0].name === 'web_search' })
+    const blocks = [{ type: 'server_tool_use', id: 'srvtoolu_owned', name: 'web_search', input: { query } },
+      { type: 'web_search_tool_result', tool_use_id: 'srvtoolu_owned', content: [{ type: 'web_search_result', title: sourceTitle, url: sourceUrl }] },
+      { type: 'text', text: synthesis }]
+    const message = { id: 'msg_owned_fallback', type: 'message', role: 'assistant', model: body.model, content: blocks, stop_reason: 'end_turn', stop_sequence: null, usage: { input_tokens: 20, output_tokens: 10 } }
+    if (!body.stream) return json(response, message)
+    response.writeHead(200, { 'content-type': 'text/event-stream' })
+    const send = (type, value) => response.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...value })}\n\n`)
+    send('message_start', { message: { ...message, content: [], stop_reason: null } })
+    blocks.forEach((content_block, index) => {
+      const start = content_block.type === 'text' ? { ...content_block, text: '' } : content_block.type === 'server_tool_use' ? { ...content_block, input: {} } : content_block
+      send('content_block_start', { index, content_block: start })
+      if (content_block.type === 'text') send('content_block_delta', { index, delta: { type: 'text_delta', text: content_block.text } })
+      if (content_block.type === 'server_tool_use') send('content_block_delta', { index, delta: { type: 'input_json_delta', partial_json: JSON.stringify(content_block.input) } })
+      send('content_block_stop', { index })
+    })
+    send('message_delta', { delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 10 } })
+    send('message_stop', {}); response.end(); return
   }
   if (request.method === 'POST' && /\/messages(?:\/count_tokens)?(?:\?|$)/.test(request.url)) denied.push({ path: request.url.split('?')[0] })
   response.writeHead(429, { 'content-type': 'application/json', 'x-should-retry': 'false' })
@@ -77,7 +98,7 @@ try {
   writeFileSync(join(fixture, '.claude.json'), JSON.stringify({ hasCompletedOnboarding: true }))
   const base = `http://127.0.0.1:${provider.address().port}`
   writeFileSync(join(configDir, 'rice-multi-models.json'), JSON.stringify({ providers: { owned: { kind: 'openai', baseUrl: `${base}/owned/v1`, allowHttp: true, auth: 'none', models: { main: { contextWindow: 500000, maxOutputTokens: 4096, maxTokensParam: 'max_completion_tokens' } } } } }))
-  writeFileSync(join(configDir, 'rice-multi-models/search.json'), JSON.stringify({ version: 1, endpoints: [{ name: 'owned-search', kind: 'searxng', url: `http://127.0.0.1:${search.address().port}/search`, priority: 10 }] }))
+  if (!fallback) writeFileSync(join(configDir, 'rice-multi-models/search.json'), JSON.stringify({ version: 1, endpoints: [{ name: 'owned-search', kind: 'searxng', url: `http://127.0.0.1:${search.address().port}/search`, priority: 10 }] }))
   const file = join(plugin, 'hooks/register.ts')
   let source = readFileSync(file, 'utf8')
   source = replace(source, 'export const register: Register = on => {', 'let ownedSearchDone = false\nexport const register: Register = on => {')
@@ -116,14 +137,16 @@ try {
   assert.ok(!rendered.includes('unrelated.example'), 'native allowed_domains is honored')
   const frames = trace()
   assert.ok(frames.some(event => event.phase === 'search' && event.stage === 'query' && event.queryKnown === true), 'actual WebSearch SDK request retains its tool-call query ownership')
-  assert.equal(searches.length, 1, 'one configured retrieval service receives the request')
-  assert.ok(searches[0].queryKnown && searches[0].json, 'configured service receives the original query and JSON format')
+  assert.equal(searches.length, fallback ? 0 : 1, 'only a saved retrieval service receives a request')
+  if (!fallback) assert.ok(searches[0].queryKnown && searches[0].json, 'configured service receives the original query and JSON format')
+  assert.equal(nativeCalls.length, fallback ? 1 : 0, 'native fallback executes exactly once when it is required')
+  if (fallback) assert.ok(nativeCalls[0].nativeModel && nativeCalls[0].authPreserved && nativeCalls[0].searchTool, 'real native model resolver and original SDK authentication/tool contract are retained')
   assert.ok(providers.every(event => event.model === 'main' && !event.nativeCredentials && !event.queryInference), 'only the selected direct provider synthesizes evidence, without native credentials or query inference')
   assert.ok(providers.length <= 1 && providers.every(event => event.sourceFiltered && event.sourceEvidence), 'filtered plaintext evidence reaches at most one synthesis request')
   assert.equal(denied.length, 0, 'exhausted Claude endpoint receives no inference request')
-  process.stdout.write(`${JSON.stringify({ phase: 'native-search-complete', queryOwned: true, retrievalRequests: searches.length, synthesisRequests: providers.length, nativeConsumerSources: true, domainPolicy: true, anthropicInference: denied.length })}\n`)
+  process.stdout.write(`${JSON.stringify({ phase: 'native-search-complete', mode: fallback ? 'native-fallback' : 'configured', queryOwned: true, retrievalRequests: searches.length, synthesisRequests: providers.length, nativeConsumerSources: true, domainPolicy: true, nativeFallbackRequests: nativeCalls.length, nativeFallbackContract: nativeCalls.every(call => call.nativeModel && call.authPreserved && call.searchTool), deniedAnthropicInference: denied.length })}\n`)
 } catch (error) {
-  process.stdout.write(`${JSON.stringify({ phase: 'native-search-failed', message: error instanceof Error ? error.message : 'proof failed', searches, providers, denied, trace: trace(), stderrPresent: Boolean(stderr), outputPresent: Boolean(stdout) })}\n`)
+  process.stdout.write(`${JSON.stringify({ phase: 'native-search-failed', message: error instanceof Error ? error.message : 'proof failed', searches, providers, denied, nativeCalls, trace: trace(), stderrPresent: Boolean(stderr), outputPresent: Boolean(stdout) })}\n`)
   throw error
 } finally {
   clearTimeout(timer); clearTimeout(forceTimer)

@@ -110,6 +110,25 @@ test('native HTTP200 tool failure is unavailable and buffered partial provider s
   await expect(collectSearch(incomplete(), new AbortController().signal, true)).rejects.toThrow('did not complete')
 })
 
+test('invalid native search input cannot trigger provider or Claude fallback calls', async () => {
+  fixture(); const ownership = new NativeOwnership('owned/main'); let calls = 0
+  const adapted = nativeFetch((async () => { calls++; return successfulNative() }) as typeof fetch, ownership, async function* (): AsyncGenerator<StepEvent> { calls++; yield { type: 'stop', reason: 'end_turn' } })
+  const original = request(), body = await original.json() as { tools: Record<string, unknown>[] }
+  body.tools[0].allowed_domains = ['https://invalid.example']
+  const response = await ownership.run(scoped(ownership, 'owned/main'), () => adapted(new Request(original, { body: JSON.stringify(body) })))
+  expect(response.status).toBe(400); expect(calls).toBe(0)
+})
+
+test('an aborted provider search discards partial output without invoking Claude fallback', async () => {
+  fixture(); const ownership = new NativeOwnership('owned/main'), controller = new AbortController(); let fallback = 0
+  const adapted = nativeFetch((async () => { fallback++; return successfulNative() }) as typeof fetch, ownership, async function* (): AsyncGenerator<StepEvent> {
+    yield { type: 'text', text: 'Partial output' }; controller.abort(new Error('owned cancellation'))
+    yield { type: 'stop', reason: 'end_turn' }
+  })
+  const pending = ownership.run(scoped(ownership, 'owned/main'), () => adapted(new Request(request(), { signal: controller.signal })))
+  await expect(pending).rejects.toThrow('owned cancellation'); expect(fallback).toBe(0)
+})
+
 test('local inference never implies cloud search and native restrictions are not silently dropped', () => {
   const text = JSON.stringify({ providers: { local: { kind: 'openai', baseUrl: 'http://ollama.local:11434/v1', allowHttp: true, auth: 'none', models: { main: {} } }, google: { kind: 'gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta', auth: 'none', models: { main: {} } } } })
   const config = parseConfig(text).config!

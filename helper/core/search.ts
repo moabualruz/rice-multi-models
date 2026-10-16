@@ -46,9 +46,18 @@ export function responsesSearchEvidence(items: readonly unknown[]): { sources: S
   return { sources: searched ? uniqueSearchSources(sources) : [], searched }
 }
 
-/** Terminal output must enumerate every streamed call with an unambiguous ID.
- * This validates reported invocations after buffering, not provider-side spend. */
-export function responsesSearchAccounting(terminal: unknown, streamed: readonly unknown[]): { calls?: number; complete: boolean } {
+type StreamAccounting = { successful: boolean; slots: readonly { index: number; done: boolean }[]; completedIds?: readonly string[] }
+
+/** A populated terminal array or a successful, fully finished SSE stream can
+ * enumerate reported calls. This is not a provider-side spend limit. */
+export function responsesSearchAccounting(terminal: unknown, streamed: readonly unknown[], stream?: StreamAccounting): { calls?: number; complete: boolean } {
+  if (stream && !stream.successful) return { complete: false }
+  if (terminal === undefined || Array.isArray(terminal) && terminal.length === 0) {
+    if (!stream?.successful || !streamed.length || stream.slots.length !== streamed.length) return { complete: false }
+    const indices = [...stream.slots].sort((a, b) => a.index - b.index)
+    if (indices.some((slot, index) => slot.index !== index || !slot.done)) return { complete: false }
+    terminal = streamed
+  }
   if (!Array.isArray(terminal) || terminal.some(item => !isRecord(item) || typeof item.type !== 'string')) return { complete: false }
   const calls = new Set<string>()
   for (const item of terminal) {
@@ -59,6 +68,10 @@ export function responsesSearchAccounting(terminal: unknown, streamed: readonly 
   for (const item of streamed) {
     if (!isRecord(item) || item.type !== 'web_search_call') continue
     if (typeof item.id !== 'string' || !item.id.trim() || item.status !== 'completed' || !calls.has(item.id)) return { complete: false }
+  }
+  if (stream?.completedIds?.length) {
+    const completed = new Set(stream.completedIds)
+    if (completed.size !== calls.size || [...completed].some(id => !calls.has(id))) return { complete: false }
   }
   return { calls: calls.size, complete: true }
 }

@@ -3,9 +3,9 @@ import { assertNativeSearchModel, assertNativeSearchResolverSource, nativeSearch
 
 test('native search selects only the three qualified 299 platform bindings', () => {
   const expected = [
-    ['darwin', 'arm64', '/$bunfs/root/chunk-fk9f23h5.js', '_E'],
-    ['linux', 'x64', '/$bunfs/root/chunk-xywp7esx.js', 'yv'],
-    ['win32', 'x64', 'B:/~BUN/root/chunk-v7m9g1fp.js', 'Sv'],
+    ['darwin', 'arm64', '/$bunfs/root/chunk-fk9f23h5.js', 'oG'],
+    ['linux', 'x64', '/$bunfs/root/chunk-xywp7esx.js', 'Kz'],
+    ['win32', 'x64', 'B:/~BUN/root/chunk-v7m9g1fp.js', 'Yz'],
   ]
   for (const [platform, architecture, module, name] of expected) {
     const binding = nativeSearchModelBinding('2.1.299', platform, architecture)

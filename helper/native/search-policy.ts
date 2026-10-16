@@ -11,7 +11,7 @@ import { splitTarget } from '../../hooks/protocol.ts'
 type Direct = (wire: StepWire, signal: AbortSignal) => AsyncIterable<StepEvent>
 type Remote = Pick<Extract<Target, { kind: 'remote' }>, 'provider' | 'model' | 'target'>
 export type SearchObservation = { phase: 'search'; stage: 'query'; queryKnown: boolean }
-  | { phase: 'search'; stage: 'provider' | 'configured' | 'claude'; status: 'success' | 'unavailable' }
+  | { phase: 'search'; stage: 'provider' | 'configured' | 'claude'; status: 'success' | 'unavailable'; reason?: string }
 
 export function searchRestrictions(tool: Record<string, unknown>): WebSearch {
   const list = (key: string): string[] | undefined => {
@@ -47,7 +47,7 @@ export function searchBlocks(query: string, sources: SearchSource[], text?: stri
   const id = `srvtoolu_rice_${crypto.randomUUID().replaceAll('-', '')}`
   return [
     { type: 'native_block', block: { type: 'server_tool_use', id, name: 'web_search', input: { query } } },
-    { type: 'native_block', block: { type: 'web_search_tool_result', tool_use_id: id, content: sources.map(source => ({ type: 'web_search_result', title: source.title, url: source.url, encrypted_content: '' })) } },
+    { type: 'native_block', block: { type: 'web_search_tool_result', tool_use_id: id, content: sources.map(source => ({ type: 'web_search_result', title: source.title, url: source.url })) } },
     { type: 'text', text: text || (sources.length ? sources.map(source => `${source.title}\n${source.url}${source.content ? `\n${source.content}` : ''}`).join('\n\n') : 'No web search results were found.') },
     { type: 'stop', reason: 'end_turn' },
   ]
@@ -67,6 +67,8 @@ export async function directSearch(wire: StepWire, native: NativeRequest, input:
         const req = { ...wire.req, tools: [], native: { ...wire.req.native, webSearch: restrictions, toolChoice: undefined, outputSchema: undefined } }
         const attempt = AbortSignal.any([signal, AbortSignal.timeout(30_000)])
         events = await collectSearch(direct({ ...wire, req }, attempt), attempt, true)
+        const ceiling = Math.min(wire.req.native?.maxTokens ?? Infinity, remote?.model.maxOutputTokens ?? Infinity)
+        if (events.some(event => event.type === 'usage' && event.out > ceiling)) throw new SearchUnavailable('Provider search exceeded its native output limit.')
         if (!remote && splitTarget(wire.req.target)?.provider === 'codex' && restrictions.maxUses !== undefined) {
           const accounting = events.findLast(event => event.type === 'search_sources')
           if (accounting?.type !== 'search_sources' || accounting.complete !== true || !Number.isSafeInteger(accounting.calls) || Number(accounting.calls) < 1 || Number(accounting.calls) > restrictions.maxUses) throw new SearchUnavailable('Provider search invocation accounting cannot satisfy the native bound.')
@@ -81,8 +83,10 @@ export async function directSearch(wire: StepWire, native: NativeRequest, input:
   }
   try {
     if (!searchEndpoints().length) throw new SearchUnavailable('No search service is configured.')
-    const events = input ? searchBlocks(input.query, await retrieve(input.query, tool, signal))
-      : await collectSearch(searchStep(wire, native, signal, direct, retrieve, remote?.model.tools !== false), signal, false)
+    // Reserve the final stage's time even when configured services stall.
+    const attempt = AbortSignal.any([signal, AbortSignal.timeout(30_000)])
+    const events = input ? searchBlocks(input.query, await retrieve(input.query, tool, attempt))
+      : await collectSearch(searchStep(wire, native, attempt, direct, retrieve, remote?.model.tools !== false), attempt, false)
     observe?.({ phase: 'search', stage: 'configured', status: 'success' })
     return events
   } catch { signal.throwIfAborted(); observe?.({ phase: 'search', stage: 'configured', status: 'unavailable' }) }
