@@ -175,7 +175,11 @@ try {
   function Assert-PrivatePath([string]$path, [bool]$directory) {
     $script:stage = 'inspect-private-path'
     $item = Get-Item -Force -LiteralPath $path
-    if ($item.PSIsContainer -ne $directory -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'unsafe bootstrap type' }
+    $script:stage = 'private-path-type'
+    if ($item.PSIsContainer -ne $directory) { throw 'unsafe bootstrap type' }
+    $script:stage = 'private-path-reparse'
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'unsafe bootstrap reparse point' }
+    $script:stage = 'read-private-acl'
     $acl = Get-Acl -LiteralPath $path
     $script:stage = 'private-path-owner'
     if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $sid -or ($directory -and -not $acl.AreAccessRulesProtected)) { throw 'unsafe bootstrap owner' }
@@ -228,7 +232,7 @@ public static class RiceNativeBootstrapPath {
   }
   throw 'no private plain bootstrap path'
 } catch {
-  [Console]::Error.WriteLine('Windows native bootstrap could not establish a private, space-free path. stage=' + $stage)
+  [Console]::Error.WriteLine('Windows native bootstrap could not establish a private, space-free path. stage=' + $stage + '; class=' + $_.Exception.GetType().Name)
   exit 1
 }
 `;
