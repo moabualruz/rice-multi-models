@@ -35,11 +35,20 @@ async function readJson(file: string, absent: Json): Promise<Json> {
   }
 }
 
+/** Windows reports a directory pending deletion, or a file another process holds open, with these codes. */
+const TRANSIENT = new Set(['EPERM', 'EACCES', 'EBUSY'])
+const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
 async function atomicWrite(file: string, data: unknown): Promise<void> {
   const temp = `${file}.${randomUUID()}.tmp`
   try {
     await writeFile(temp, `${JSON.stringify(data, null, 2)}\n`, { flag: 'wx', mode: 0o600 })
-    await rename(temp, file)
+    for (let attempt = 0; ; attempt++) {
+      try { await rename(temp, file); break } catch (error) {
+        if (process.platform !== 'win32' || !TRANSIENT.has((error as NodeJS.ErrnoException).code ?? '') || attempt >= 20) throw error
+        await pause(25)
+      }
+    }
   } finally { await rm(temp, { force: true }).catch(() => {}) }
 }
 
@@ -54,12 +63,13 @@ export async function syncPicker(input: PickerSyncInput): Promise<PickerSyncResu
   let locked = false
   try {
     await mkdir(input.configDir, { recursive: true })
-    const deadline = Date.now() + 3000
+    const deadline = Date.now() + 10_000
     do {
       try { await mkdir(lock); locked = true; break } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+        const code = (error as NodeJS.ErrnoException).code ?? ''
+        if (code !== 'EEXIST' && !(process.platform === 'win32' && TRANSIENT.has(code))) throw error
         if (Date.now() >= deadline) throw new Error('Picker sync lock is busy; retry /rice-models setup repair. If no session is running, remove the stale .rice-multi-models-picker.lock directory')
-        await new Promise(resolve => setTimeout(resolve, 25))
+        await pause(25)
       }
     } while (!locked)
     const settings = await readJson(file, {})

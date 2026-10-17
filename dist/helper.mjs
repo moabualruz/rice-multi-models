@@ -8428,12 +8428,22 @@ async function readJson(file, absent) {
     throw new Error(`${path4.basename(file)} is malformed or unreadable; nothing was overwritten`);
   }
 }
+var TRANSIENT2 = /* @__PURE__ */ new Set(["EPERM", "EACCES", "EBUSY"]);
+var pause = (ms) => new Promise((resolve2) => setTimeout(resolve2, ms));
 async function atomicWrite(file, data) {
   const temp = `${file}.${randomUUID2()}.tmp`;
   try {
     await writeFile(temp, `${JSON.stringify(data, null, 2)}
 `, { flag: "wx", mode: 384 });
-    await rename(temp, file);
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await rename(temp, file);
+        break;
+      } catch (error) {
+        if (process.platform !== "win32" || !TRANSIENT2.has(error.code ?? "") || attempt >= 20) throw error;
+        await pause(25);
+      }
+    }
   } finally {
     await rm(temp, { force: true }).catch(() => {
     });
@@ -8449,16 +8459,17 @@ async function syncPicker(input) {
   let locked = false;
   try {
     await mkdir2(input.configDir, { recursive: true });
-    const deadline = Date.now() + 3e3;
+    const deadline = Date.now() + 1e4;
     do {
       try {
         await mkdir2(lock);
         locked = true;
         break;
       } catch (error) {
-        if (error.code !== "EEXIST") throw error;
+        const code2 = error.code ?? "";
+        if (code2 !== "EEXIST" && !(process.platform === "win32" && TRANSIENT2.has(code2))) throw error;
         if (Date.now() >= deadline) throw new Error("Picker sync lock is busy; retry /rice-models setup repair. If no session is running, remove the stale .rice-multi-models-picker.lock directory");
-        await new Promise((resolve2) => setTimeout(resolve2, 25));
+        await pause(25);
       }
     } while (!locked);
     const settings = await readJson(file, {});
