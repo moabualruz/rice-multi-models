@@ -194,6 +194,16 @@ async function runCase(test, index, base) {
   const register = join(plugin, 'hooks/register.ts')
   let source = readFileSync(register, 'utf8')
   assert.ok(source.includes('await loadProviders($)'), 'production provider load anchor')
+  // The copy records each mode fingerprint with its inputs, so a platform where two modes look alike can be diagnosed.
+  const fingerprintLog = join(directory, 'fingerprints.json')
+  const fingerprintAnchor = '  return JSON.stringify(verdicts)\n}'
+  assert.equal(source.split(fingerprintAnchor).length, 2, 'production fingerprint return anchor')
+  source = source.replace(fingerprintAnchor, `  const proofFingerprint = JSON.stringify(verdicts)
+  proofFingerprints.push({ cwd, tools: [...available], fingerprint: proofFingerprint })
+  await $.fs.write(${JSON.stringify(fingerprintLog)}, JSON.stringify(proofFingerprints))
+  return proofFingerprint
+}
+const proofFingerprints: unknown[] = []`)
   source = source.replaceAll('await loadProviders($)', 'await loadProviders($); for (const provider of Object.values(loaded.config.providers)) await $.store.set(TRUST_PREFIX + fingerprint(provider), true)')
   const close = source.lastIndexOf('\n}'); assert.ok(close > 0, 'production registration boundary')
   source = source.slice(0, close) + `
