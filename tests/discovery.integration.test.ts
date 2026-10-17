@@ -26,7 +26,7 @@ const on: any = (event: string, matcherOrCallback: any, callback?: any) => {
     const failure = (next: any, error: unknown) => Object.assign(typeof next === 'function' ? next : () => undefined, { called: false, error: { kind: 'error', message: error instanceof Error ? error.message : String(error) } })
     hook.callback = callback.constructor?.name === 'AsyncGeneratorFunction'
       ? async function* (...args: any[]) { try { return yield* callback(...args) } catch (error) { return yield* failed(args[0], args[1], failure(args[2], error)) } }
-      : async (...args: any[]) => { try { const next = args[2]; if (next && !next.signal) next.signal = new AbortController().signal; return await callback(...args) } catch { return failed() } }
+      : async (...args: any[]) => { try { const next = args[2]; if (next && !next.signal) next.signal = new AbortController().signal; return await callback(...args) } catch (error) { return failed(args[0], args[1], failure(args[2], error)) } }
   } }
 }
 register(on)
@@ -689,5 +689,19 @@ test('a declared model whose config does not validate is refused instead of sent
   } finally {
     host.session.model = sessionModel
     await reload({})
+  }
+})
+
+test('a failing title hook keeps a routed session on a local title instead of the host naming it', async () => {
+  const model = host.session.model
+  host.session.model = async () => 'codex/gpt-6.1-sol'
+  try {
+    let calls = 0
+    // The lower chain fails once, as a throwing hook would; the host then runs the catch with the rest of the chain.
+    const result = await hook('classic.UserPromptSubmit')(host, { prompt: 'Fix the flaky picker test', source: 'user' }, async () => { if (calls++ === 0) throw new Error('lower hook failed'); return {} })
+    expect(typeof result.sessionTitle).toBe('string')
+    expect(result.sessionTitle.length).toBeGreaterThan(0)
+  } finally {
+    host.session.model = model
   }
 })

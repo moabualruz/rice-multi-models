@@ -25,3 +25,13 @@ test('no anchor, another model or a shrunken transcript falls back to the whole 
   expect(anchoredEstimate({ model: 'a/m', tokens: 5, messages: 3 }, 'a/m', transcript, whole)).toBe(999)
   expect(anchoredEstimate({ model: 'a/m', tokens: 5, messages: 2 }, 'a/m', transcript, whole)).toBe(5)
 })
+
+test('per-agent state keeps only the newest entries', async () => {
+  const { setCapped } = await import('../hooks/util')
+  const map = new Map<string, number>()
+  for (let i = 0; i < 12; i++) setCapped(map, `agent-${i}`, i, 5)
+  expect([...map.keys()]).toEqual(['agent-7', 'agent-8', 'agent-9', 'agent-10', 'agent-11'])
+  setCapped(map, 'agent-8', 80, 5)
+  expect([...map.keys()].at(-1)).toBe('agent-8')
+  expect(map.get('agent-8')).toBe(80)
+})

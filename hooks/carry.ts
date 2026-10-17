@@ -2,6 +2,7 @@
 // streams but does not record it, so the mod keeps each step's reasoning by the first tool call it led to and
 // puts it back, as `thinking` blocks before that call, in the transcript it sends next. Pure.
 import type { ApiMessage } from './protocol'
+import { setCapped } from './util'
 
 export type Reasoning = { thinking: string; signature: string }
 export type Carry = Map<string, readonly Reasoning[]>
@@ -44,7 +45,7 @@ export function carryFor(who: string): Carry {
   let carry = carries.get(who)
   if (!carry) {
     carry = new Map()
-    carries.set(who, carry)
+    setCapped(carries, who, carry)
   }
 
   return carry

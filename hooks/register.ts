@@ -36,6 +36,7 @@ import type { ApiMessage, Effort, Limits, RemoteTool, StepRequest, StepWire, Tra
 import { fingerprint } from './config'
 import { STAMP } from './schemas.gen'
 import { createAssembler } from './step'
+import { setCapped } from './util'
 import { remoteTools } from './tools'
 import type { Described } from './tools'
 import { handbackState, withTask } from './transcript'
@@ -56,7 +57,7 @@ import { createEvaluatorSources, registerEvaluatorSources } from './evaluator-so
 
 const PLUGIN = 'rice-multi-models'
 /** Who the requests to declared providers say they come from (OpenCode Go asks each client to name itself). */
-const USER_AGENT = 'rice-multi-models/0.9.1 (claude-code)'
+const USER_AGENT = 'rice-multi-models/0.9.2 (claude-code)'
 const PROVIDERS: Readonly<Record<string, string>> = { codex: 'OpenAI Codex (ChatGPT subscription)', agy: 'Antigravity (agy CLI)', grok: 'Grok (grok CLI)' }
 /** Agent CLIs that run their own loop and tools: their label, default model, and what a user asks for to use them. */
 const WORKERS: Readonly<Record<string, { label: string; ask: string }>> = {
@@ -675,7 +676,7 @@ async function* routedStep($: EngineInterface, e: TurnStepInput): AsyncGenerator
     let firstTool: string | undefined
     for await (const event of helperStep(helperPort($), await wireFor($, built.req))) {
       if (event.type === 'signature') reasoning.push({ thinking: event.thinking, signature: event.signature })
-      else if (event.type === 'resume') resumes.set(who, event.key)
+      else if (event.type === 'resume') setCapped(resumes, who, event.key)
       else if (event.type === 'limits') {
         limits = event.limits
         limitsObservedAt = await $.clock.now()
@@ -696,7 +697,7 @@ async function* routedStep($: EngineInterface, e: TurnStepInput): AsyncGenerator
   }
   const end = assembler.end(handback ? { handback, deliver } : {})
   const reported = end.failure === undefined ? reportedInput(end.usage) : undefined
-  if (reported !== undefined && anchorMessages !== undefined) usageAnchors.set(who, { model: e.model, tokens: reported, messages: anchorMessages })
+  if (reported !== undefined && anchorMessages !== undefined) setCapped(usageAnchors, who, { model: e.model, tokens: reported, messages: anchorMessages })
   if (end.failure !== undefined && e.agentId !== undefined) $.ui.toast(end.failure.split('\n')[0] ?? end.failure)
   yield* end.chunks
 
@@ -1126,6 +1127,13 @@ export const register: Register = on => {
       $.ui.log(`${PLUGIN}: session naming used the local prompt title after the selected provider did not return a valid title`, { to: 'debug' })
     }
     return { ...result, sessionTitle: title }
+  }).catch(async ($, e, next) => {
+    // A failed hook is skipped and the host names the session with its own Claude request.
+    let routed = false
+    try { routed = isRouted(await $.session.model()) } catch { routed = false }
+    if (!routed) return next.called ? {} : next(e)
+    const result = next.called ? {} : await next(e)
+    return e.session_title || result.sessionTitle ? result : { ...result, sessionTitle: fallbackTitle(e.prompt) }
   })
   on('session.start', async ($, e, next) => {
     permissionContextNonce = crypto.randomUUID()
@@ -1315,7 +1323,7 @@ export const register: Register = on => {
     if (familyTypes.has(e.subagentType) && decision.family !== CLAUDE_FAMILY && decision.model === undefined) return { deny: `${PLUGIN}: ${decision.reason}; nothing was started` }
     $.ui.log(`${PLUGIN}: spawn ${e.subagentType} from ${parentModel}: ${decision.model ?? 'native resolution'} (${decision.reason})`, { to: 'debug' })
     const result = await next(decision.model !== undefined && decision.model !== e.model ? { ...e, model: decision.model } : e)
-    if (result.agentId) spawnDecisions.set(result.agentId, decision)
+    if (result.agentId) setCapped(spawnDecisions, result.agentId, decision)
     return result
   })
 
@@ -1335,7 +1343,7 @@ export const register: Register = on => {
       // Claude: a hook failure would otherwise run the native request.
       return yield* refusedStep(e, `${PLUGIN}: the model family of this conversation could not be resolved (${error instanceof Error ? error.message : String(error)}); nothing was sent`)
     }
-    if (e.agentId !== undefined) agentModels.set(e.agentId, e.model)
+    if (e.agentId !== undefined) setCapped(agentModels, e.agentId, e.model)
     const claimed = claimedRefusal(e.model)
     if (claimed) return yield* refusedStep(e, claimed)
     if (!isRouted(e.model)) return yield* next(e)
