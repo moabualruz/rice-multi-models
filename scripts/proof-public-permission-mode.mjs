@@ -117,7 +117,11 @@ const server = createServer(async (request, response) => {
     for await (const bytes of request) { raw += bytes; assert.ok(raw.length <= 4 * 1024 * 1024, 'bounded owned provider request') }
     const body = raw ? JSON.parse(raw) : undefined
     const classifier = typeof body?.instructions === 'string' && body.instructions.startsWith('Judge one pending tool action')
-    const row = { method: request.method, path: match[2], classifier, native: match[2].startsWith('native'), credentialFree: !request.headers.authorization && !request.headers['x-api-key'] }
+    const native = match[2].startsWith('native')
+    // A native request keeps a short, nonsecret summary so a failure names what reached Claude.
+    const system = native ? (typeof body?.system === 'string' ? body.system : Array.isArray(body?.system) ? body.system.map(block => block?.text ?? '').join(' ') : '') : ''
+    const row = { method: request.method, path: match[2], classifier, native, credentialFree: !request.headers.authorization && !request.headers['x-api-key'],
+      ...(native && body ? { model: body.model, tools: (body.tools ?? []).length, system: system.slice(0, 160), lastUser: JSON.stringify(body.messages?.at(-1)?.content ?? '').slice(0, 200) } : {}) }
     context.requests.push(row)
     if (match[2] !== 'selected/v1/responses') return json(response, { type: 'error', error: { type: 'rate_limit_error', message: 'Owned exhausted native subscription' } }, 429)
     assert.equal(row.credentialFree, true, 'synthetic selected provider receives no credentials')
@@ -278,7 +282,7 @@ async function runCase(test, index, base) {
     assert.equal(run.markerWritten, test.approved, 'real action marker matches approval')
     const judgments = context.requests.filter(row => row.classifier)
     assert.equal(judgments.filter(row => row.tool === 'Bash').length, 1, 'one selected Bash judgment')
-    assert.equal(context.requests.some(row => row.native && row.method === 'POST'), false, 'zero native inference POSTs')
+    assert.equal(context.requests.some(row => row.native && row.method === 'POST'), false, `zero native inference POSTs: ${JSON.stringify(context.requests.filter(row => row.native && row.method === 'POST'))}`)
     if (test.changeDuringJudgment || test.explicitAuto) assert.equal(context.barrier?.providerReleasedAfterAck, true, 'real ACK barrier precedes the selected reply')
     if (test.child) {
       assert.ok(observed.spawned?.agentId, 'real child was spawned')
