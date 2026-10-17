@@ -304,7 +304,10 @@ try {
   const directory = join(fixture, 'prerequisites'); mkdirSync(directory); mkdirSync(join(directory, '.claude'))
   const env = isolatedEnvironment(directory, 'http://127.0.0.1:1')
   const check = commandName => spawnSync(commandName, ['--version'], { cwd: directory, env, encoding: 'utf8', timeout: 10_000, windowsHide: true })
-  const actual = check(native), policy = check('claude')
+  // The production loader starts claude from PATH, through cmd.exe for an npm .cmd shim on Windows.
+  const actual = check(native)
+  let policy = check('claude')
+  if (policy.status !== 0 && process.platform === 'win32') policy = spawnSync('cmd.exe', ['/d', '/s', '/c', 'claude', '--version'], { cwd: directory, env, encoding: 'utf8', timeout: 10_000, windowsHide: true })
   assert.equal(actual.status, 0, 'The native Claude executable must be available.')
   version = actual.stdout.trim()
   assert.match(version, /^\d+\.\d+\.\d+ \(Claude Code\)$/)

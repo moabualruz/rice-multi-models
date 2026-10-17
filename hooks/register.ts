@@ -724,6 +724,21 @@ async function complete($: EngineInterface, req: StepRequest, timeoutMs?: number
 }
 
 /**
+ * Runs the installed claude CLI with fixed arguments. npm installs it on native
+ * Windows as a .cmd shim, which only a shell can start; the arguments here are
+ * constants, so the cmd.exe fallback carries no user input.
+ */
+async function installedClaude($: EngineInterface, args: readonly string[], options: { timeoutMs: number; env: Record<string, string> }) {
+  let direct: Awaited<ReturnType<EngineInterface['process']['run']>> | undefined
+  try { direct = await $.process.run(['claude', ...args], options) } catch { direct = undefined }
+  if (direct?.exitCode === 0 || await $.env.get('OS') !== 'Windows_NT') {
+    if (direct) return direct
+    throw new Error('The installed claude executable is unavailable.')
+  }
+  return $.process.run(['cmd.exe', '/d', '/s', '/c', 'claude', ...args], options)
+}
+
+/**
  * The native auto-mode defaults are built into each Claude Code version, not read
  * from settings. They are cached per version, so a background update of the
  * installed CLI does not break a session still running the previous version.
@@ -739,10 +754,10 @@ function nativePermissionDefaults($: EngineInterface): Promise<unknown> {
     const isolated = `${configDir.replace(/[\\/]+$/, '')}/rice-multi-models/native-defaults`
     await $.fs.write(`${isolated}/settings.json`, '{}\n')
     const env = { CLAUDE_CONFIG_DIR: isolated }
-    const checked = await $.process.run(['claude', '--version'], { timeoutMs: 5_000, env })
+    const checked = await installedClaude($, ['--version'], { timeoutMs: 5_000, env })
     const installed = /^(\S+) \(Claude Code\)/.exec(checked.stdout.trim())?.[1]
     if (checked.exitCode !== 0 || !installed) throw new Error('The installed claude executable is unavailable for the auto-mode defaults.')
-    const defaults = await $.process.run(['claude', 'auto-mode', 'defaults'], { timeoutMs: 10_000, env })
+    const defaults = await installedClaude($, ['auto-mode', 'defaults'], { timeoutMs: 10_000, env })
     if (defaults.exitCode !== 0 || defaults.isStdoutTruncated) throw new Error('The native auto-mode defaults could not be loaded.')
     const parsed = JSON.parse(defaults.stdout) as unknown
     await $.store.set(`auto-mode-defaults:${installed}`, parsed)
