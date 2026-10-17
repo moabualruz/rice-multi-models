@@ -84,9 +84,12 @@ without an anchor, after a model change or after compaction.
   modules registered before this mod), an invoked skill, an agent definition file
   or a session plugin directory may define hooks for the same event, evaluators run
   natively rather than risking dropped hooks.
-- **Restricted tool sessions.** Without any file-edit tool, an auto-to-plan switch
-  during a pending judgment cannot be told apart by the query fingerprint; other
-  mode switches still are.
+- **Restricted tool sessions and flagged paths.** Without any file-edit tool, or in
+  a working directory the host flags as a suspicious Windows path (8.3 short
+  names), an auto-to-plan switch during a pending judgment cannot be told apart by
+  the query fingerprint; other mode switches still are. The probes use paths
+  relative to the working directory so ordinary directories are unaffected by how
+  the platform spells them.
 - **Subagent transcripts.** Routed subagents, forked skills and fork subagents need
   session persistence (the default). Under `--no-session-persistence` their tasks
   are not readable by plugins and routed ones refuse without sending anything.

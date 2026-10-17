@@ -128,8 +128,12 @@ These come from what Claude Code exposes to plugins today:
 - **Invalid configuration.** If `rice-multi-models.json` does not validate, its
   declared models are refused with the validation error until it is fixed and
   reloaded; they are never sent to Claude.
-- **Sessions without file-edit tools.** A switch from auto to plan mode during a
-  pending permission judgment cannot be detected there; other mode changes are.
+- **Mode detection limits.** A switch from auto to plan mode during a pending
+  permission judgment is found by comparing the host's own answers for harmless
+  probes. It cannot be found in a session without file-edit tools, or in a working
+  directory the host flags as a suspicious Windows path (for example an 8.3 short
+  name such as `RUNNER~1`), where every path asks before the mode is checked.
+  Other mode changes are found in both cases.
 
 ## Web search
 
