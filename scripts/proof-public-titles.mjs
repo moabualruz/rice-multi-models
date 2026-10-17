@@ -110,7 +110,7 @@ try {
     writeFileSync(join(home, '.claude.json'), JSON.stringify(profile)); writeFileSync(join(config, '.claude.json'), JSON.stringify(profile))
     writeFileSync(join(config, 'settings.json'), '{}')
     writeFileSync(join(config, 'rice-multi-models.json'), JSON.stringify({ providers: { selected: { kind: 'responses', baseUrl: `${base}/selected/v1`, allowHttp: true, auth: 'none', models: { main: { maxOutputTokens: 4096, contextWindow: 500000 } } } } }))
-    const env = Object.fromEntries(['PATH', 'TMPDIR', 'LANG', 'SystemRoot', 'SystemDrive', 'WINDIR', 'ComSpec', 'TEMP', 'TMP'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]))
+    const env = Object.fromEntries(['PATH', 'PATHEXT', 'TMPDIR', 'LANG', 'SystemRoot', 'SystemDrive', 'WINDIR', 'ComSpec', 'TEMP', 'TMP', 'ProgramFiles', 'ProgramFiles(x86)', 'CLAUDE_CODE_GIT_BASH_PATH'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]))
     Object.assign(env, { HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: config, CODEX_HOME: join(home, '.codex'), ANTHROPIC_API_KEY: 'sk-ant-owned-title', ANTHROPIC_BASE_URL: `${base}/native`, DISABLE_AUTOUPDATER: '1', DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1', ...(test.disabled ? { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' } : {}) })
     const validation = spawnSync(native, ['plugin', 'validate', '--strict', plugin], { cwd: fixture, env, encoding: 'utf8', timeout: 10_000 })
     assert.equal(validation.status, 0, (validation.stdout + validation.stderr).slice(-2000))

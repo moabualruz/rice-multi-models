@@ -103,7 +103,7 @@ try {
   writeFileSync(join(caller, 'hooks/hooks.json'), JSON.stringify({ modules: ['./register.js'] }))
   writeFileSync(join(caller, 'hooks/register.js'), driver)
   writeFileSync(registerFile, source)
-  const env = Object.fromEntries(['PATH', 'TMPDIR', 'LANG', 'SystemRoot', 'SystemDrive', 'WINDIR', 'ComSpec', 'TEMP', 'TMP'].filter(name => process.env[name] !== undefined).map(name => [name, process.env[name]]))
+  const env = Object.fromEntries(['PATH', 'PATHEXT', 'TMPDIR', 'LANG', 'SystemRoot', 'SystemDrive', 'WINDIR', 'ComSpec', 'TEMP', 'TMP', 'ProgramFiles', 'ProgramFiles(x86)', 'CLAUDE_CODE_GIT_BASH_PATH'].filter(name => process.env[name] !== undefined).map(name => [name, process.env[name]]))
   Object.assign(env, { HOME: fixture, USERPROFILE: fixture, CLAUDE_CONFIG_DIR: config, CODEX_HOME: join(fixture, '.codex'), NODE_EXTRA_CA_CERTS: cert, ANTHROPIC_API_KEY: 'sk-ant-owned-permissions', ANTHROPIC_BASE_URL: `${base}/native`, CLAUDE_CODE_AUTO_MODE_SERVER: '0', DISABLE_AUTOUPDATER: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1' })
   for (const folder of [caller, plugin]) {
     const checked = spawnSync(native, ['plugin', 'validate', '--strict', folder], { cwd: fixture, env, encoding: 'utf8', timeout: 10000 })

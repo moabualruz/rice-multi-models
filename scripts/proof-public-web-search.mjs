@@ -110,7 +110,7 @@ try {
   }).catch(async($,e,next)=>{await $.fs.write(${JSON.stringify(hookFailure)},JSON.stringify({phase:'http-fixture-handler',kind:next.error.kind,message:next.error.message.slice(0,240)}));return{value:{status:503,ok:false,headers:{},text:'{}'}};});};`
   writePlugin(observer, 'owned-public-search', hook); writePlugin(driver, 'owned-public-caller', caller)
   writePlugin(nativeHttp, 'owned-public-native-http', httpMock)
-  const env = Object.fromEntries(['PATH', 'TMPDIR', 'LANG', 'SystemRoot', 'SystemDrive', 'WINDIR', 'ComSpec', 'TEMP', 'TMP'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]))
+  const env = Object.fromEntries(['PATH', 'PATHEXT', 'TMPDIR', 'LANG', 'SystemRoot', 'SystemDrive', 'WINDIR', 'ComSpec', 'TEMP', 'TMP', 'ProgramFiles', 'ProgramFiles(x86)', 'CLAUDE_CODE_GIT_BASH_PATH'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]))
   // Keep first-party origin ownership for authorize(), but block any native SDK
   // connection outside the explicitly mocked public HTTP operations.
   Object.assign(env, { HOME: fixture, USERPROFILE: fixture, CLAUDE_CONFIG_DIR: config, ANTHROPIC_API_KEY: 'sk-ant-owned-public-search', ANTHROPIC_UNIX_SOCKET: join(fixture, 'unused-native.sock'), DISABLE_AUTOUPDATER: '1', DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1' })
