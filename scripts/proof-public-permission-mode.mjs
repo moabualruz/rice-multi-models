@@ -198,8 +198,15 @@ async function runCase(test, index, base) {
   const fingerprintLog = join(directory, 'fingerprints.json')
   const fingerprintAnchor = '  return JSON.stringify(verdicts)\n}'
   assert.equal(source.split(fingerprintAnchor).length, 2, 'production fingerprint return anchor')
-  source = source.replace(fingerprintAnchor, `  const proofFingerprint = JSON.stringify(verdicts)
-  proofFingerprints.push({ cwd, tools: [...available], fingerprint: proofFingerprint })
+  source = source.replace(fingerprintAnchor, `  const wide = await Promise.all([
+    ['ExitPlanMode', {}], ['EnterPlanMode', {}], ['Read', { file_path: \`\${cwd}/.rice-multi-models-mode-probe\` }], ['Glob', { pattern: '*' }],
+    ['Bash', { command: 'touch rice-multi-models-mode-probe-file', description: 'probe' }], ['Bash', { command: 'rm -f rice-multi-models-mode-probe-file', description: 'probe' }],
+    ['Bash', { command: 'git status', description: 'probe' }], ['Write', { file_path: 'rice-multi-models-relative-probe', content: '' }],
+  ].filter(([tool]) => available.has(tool as string)).map(async ([tool, input]) => {
+    try { const v = await $.tool.check({ tool: tool as string, input }); return [tool, JSON.stringify(input).slice(0, 60), v.decision, (v.reason ?? '').slice(0, 160)] } catch (error) { return [tool, 'unavailable', String(error).slice(0, 80)] }
+  }))
+  const proofFingerprint = JSON.stringify(verdicts)
+  proofFingerprints.push({ cwd, tools: [...available], fingerprint: proofFingerprint, wide })
   await $.fs.write(${JSON.stringify(fingerprintLog)}, JSON.stringify(proofFingerprints))
   return proofFingerprint
 }
@@ -247,7 +254,7 @@ const proofFingerprints: unknown[] = []`)
   }
   const started = Date.now()
   context.stage = 'native-initialize'
-  context.child = spawn(native, ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--no-session-persistence', '--name', 'Owned permission mode', '--model', 'selected/main', '--plugin-dir', caller, '--plugin-dir', plugin, '--setting-sources', 'user', '--permission-mode', 'auto', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--tools', 'Agent,Bash,TaskStop,Write', '--allowedTools', 'Agent,TaskStop'], { cwd: directory, env, detached: process.platform !== 'win32', windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+  context.child = spawn(native, ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--no-session-persistence', '--name', 'Owned permission mode', '--model', 'selected/main', '--plugin-dir', caller, '--plugin-dir', plugin, '--setting-sources', 'user', '--permission-mode', 'auto', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--tools', 'Agent,Bash,Edit,EnterPlanMode,ExitPlanMode,Glob,Read,TaskStop,Write', '--allowedTools', 'Agent,TaskStop'], { cwd: directory, env, detached: process.platform !== 'win32', windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
   const child = context.child
   context.closed = new Promise(resolve => { child.once('close', (code, signal) => resolve({ code, signal })); child.once('error', error => { context.spawnFailure = String(error.message); resolve({ code: null, signal: null }) }) })
   console.log(JSON.stringify({ phase, ownedPid: child.pid, startedAt: new Date().toISOString(), fixture: directory, preload: false }))

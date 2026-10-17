@@ -774,11 +774,16 @@ async function effectivePermissionPolicy($: EngineInterface) {
   return resolvePermissionPolicy(defaults, { user: user.autoMode, flag: flag.autoMode, policy: policy.autoMode })
 }
 
-/** Harmless native permission questions whose answers differ by mode (plan names itself on edits). */
+/**
+ * Harmless native permission questions whose answers differ by mode (plan names itself on edits).
+ * Edit paths are relative: the engine resolves them against the working directory, so the answer
+ * does not depend on how the platform spells that directory (an 8.3 short name on Windows made an
+ * absolute probe look the same in every mode).
+ */
 const MODE_PROBES: readonly { tool: string; input: (cwd: string) => Record<string, unknown> }[] = [
   { tool: 'Bash', input: () => ({ command: 'printf rice-multi-models-mode-probe', description: 'Permission mode probe' }) },
-  { tool: 'Write', input: cwd => ({ file_path: `${cwd}/.rice-multi-models-mode-probe`, content: '' }) },
-  { tool: 'Edit', input: cwd => ({ file_path: `${cwd}/.rice-multi-models-mode-probe`, old_string: 'probe', new_string: 'probe-changed' }) },
+  { tool: 'Write', input: () => ({ file_path: '.rice-multi-models-mode-probe', content: '' }) },
+  { tool: 'Edit', input: () => ({ file_path: '.rice-multi-models-mode-probe', old_string: 'probe', new_string: 'probe-changed' }) },
   { tool: 'Agent', input: () => ({ description: 'Permission mode probe', prompt: 'Permission mode probe' }) },
 ]
 
