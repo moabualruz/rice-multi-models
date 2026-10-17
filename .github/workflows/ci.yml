@@ -75,3 +75,11 @@ jobs:
           "RICE_CLAUDE_EXECUTABLE=$nativeExecutable" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           (Join-Path $nativePrefix 'node_modules/.bin') | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - run: bun run check
+      - name: Keep proof receipts of a failed run
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-proof-receipts
+          path: ~/AppData/Local/Temp/rice-multi-models-proofs
+          if-no-files-found: ignore
+          retention-days: 7
