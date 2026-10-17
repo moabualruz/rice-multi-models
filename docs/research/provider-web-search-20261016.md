@@ -62,7 +62,7 @@ Normalize retrieval to `{title,url,content}` and metadata-only stage/service/sta
 
 The inspected official 2.1.299 implementation builds WebSearch using a `web_search_20250305` server tool, `max_uses:8`, forced `toolChoice:{type:"tool",name:"web_search"}`, and `querySource:"web_search_tool"`. Its query receives the active tool context's `credentials` and `storageV5`. The model is either the native helper resolver `_E()` or `mainLoopModel()`, depending on a native feature flag. This is primary installed implementation evidence, not a public stable API. The ordinary CLI and plugin documentation does not promise those internal symbols. [Official distribution](https://www.npmjs.com/package/@anthropic-ai/claude-code/v/2.1.299), [Claude Code CLI](https://code.claude.com/docs/en/cli-reference).
 
-The withdrawn 0.8.0 startup adapter (`helper/native/preload.ts` and `transport.ts`, removed in 0.9.0) captured the original host fetch and used a private `AsyncLocalStorage` scope to bypass interception during provider I/O. 0.9.0 uses the public `tool.call` hook for WebSearch instead.
+The withdrawn 0.8.0 startup adapter (`helper/native/preload.ts` and `transport.ts`, removed in 0.9.1) captured the original host fetch and used a private `AsyncLocalStorage` scope to bypass interception during provider I/O. 0.9.1 uses the public `tool.call` hook for WebSearch instead.
 
 Owned native Bun import/call proofs qualified these 2.1.299 Haiku-family default exports, including an actual external-model WebSearch context. Each full function source matched its platform's installed implementation before invocation:
 

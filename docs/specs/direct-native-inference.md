@@ -1,6 +1,6 @@
 # Direct inference inside ordinary Claude
 
-Status: implemented in 0.9.0 against Claude Code 2.1.301 and 2.1.302. Named host
+Status: implemented in 0.9.1 against Claude Code 2.1.301 and 2.1.302. Named host
 residuals are listed at the end; they are documented, not hidden.
 
 ## Required outcome

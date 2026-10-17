@@ -382,7 +382,7 @@ claude plugin marketplace update rice-mods
 claude plugin update rice-multi-models@rice-mods
 ```
 
-0.9.0 registers no MCP tools. If you followed older instructions that used the
+0.9.1 and later register no MCP tools. If you followed older instructions that used the
 `mcp__rice-multi-models__*` tools or a separate startup launcher, use `/rice-models
 models` and the `rice-multi-models:<family>` agent types instead, and start the
 ordinary `claude` command.

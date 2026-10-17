@@ -56,7 +56,7 @@ import { createEvaluatorSources, registerEvaluatorSources } from './evaluator-so
 
 const PLUGIN = 'rice-multi-models'
 /** Who the requests to declared providers say they come from (OpenCode Go asks each client to name itself). */
-const USER_AGENT = 'rice-multi-models/0.9.0 (claude-code)'
+const USER_AGENT = 'rice-multi-models/0.9.1 (claude-code)'
 const PROVIDERS: Readonly<Record<string, string>> = { codex: 'OpenAI Codex (ChatGPT subscription)', agy: 'Antigravity (agy CLI)', grok: 'Grok (grok CLI)' }
 /** Agent CLIs that run their own loop and tools: their label, default model, and what a user asks for to use them. */
 const WORKERS: Readonly<Record<string, { label: string; ask: string }>> = {
