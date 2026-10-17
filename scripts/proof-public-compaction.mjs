@@ -41,12 +41,15 @@ try {
   })
 ` + source.slice(close)
   writeFileSync(file, source)
-  const env = Object.fromEntries(['PATH', 'SystemRoot', 'SystemDrive', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL'].filter(name => process.env[name] !== undefined).map(name => [name, process.env[name]]))
+  const env = Object.fromEntries(['PATH', 'PATHEXT', 'SystemRoot', 'SystemDrive', 'WINDIR', 'ComSpec', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL'].filter(name => process.env[name] !== undefined).map(name => [name, process.env[name]]))
   Object.assign(env, { HOME: fixture, USERPROFILE: fixture, CLAUDE_CONFIG_DIR: config, CODEX_HOME: join(fixture, '.codex'), ANTHROPIC_API_KEY: 'owned-no-network', ANTHROPIC_BASE_URL: 'http://127.0.0.1:1', DISABLE_AUTOUPDATER: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' })
   const checked = spawnSync(native, ['plugin', 'validate', '--strict', plugin], { cwd: fixture, env, encoding: 'utf8', timeout: 10000 })
   assert.equal(checked.status, 0, (checked.stdout + checked.stderr).slice(-2000))
   async function run(label, session, args, prompt) {
-    child = spawn(native, ['-p', '--model', 'codex/owned-public', '--plugin-dir', plugin, '--setting-sources', 'user', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--tools', '', '--output-format', 'json', ...args, prompt], { cwd: fixture, env, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] })
+    // Native Windows limits a command line to 32767 characters; claude -p reads a long prompt from stdin.
+    const viaStdin = prompt.length > 8000
+    child = spawn(native, ['-p', '--model', 'codex/owned-public', '--plugin-dir', plugin, '--setting-sources', 'user', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--tools', '', '--output-format', 'json', ...args, ...(viaStdin ? [] : [prompt])], { cwd: fixture, env, detached: process.platform !== 'win32', stdio: [viaStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'] })
+    if (viaStdin) child.stdin.end(prompt)
     console.log(JSON.stringify({ phase: label, ownedPid: child.pid, session, preload: false }))
     let stdout = '', stderr = '', expired = false
     child.stdout.on('data', bytes => stdout += bytes); child.stderr.on('data', bytes => stderr += bytes)

@@ -185,7 +185,10 @@ try {
   async function run(name, extra, prompt, { permission = 'dontAsk', model = 'a/main', expectSuccess = true } = {}) {
     phase = name; mainCalls = 0
     const started = Date.now()
-    const child = spawn(process.env.RICE_CLAUDE_EXECUTABLE || 'claude', ['--plugin-dir', plugin, '-p', ...(model ? ['--model', model] : []), '--setting-sources', 'user', '--strict-mcp-config', '--permission-mode', permission, '--allowedTools', 'Skill,ToolSearch,WebFetch,WebSearch,Agent,SendMessage', '--output-format', 'json', ...extra, '--', prompt], { cwd: fixture, env: { ...env, RICE_OWNED_PHASE: name }, stdio: ['ignore', 'pipe', 'pipe'] })
+    // Native Windows limits a command line to 32767 characters; claude -p reads a long prompt from stdin.
+    const viaStdin = prompt.length > 8000
+    const child = spawn(process.env.RICE_CLAUDE_EXECUTABLE || 'claude', ['--plugin-dir', plugin, '-p', ...(model ? ['--model', model] : []), '--setting-sources', 'user', '--strict-mcp-config', '--permission-mode', permission, '--allowedTools', 'Skill,ToolSearch,WebFetch,WebSearch,Agent,SendMessage', '--output-format', 'json', ...extra, ...(viaStdin ? [] : ['--', prompt])], { cwd: fixture, env: { ...env, RICE_OWNED_PHASE: name }, stdio: [viaStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'] })
+    if (viaStdin) child.stdin.end(prompt)
     process.stdout.write(`${JSON.stringify({ phase: name, ownedPid: child.pid })}\n`)
     let stdout = '', stderr = ''; child.stdout.on('data', bytes => stdout += bytes); child.stderr.on('data', bytes => stderr += bytes)
     const timer = setTimeout(() => child.kill('SIGTERM'), 60000)
