@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { spawn, spawnSync } from 'node:child_process'
 import { Script } from 'node:vm'
@@ -43,7 +43,7 @@ try {
  writeFileSync(join(config, 'settings.json'), '{}')
  const skill = join(config, 'skills/owned-inventory'); mkdirSync(skill, { recursive: true }); writeFileSync(join(skill, 'SKILL.md'), '---\n' + JSON.stringify(skillFrontmatter) + '\n---\nOWNED_SKILL_BODY\n')
  for (const folder of [observer, rewrite, driver, classic, mixed]) {
-  const name = folder.split('/').at(-1)
+  const name = basename(folder)
   mkdirSync(join(folder, '.claude-plugin'), { recursive: true }); mkdirSync(join(folder, 'hooks'))
   if (name === 'observer') copyFileSync(join(root, 'hooks/evaluator-sources.ts'), join(folder, 'hooks/evaluator-sources.ts'))
   writeFileSync(join(folder, '.claude-plugin/plugin.json'), JSON.stringify({ name: 'owned-' + name, version: '1.0.0', description: 'Owned evaluator source inventory', author: { name: 'Owned fixture' } }))
