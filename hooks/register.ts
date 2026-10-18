@@ -5,7 +5,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, ModelCompleteResult, ModelUsage, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
-import { BUILTIN_AGENTS, GENERAL_PURPOSE_PROMPT, EXPLORE_PROMPT, HANDBACK_TOOL, identityLine, toolFilter } from './agents'
+import { BUILTIN_AGENTS, HANDBACK_TOOL, identityLine, isFork, toolFilter } from './agents'
 import type { AgentDef } from './agents'
 import { anchoredEstimate, reportedInput } from './budget'
 import type { UsageAnchor } from './budget'
@@ -20,6 +20,8 @@ import { retainedTail, withUserText } from './compact'
 import type { CompactMessage } from './compact'
 import { compactionPrompt, fitTranscript, isTemplate, summaryBody, summaryMessage } from './native-compaction'
 import type { CompactionTemplate } from './native-compaction'
+import { builtinPrompt, isCapture, offeredTools, toolSetKey, toolTable } from './native-tools'
+import type { NativeCapture } from './native-tools'
 import { createMemory } from './memory'
 import { CATALOG_URL, kindCounts, liveIds, opencodeProvider, TIERS } from './opencode'
 import type { Tier } from './opencode'
@@ -112,6 +114,19 @@ let loaded: Loaded = declared
 let catalogue: ModelCatalogue = { models: [], providers: [] }
 let nativeContextSync = Promise.resolve()
 let compactionTemplate: Promise<CompactionTemplate> | undefined
+/** The installed claude's tool definitions and agent prompts, per combination of the session's built-in tools (toolSetKey). */
+const toolCaptures = new Map<string, Promise<NativeCapture>>()
+const readyCaptures = new Map<string, NativeCapture>()
+/** The last failed capture, which is not retried for a minute (or until /rice-models refresh). */
+let toolCaptureFailure: { at: number; error: string } | undefined
+const TOOL_CAPTURE_RETRY_MS = 60_000
+/** The capture failures already written to the debug log. */
+const reportedToolFallbacks = new Set<string>()
+/** Whether this session is interactive, as its start said: an interactive session's subagents get the background tool set. */
+let interactiveSession: boolean | undefined
+/** Whether each spawned agent runs in the background, by its agent id. */
+const spawnBackground = new Map<string, boolean>()
+let agentRegistration = Promise.resolve()
 let seenTranscriptPath: string | undefined
 
 async function auxiliaryOwner($: EngineInterface) {
@@ -434,19 +449,32 @@ async function readCodexDefaults($: EngineInterface): Promise<{ model?: string; 
   }
 }
 
-async function registerAgents($: EngineInterface): Promise<void> {
+/** Registers this mod's agent types, one registration at a time. */
+function registerAgents($: EngineInterface): Promise<void> {
+  agentRegistration = agentRegistration.catch(() => {}).then(() => registerAgentTypes($))
+  return agentRegistration
+}
+
+async function registerAgentTypes($: EngineInterface): Promise<void> {
   const model = defaultModel('codex')
+  // The general-purpose and Explore prompts these types run on are the installed claude's own. Until they are read
+  // the types are not offered; a capture is started, and they are registered when it ends.
+  const names = builtinNames(await $.tool.list())
+  const native = await readyTools($, names).catch(() => undefined)
+  const general = native && builtinPrompt(native, 'general-purpose')
+  const explore = native && builtinPrompt(native, 'Explore')
+  if (!native && (model || routedFamilies().length)) void stepTools($, names).then(capture => capture instanceof Error ? undefined : registerAgents($))
   const agents: { name: string; description: string; def: AgentDef }[] = [
-    {
+    ...(general ? [{
       name: 'codex',
       description: `A general-purpose subagent running on ${model} (OpenAI Codex via the ChatGPT subscription), with Claude Code's tools. Give it a complete, self-contained task.`,
-      def: { prompt: GENERAL_PURPOSE_PROMPT },
-    },
-    {
+      def: { prompt: general },
+    }] : []),
+    ...(explore ? [{
       name: 'codex-explore',
       description: `A read-only search agent running on ${model}: finds code and files and reports where they are. Say how thorough to be.`,
-      def: { prompt: EXPLORE_PROMPT, tools: ['Read', 'Glob', 'Grep', 'Bash', 'WebFetch', 'WebSearch'] },
-    },
+      def: { prompt: explore, tools: ['Read', 'Glob', 'Grep', 'Bash', 'WebFetch', 'WebSearch'] },
+    }] : []),
   ]
   if (model) for (const agent of agents) {
     await $.agent.register({ name: agent.name, description: agent.description, prompt: agent.def.prompt, model, ...(agent.def.tools ? { tools: agent.def.tools } : {}) })
@@ -454,17 +482,17 @@ async function registerAgents($: EngineInterface): Promise<void> {
     registered.set(`${PLUGIN}:${agent.name}`, { ...agent.def, model })
   }
   familyTypes.clear()
-  if (model) familyTypes.set(`${PLUGIN}:codex`, 'codex')
-  for (const family of routedFamilies()) {
+  if (model && general) familyTypes.set(`${PLUGIN}:codex`, 'codex')
+  for (const family of general ? routedFamilies() : []) {
     if (family === 'codex') continue
     const familyModel = familyDefault(family)
     if (!familyModel) continue
     const name = `${PLUGIN}:${family}`
-    await $.agent.register({ name: family, description: `A general-purpose subagent on the ${family} provider family (${familyModel}), with Claude Code's tools. Choose it only when the user or session instructions ask for ${family}; the Agent model alias picks the tier.`, prompt: GENERAL_PURPOSE_PROMPT, model: familyModel })
-    registered.set(name, { prompt: GENERAL_PURPOSE_PROMPT, model: familyModel })
+    await $.agent.register({ name: family, description: `A general-purpose subagent on the ${family} provider family (${familyModel}), with Claude Code's tools. Choose it only when the user or session instructions ask for ${family}; the Agent model alias picks the tier.`, prompt: general!, model: familyModel })
+    registered.set(name, { prompt: general!, model: familyModel })
     familyTypes.set(name, family)
   }
-  if (familyTypes.size) await $.agent.register({ name: 'claude', description: "A general-purpose subagent on Anthropic's Claude models. Choose it only when the user or session instructions ask for Claude; the Agent model alias (haiku, sonnet, opus, fable) picks the model.", prompt: GENERAL_PURPOSE_PROMPT, model: 'sonnet' })
+  if (familyTypes.size && general) await $.agent.register({ name: 'claude', description: "A general-purpose subagent on Anthropic's Claude models. Choose it only when the user or session instructions ask for Claude; the Agent model alias (haiku, sonnet, opus, fable) picks the model.", prompt: general, model: 'sonnet' })
   // A type registered earlier in this process stays offered after a refresh
   // that finds no routed family; it must still mean native Claude.
   familyTypes.set(`${PLUGIN}:claude`, CLAUDE_FAMILY)
@@ -516,6 +544,25 @@ async function buildWorkerRequest($: EngineInterface, e: TurnStepInput, transcri
   }
 }
 
+/**
+ * Whose prompt a subagent's step follows: its own agent type's and definition, or for a fork the conversation it
+ * forks, the nearest ancestor that is not a fork (no type when that is main).
+ */
+async function promptOwner($: EngineInterface, agentId: string) {
+  const agents = await $.agent.list()
+  const agent = agents.find(each => each.id === agentId)
+  const fork = agent !== undefined && isFork(agent.type)
+  let source = agent
+  for (let depth = 0; source !== undefined && isFork(source.type) && depth <= agents.length; depth++) {
+    const parent: string | undefined = source.parentId
+    source = parent === undefined ? undefined : agents.find(each => each.id === parent)
+  }
+  const type = fork ? source?.type : agent?.type
+  if (type && unverifiedRegistered.has(type)) throw new Error('The registered agent has no successfully accepted native prompt definition.')
+  const def = (type && registered.get(type)) || (await definitionOf(promptsPort($), memory, type))
+  return { agent, fork, type, def, route: fork && type === undefined ? undefined : { type, label: '' } }
+}
+
 /** The request for one routed step: the system prompt, the tools, the transcript with reasoning put back. */
 async function buildRequest($: EngineInterface, e: TurnStepInput, transcript: readonly ApiMessage[]): Promise<{ req: StepRequest; handback?: string }> {
   const who = e.agentId ?? 'main'
@@ -524,7 +571,11 @@ async function buildRequest($: EngineInterface, e: TurnStepInput, transcript: re
   const provider = target.label
   const infos = await $.tool.list()
   const names = infos.map(info => info.name)
+  const builtins = builtinNames(infos)
   const io = promptsPort($)
+  // The installed claude's own tool definitions and agent prompts. A main step without them still runs, with the
+  // generated schema table; a subagent's prompt cannot be had without them, so its step is refused (systemFor).
+  const native = e.agentId !== undefined || builtins.length ? await stepTools($, builtins) : undefined
   let system: string
   let allow: (tool: string) => boolean = () => true
   let messages = transcript
@@ -532,24 +583,28 @@ async function buildRequest($: EngineInterface, e: TurnStepInput, transcript: re
   if (e.agentId === undefined) {
     system = rewriteMain((await $.prompt.compose({ model: e.model, tools: names })).sections, identityLine(target.model, provider))
   } else {
-    const agent = (await $.agent.list()).find(each => each.id === e.agentId)
-    const type = agent?.type
-    if (type && unverifiedRegistered.has(type)) throw new Error('The registered agent has no successfully accepted native prompt definition.')
-    const def = (type && registered.get(type)) || (await definitionOf(io, memory, type))
-    allow = toolFilter(type, def)
+    const owner = await promptOwner($, e.agentId)
+    // A fork keeps its parent's tool rules. Any other agent is offered what the engine offers its type: in an
+    // interactive session, and for an agent in the background, the background set.
+    const background = interactiveSession !== false || spawnBackground.get(e.agentId) !== false
+    const engineType = owner.def !== undefined ? undefined : BUILTIN_AGENTS.includes(owner.type ?? '') ? owner.type! : 'general-purpose'
+    const engine = native === undefined || native instanceof Error || owner.fork ? undefined : offeredTools(native, engineType, background)
+    allow = owner.fork ? toolFilter(owner.agent?.type, undefined) : toolFilter(owner.type, owner.def, engine)
     const offered = names.filter(allow)
     if (handbackState(transcript, HANDBACK_TOOL.name) === 'offered') handback = HANDBACK_TOOL.name
     const prompt = await systemFor(io, memory, {
-      def,
-      route: { type, label: e.model },
+      def: owner.def,
+      route: owner.route && { ...owner.route, label: e.model },
+      fork: owner.fork,
       engineModel: e.model,
       target: e.model,
       model: target.model,
       provider,
       tools: handback ? [...offered, handback] : offered,
+      native,
     })
     system = prompt.text
-    messages = withTask(messages, agent?.description)
+    messages = withTask(messages, owner.agent?.description)
   }
   const only = target.remote?.model.tools
   if (Array.isArray(only)) {
@@ -557,7 +612,7 @@ async function buildRequest($: EngineInterface, e: TurnStepInput, transcript: re
     allow = tool => allowed(tool) && only.includes(tool)
   }
   messages = withCarry(withIdentity(messages, target.model, provider), carryFor(who))
-  const tools: RemoteTool[] = remoteTools(infos, described, allow)
+  const tools: RemoteTool[] = remoteTools(infos, described, allow, {}, native === undefined || native instanceof Error ? undefined : toolTable(native))
   if (handback) tools.push({ name: HANDBACK_TOOL.name, description: HANDBACK_TOOL.description, schema: { ...HANDBACK_TOOL.schema } })
   const prefs = await read($, prefsAtom)
   const isCodex = target.provider === 'codex' && !target.remote
@@ -577,11 +632,12 @@ async function permissionInstructions($: EngineInterface, model: string, agentId
     const agent = (await $.agent.list()).find(each => each.id === agentId)
     if (!agent) throw new Error('The permission conversation is unavailable.')
     if (unverifiedRegistered.has(agent.type)) throw new Error('The permission conversation has no successfully accepted native prompt definition.')
-    const def = registered.get(agent.type) ?? await definitionOf(promptsPort($), memory, agent.type)
-    omitClaudeMd = def?.omitClaudeMd === true
+    const owner = await promptOwner($, agentId)
+    omitClaudeMd = owner.def?.omitClaudeMd === true
     const target = targetOf(model)
     if (!target) throw new Error('The permission conversation has no provider.')
-    instructions = (await systemFor(promptsPort($), memory, { def, route: { type: agent.type, label: model }, engineModel: model, target: model, model: target.model, provider: target.label, tools: [] })).text
+    const native = await stepTools($, builtinNames(await $.tool.list()))
+    instructions = (await systemFor(promptsPort($), memory, { def: owner.def, route: owner.route && { ...owner.route, label: model }, fork: owner.fork, engineModel: model, target: model, model: target.model, provider: target.label, tools: [], native })).text
     const child = await $.session.messages({ agentId, as: 'api' })
     if (!Array.isArray(child)) throw new Error('The delegated conversation context is unavailable.')
     const taskContext = child.filter(row => row.role === 'user').flatMap(row => typeof row.content === 'string' ? [row.content] : row.content.flatMap(block => block.type === 'text' && typeof block.text === 'string' ? [block.text] : [])).join('\n\n')
@@ -770,6 +826,74 @@ function nativeCompaction($: EngineInterface): Promise<CompactionTemplate> {
   return compactionTemplate
 }
 
+/** The session's built-in tools by name: the combination the engine's tool texts and agent prompts are read for. */
+const builtinNames = (infos: readonly { name: string; mcp: boolean }[]): string[] => infos.filter(info => !info.mcp).map(info => info.name)
+
+/**
+ * Claude Code's own tool definitions and built-in agent prompts for this combination of built-in tools, read from
+ * the installed claude by the helper once per running version and combination and kept in the plugin's store.
+ * Rejects, naming why, when they cannot be read: a main step then sends the generated schema table and the
+ * descriptions the session lists, and a subagent step is refused rather than sent with a prompt this mod made up.
+ */
+function nativeTools($: EngineInterface, names: readonly string[]): Promise<NativeCapture> {
+  const set = toolSetKey(names)
+  let pending = toolCaptures.get(set)
+  if (pending) return pending
+  pending = (async () => {
+    const version = (await $.session.version()).version
+    const key = `native-tools:${version}:${set}`
+    const cached = await $.store.get(key)
+    if (isCapture(cached)) return cached
+    if (toolCaptureFailure && await $.clock.now() - toolCaptureFailure.at < TOOL_CAPTURE_RETRY_MS) throw new Error(toolCaptureFailure.error)
+    if (!runtime.executable || runtime.error) throw new Error(runtime.error || 'the Node.js helper is unavailable; /rice-models setup repair')
+    const ran = await $.process.run([runtime.executable, helperFile($.plugin.root), 'capture-tools'], { stdin: JSON.stringify({ tools: [...names] }), timeoutMs: 100_000 })
+    let result: { ok?: boolean; capture?: unknown; error?: unknown } = {}
+    try { result = JSON.parse(ran.stdout) as typeof result } catch { /* reported below */ }
+    if (ran.exitCode !== 0 || result.ok !== true || !isCapture(result.capture)) {
+      const error = typeof result.error === 'string' ? result.error : 'the helper could not capture them'
+      toolCaptureFailure = { at: await $.clock.now(), error }
+      throw new Error(error)
+    }
+    toolCaptureFailure = undefined
+    try { await $.store.set(key, result.capture) } catch { $.ui.log(`${PLUGIN}: the installed claude's tool definitions could not be saved; they are read again next session`, { to: 'debug' }) }
+    if (result.capture.version !== version) $.ui.log(`${PLUGIN}: tool definitions and agent prompts come from the installed claude ${result.capture.version}; this session runs ${version}`, { to: 'debug' })
+    return result.capture
+  })()
+  setCapped(toolCaptures, set, pending, 16)
+  pending.then(capture => { setCapped(readyCaptures, set, capture, 16) }, () => { if (toolCaptures.get(set) === pending) toolCaptures.delete(set) })
+  return pending
+}
+
+/** The capture for these tools when it is already read (in this process or in the store), without running one. */
+async function readyTools($: EngineInterface, names: readonly string[]): Promise<NativeCapture | undefined> {
+  const set = toolSetKey(names)
+  const ready = readyCaptures.get(set)
+  if (ready) return ready
+  const cached = await $.store.get(`native-tools:${(await $.session.version()).version}:${set}`)
+  return isCapture(cached) ? cached : undefined
+}
+
+/** The capture for a step's tools, or why there is none; a failure is written to the debug log once. */
+async function stepTools($: EngineInterface, names: readonly string[]): Promise<NativeCapture | Error> {
+  try {
+    return await nativeTools($, names)
+  } catch (error) {
+    const failure = error instanceof Error ? error : new Error(String(error))
+    if (!reportedToolFallbacks.has(failure.message)) {
+      reportedToolFallbacks.add(failure.message)
+      $.ui.log(`${PLUGIN}: Claude Code's own tool definitions could not be read from the installed claude (${failure.message}); built-in tools use the generated schema table (${STAMP.engineVersion}) and the descriptions the session lists, and routed subagent steps are refused`, { to: 'debug' })
+    }
+    return failure
+  }
+}
+
+/** Where the tool definitions and agent prompts of routed steps come from now, for status and doctor. */
+async function toolDefinitionsState($: EngineInterface): Promise<{ source: string; version: string | null; agentTypes: string[]; error: string | null }> {
+  const capture = await readyTools($, builtinNames(await $.tool.list())).catch(() => undefined)
+  if (capture) return { source: 'installed claude', version: capture.version, agentTypes: Object.keys(capture.prompts).sort(), error: null }
+  return { source: `generated schema table (${STAMP.engineVersion})`, version: null, agentTypes: [], error: toolCaptureFailure?.error ?? 'not read yet' }
+}
+
 /** The main transcript's file path, from the latest classic hook that named it; kept across a plugin reload. */
 async function transcriptPath($: EngineInterface): Promise<string | undefined> {
   return seenTranscriptPath ?? (await read($, transcriptAtom)).path ?? undefined
@@ -872,6 +996,8 @@ async function statusText($: EngineInterface): Promise<string> {
   const prefs = await read($, prefsAtom)
   const version = await $.session.version()
   const context = await nativeContextStatus($)
+  const tools = await toolDefinitionsState($)
+  const table = `the schema table generated for ${STAMP.engineVersion}${version.version !== STAMP.engineVersion ? ` (this is ${version.version})` : ''} and the descriptions the session lists`
   const lines = [
     `helper: ${runtime.error || !runtime.executable ? runtime.error || 'Node.js 22+ unavailable; /rice-models setup repair' : prefs.helper === 'once' ? 'one process per step (/rice-models helper session for the session helper)' : sessionHelper() ? 'session helper running (one connection per conversation, private socket)' : 'session helper not running; one process per step'}`,
     `transport: ${prefs.transport} (auto = WebSocket, falling back to server-sent events)`,
@@ -881,7 +1007,9 @@ async function statusText($: EngineInterface): Promise<string> {
     `Primary context (${context.model}): active context ${context.activeContextWindow ?? 'unknown'}, maximum context ${context.maxContextWindow ?? 'unknown'}, reported input ${context.inputTokenLimit ?? 'unknown'}, effective input bound ${context.effectiveInputBound ?? 'unknown'}, native window ${context.nativeWindow}; override ${context.override}.`,
     `Native context scope: ${context.scope}. Numeric per-model registration is unsupported.`,
     'Compaction: the supported session.compact hook sends Claude Code\'s own summary prompt (read from the installed claude) over the conversation to the selected provider and writes the engine\'s own summary message. Failed or incomplete summaries retain the original transcript.',
-    `tool schemas: generated for ${STAMP.engineVersion}${version.version !== STAMP.engineVersion ? ` (this is ${version.version}: regenerate with scripts/gen-schemas.ts)` : ''}`,
+    tools.source === 'installed claude'
+      ? `Tool definitions and agent prompts: Claude Code's own, read from the installed claude ${tools.version} (built-in agent types ${tools.agentTypes.join(', ') || 'none'}); a tool it did not show (MCP, or interactive only) uses ${table}.`
+      : `Tool definitions and agent prompts: ${tools.error === 'not read yet' ? 'not read from the installed claude yet' : `the installed claude's could not be read (${tools.error})`}; built-in tools use ${table}, and a routed subagent step is refused until they are read.`,
     limitsText() ? `ChatGPT limits: ${limitsText()}` : 'ChatGPT limits: shown after the first WebSocket request',
     lastStep ? `last step: ${lastStep.model} for ${lastStep.who}, ${lastStep.ms} ms over ${lastStep.transport}` : 'no routed step yet',
     ...memory.notes.slice(-5),
@@ -962,6 +1090,7 @@ async function discoveryStatus($: EngineInterface): Promise<Record<string, unkno
     defaultCodexModel: defaultModel('codex'),
     nativeContext: await nativeContextStatus($),
     toolSchemaVersion: STAMP.engineVersion,
+    toolDefinitions: await toolDefinitionsState($),
     currentEngineVersion: version.version,
     limits: limitsReport(limits, limitsObservedAt),
     lastStep: lastStep ? { model: lastStep.model, who: lastStep.who, durationMs: lastStep.ms, transport: lastStep.transport } : null,
@@ -1005,7 +1134,7 @@ async function setupCommand($: EngineInterface, action: string | undefined): Pro
 async function doctorCommand($: EngineInterface): Promise<string> {
   const checked = await detectRuntime($)
   return JSON.stringify({ runtime: checked.info || { node: { executable: checked.executable, version: checked.version } }, error: checked.error || null,
-    integration: { kind: 'public plugin hooks', start: 'claude', compaction: 'session.compact', search: await searchCommand($, ''), legacySearchConfigured: !!await $.env.get('RICE_MULTI_MODELS_SEARCH_URL') },
+    integration: { kind: 'public plugin hooks', start: 'claude', compaction: 'session.compact', toolDefinitions: await toolDefinitionsState($), search: await searchCommand($, ''), legacySearchConfigured: !!await $.env.get('RICE_MULTI_MODELS_SEARCH_URL') },
     actions: checked.error ? ['/rice-models setup repair'] : ['/rice-models setup repair', ...(!checked.info?.auth.codex ? ['codex login', ...(!checked.info?.clis.codex ? ['/rice-models setup codex'] : [])] : [])] }, null, 2)
 }
 
@@ -1079,6 +1208,8 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
   if (first === 'picker') return value === 'write' ? writePicker($) : `${JSON.stringify({ modelPicker: { options: routedRows() } }, null, 2)}\n\n/rice-models picker write puts these rows in your user settings.`
   if (first === 'providers') return providerLines(loaded, await approvedSet($)).join('\n')
   if (first === 'reload' || first === 'refresh') {
+    // A failed read of the tool definitions is tried again now.
+    toolCaptureFailure = undefined
     await loadProviders($)
     await refreshCatalogue($)
     await registerAgents($)
@@ -1185,6 +1316,7 @@ export const register: Register = on => {
     return next(e)
   }).catch(($, e, next) => next.called ? {} : next(e))
   on('session.start', async ($, e, next) => {
+    interactiveSession = e.isInteractive
     permissionContextNonce = crypto.randomUUID()
     await $.env.set('RICE_MULTI_MODELS_PERMISSION_CONTEXT_NONCE', permissionContextNonce)
     const started = await next(e)
@@ -1207,6 +1339,8 @@ export const register: Register = on => {
       void nativePermissionDefaults($).catch(() => {})
       // Ready before the first compaction; a one-shot run reads it only when it compacts.
       if (e.isInteractive) void nativeCompaction($).catch(() => {})
+      // The tools' own definitions and agent prompts, ready before the first routed step.
+      if (e.isInteractive) void stepTools($, builtinNames(await $.tool.list()))
     }
     preferSession((await read($, prefsAtom)).helper !== 'once')
     await ensureHelper($)
@@ -1377,7 +1511,10 @@ export const register: Register = on => {
     if (familyTypes.has(e.subagentType) && decision.family !== CLAUDE_FAMILY && decision.model === undefined) return { deny: `${PLUGIN}: ${decision.reason}; nothing was started` }
     $.ui.log(`${PLUGIN}: spawn ${e.subagentType} from ${parentModel}: ${decision.model ?? 'native resolution'} (${decision.reason})`, { to: 'debug' })
     const result = await next(decision.model !== undefined && decision.model !== e.model ? { ...e, model: decision.model } : e)
-    if (result.agentId) setCapped(spawnDecisions, result.agentId, decision)
+    if (result.agentId) {
+      setCapped(spawnDecisions, result.agentId, decision)
+      setCapped(spawnBackground, result.agentId, e.background)
+    }
     return result
   })
 

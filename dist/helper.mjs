@@ -6922,6 +6922,9 @@ function decoderOver(source, item, end) {
   };
 }
 
+// hooks/util.ts
+var isObject2 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+
 // hooks/transcript.ts
 var str = (v) => typeof v === "string" ? v : "";
 var blocksOf = (msg) => typeof msg.content === "string" ? [{ type: "text", text: msg.content }] : msg.content;
@@ -9896,6 +9899,116 @@ ${SUMMARY_MARK}
   return deriveTemplate({ version: run2.version, plain: prompts[0], custom: prompts[1], summaryMessage: summary, transcriptPath });
 }
 
+// hooks/native-tools.ts
+var MAIN_MARK = "RICECAPTUREMAINTURN";
+var SPAWN_MARK = "RICECAPTURESPAWN";
+var BODY_MARK = "RICECAPTUREAGENTBODY";
+var MARKER_AGENT = "rice-capture-marker";
+var markerAgentFile = () => `---
+name: ${MARKER_AGENT}
+description: Capture marker
+---
+${BODY_MARK}
+`;
+var spawnTask = (type, background) => `${SPAWN_MARK} ${background ? "background" : "foreground"} ${type}`;
+function spawnOf(text2) {
+  const found = new RegExp(`${SPAWN_MARK} (foreground|background) (\\S+)`).exec(text2);
+  return found ? { type: found[2], background: found[1] === "background" } : void 0;
+}
+var isTool = (value) => isObject2(value) && typeof value.name === "string" && typeof value.description === "string" && isObject2(value.input_schema);
+function systemOf(body2) {
+  const system = isObject2(body2) ? body2.system : void 0;
+  if (typeof system === "string") return [system];
+  if (!Array.isArray(system) || !system.every((block) => isObject2(block) && typeof block.text === "string")) throw new Error("a request has no system prompt the capture can read");
+  return system.map((block) => block.text);
+}
+function toolsOf2(body2) {
+  const tools = isObject2(body2) ? body2.tools : void 0;
+  if (!Array.isArray(tools)) return [];
+  if (!tools.every(isTool)) throw new Error("a request carries a tool without a name, a description or an input schema");
+  return tools.map((tool) => ({ name: tool.name, description: tool.description, input_schema: tool.input_schema }));
+}
+function deriveCapture(capture) {
+  const tools = toolsOf2(capture.main);
+  if (tools.length === 0) throw new Error("the installed claude sent no tools");
+  const find = (type, background) => capture.spawned.find((each) => each.type === type && each.background === background);
+  const marker = find(MARKER_AGENT, false);
+  const markerBackground = find(MARKER_AGENT, true);
+  if (!marker || !markerBackground) throw new Error("the marker agent did not start in both the foreground and the background");
+  const blocks2 = systemOf(marker.body);
+  const at = blocks2.length - 1;
+  const mark = blocks2[at].indexOf(BODY_MARK);
+  if (mark < 0) throw new Error("the marker agent's prompt is not the last block of its system prompt");
+  const head = blocks2[at].slice(0, mark);
+  const tail = blocks2[at].slice(mark + BODY_MARK.length);
+  const ownPrompt = (type, body2) => {
+    const system = systemOf(body2);
+    const text2 = system.at(-1);
+    if (system.length !== blocks2.length || !text2.startsWith(head) || !text2.endsWith(tail) || text2.length < head.length + tail.length) throw new Error(`the ${type} agent's system prompt does not have the shape of the marker agent's`);
+    return text2.slice(head.length, text2.length - tail.length);
+  };
+  if (ownPrompt(MARKER_AGENT, markerBackground.body) !== BODY_MARK) throw new Error("the marker agent's prompt differs in the background");
+  const names = (body2) => toolsOf2(body2).map((tool) => tool.name);
+  const prompts = /* @__PURE__ */ Object.create(null);
+  const offered = /* @__PURE__ */ Object.create(null);
+  for (const type of capture.listed) {
+    if (type === MARKER_AGENT || Object.hasOwn(prompts, type)) continue;
+    const foreground = find(type, false);
+    const background = find(type, true);
+    if (!foreground || !background) continue;
+    const prompt = ownPrompt(type, foreground.body);
+    if (ownPrompt(type, background.body) !== prompt) throw new Error(`the ${type} agent's prompt differs between the foreground and the background`);
+    prompts[type] = prompt;
+    offered[type] = { foreground: names(foreground.body), background: names(background.body) };
+  }
+  return { version: capture.version, tools, agentHead: head, agentTail: tail, prompts, offered, custom: { foreground: names(marker.body), background: names(markerBackground.body) } };
+}
+
+// helper/native-tools.ts
+var TOOL_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
+async function captureTools(names, outer) {
+  const tools = [.../* @__PURE__ */ new Set([...names.filter((name) => TOOL_NAME.test(name)), "Agent"])].sort();
+  let main2;
+  let listed = [];
+  let expected;
+  const spawned = [];
+  const run2 = await runNative({
+    label: "tools",
+    script: [MAIN_MARK],
+    args: ["--tools", tools.join(",")],
+    files: { [`agents/${MARKER_AGENT}.md`]: markerAgentFile() },
+    answer: async (body2, current) => {
+      const opening = textOf2(body2.messages?.[0]?.content);
+      const agent = spawnOf(opening);
+      if (agent) {
+        if (!spawned.some((each) => each.type === agent.type && each.background === agent.background)) spawned.push({ ...agent, body: body2 });
+        return { text: "ok" };
+      }
+      if (main2 !== void 0 || !opening.includes(MAIN_MARK)) return { text: "ok" };
+      main2 = body2;
+      const start = await current.event((event) => event.type === "system" && event.subtype === "init");
+      listed = Array.isArray(start.agents) ? start.agents.filter((type) => typeof type === "string") : [];
+      if (!Array.isArray(body2.tools) || !body2.tools.some((tool) => tool.name === "Agent")) {
+        expected = 0;
+        return { text: "ok" };
+      }
+      const types = [.../* @__PURE__ */ new Set([...listed, MARKER_AGENT])];
+      const calls = types.flatMap((type, index) => [false, true].map((background) => ({
+        id: `toolu_rice_capture_${index}_${background ? "b" : "f"}`,
+        name: "Agent",
+        input: { description: `Capture ${type}`, prompt: spawnTask(type, background), subagent_type: type, run_in_background: background }
+      })));
+      expected = calls.length;
+      return { toolUses: calls };
+    },
+    // Each agent's first request is all that is read; the rest of the run is not waited for.
+    done: () => expected !== void 0 && spawned.length >= expected,
+    signal: outer
+  });
+  if (main2 === void 0) throw new Error("the installed claude sent no request");
+  return deriveCapture({ version: run2.version, listed, main: main2, spawned });
+}
+
 // helper/main.ts
 async function readStdin() {
   const chunks = [];
@@ -9990,15 +10103,21 @@ async function main(lifetime) {
       lifetime?.removeEventListener("abort", abort);
       for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.off(signal, abort);
     }
-  } else if (mode === "capture-compaction") {
+  } else if (mode === "capture-compaction" || mode === "capture-tools") {
     const controller = new AbortController();
     const abort = () => controller.abort();
     for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, abort);
     lifetime?.addEventListener("abort", abort, { once: true });
     if (lifetime?.aborted) abort();
     try {
-      process.stdout.write(`${JSON.stringify({ ok: true, template: await captureCompaction(controller.signal) })}
+      if (mode === "capture-compaction") process.stdout.write(`${JSON.stringify({ ok: true, template: await captureCompaction(controller.signal) })}
 `);
+      else {
+        const input = JSON.parse(await readStdin());
+        if (!Array.isArray(input.tools) || !input.tools.every((name) => typeof name === "string")) throw new Error('capture-tools reads {"tools": [names]} from its standard input');
+        process.stdout.write(`${JSON.stringify({ ok: true, capture: await captureTools(input.tools, controller.signal) })}
+`);
+      }
     } catch (error) {
       process.stdout.write(`${JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) })}
 `);

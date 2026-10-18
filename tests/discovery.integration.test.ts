@@ -2,6 +2,7 @@ import { beforeAll, expect, mock, test } from 'bun:test'
 import { fileURLToPath } from 'node:url'
 import { unknownMetadata, type ModelCatalogue } from '../hooks/catalogue'
 import { deriveTemplate, INSTRUCTIONS_MARK, SUMMARY_MARK } from '../hooks/native-compaction'
+import { BODY_MARK, deriveCapture, MARKER_AGENT } from '../hooks/native-tools'
 
 const root = fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]$/, '')
 const helperBranches: string[] = []
@@ -75,6 +76,22 @@ const fixtureTemplate = deriveTemplate({
   summaryMessage: `FIXTURE CONTINUED SESSION\n\nSummary:\n${SUMMARY_MARK}\n\nRead the full transcript at: /fixture/transcript.jsonl\nResume directly.`, transcriptPath: '/fixture/transcript.jsonl',
 })
 let captureFails = false
+// The engine's tool definitions and agent prompts as the helper would capture them, stood in for by owned fixtures
+// of the same structure: an identity preamble block, then the agent's own prompt between a head and a tail.
+const FIXTURE_TAIL = '\n\nFIXTURE SUBAGENT NOTES'
+const requestOf = (tools: string[], prompt: string) => ({
+  system: [{ type: 'text', text: 'FIXTURE IDENTITY PREAMBLE' }, { type: 'text', text: prompt }],
+  tools: tools.map(name => ({ name, description: `FIXTURE ${name} DEFINITION IN FULL`, input_schema: { type: 'object', properties: { [`fixture_${name.toLowerCase()}`]: { type: 'string' } }, additionalProperties: false } })),
+})
+const spawnedAs = (type: string, prompt: string, tools: string[]) => [false, true].map(background => ({ type, background, body: requestOf(tools, prompt + FIXTURE_TAIL) }))
+const fixtureTools = deriveCapture({
+  version: '2.1.296',
+  listed: ['general-purpose', 'Explore'],
+  main: requestOf(['Agent', 'Bash', 'Read'], 'FIXTURE MAIN PROMPT'),
+  spawned: [...spawnedAs(MARKER_AGENT, BODY_MARK, ['Bash', 'Read']), ...spawnedAs('general-purpose', 'FIXTURE GENERAL PURPOSE PROMPT', ['Bash', 'Read']), ...spawnedAs('Explore', 'FIXTURE EXPLORE PROMPT', ['Read'])],
+})
+let toolCaptureFails = false
+let toolCaptureRuns = 0
 let completionText = 'fixture response'
 let captures = 0
 const reportedLimits = { plan: 'fixture-subscription', windows: [{ label: 'weekly', usedPercent: 97, resetsAt: 1_800_000_100_000 }] }
@@ -107,6 +124,10 @@ const host: any = {
       if (argv[2] === 'capture-compaction') {
         captures++
         return captureFails ? { exitCode: 1, stdout: JSON.stringify({ ok: false, error: 'fixture capture failure' }), stderr: '' } : { exitCode: 0, stdout: JSON.stringify({ ok: true, template: fixtureTemplate }), stderr: '' }
+      }
+      if (argv[2] === 'capture-tools') {
+        toolCaptureRuns++
+        return toolCaptureFails ? { exitCode: 1, stdout: JSON.stringify({ ok: false, error: 'fixture tool capture failure' }), stderr: '' } : { exitCode: 0, stdout: JSON.stringify({ ok: true, capture: fixtureTools }), stderr: '' }
       }
       if (argv[0] === 'node') return { exitCode: 0, stdout: JSON.stringify({ executable: '/fixture/node', version: '22.20.0' }), stderr: '' }
       if (argv[2] === 'doctor') return { exitCode: 0, stdout: JSON.stringify({ node: { executable: '/fixture/node', version: '22.20.0', supported: true }, platform: 'linux', home: '/fixture-home', configDir: '/fixture-home/.claude', codexHome: '/fixture-home/.codex', opencodeAuthFile: '/fixture-home/opencode-auth.json', auth: { codex: false, opencode: false }, clis: agyInstalled ? { agy: '/fixture/agy' } : {} }), stderr: '' }
@@ -772,5 +793,77 @@ test('a failing title hook keeps a routed session on a local title instead of th
     expect(result.sessionTitle.length).toBeGreaterThan(0)
   } finally {
     host.session.model = model
+  }
+})
+
+const mainStep = async () => {
+  for await (const _chunk of hook('turn.step')(host, { model: 'codex/gpt-6.1-sol', turnId: 'fixture-main', index: 0 }, async function* () { throw new Error('unsafe native step') })) { /* drain */ }
+  return wires.at(-1).req
+}
+
+test("routed steps send the installed claude's tool definitions, and a subagent its type's own prompt and tools", async () => {
+  await reload({})
+  approvalAnswer = 'Allow'
+  const main = await mainStep()
+  expect(main.who).toBe('main')
+  // Not the session list's short summary ('Read'): the definition the engine sends, its schema included.
+  expect(main.tools.find((tool: any) => tool.name === 'Read')).toMatchObject({ description: 'FIXTURE Read DEFINITION IN FULL', schema: fixtureTools.tools.find(tool => tool.name === 'Read')!.input_schema })
+  const general = (await step('general-purpose', 'codex/gpt-6.1-sol'), wires.at(-1).req)
+  // Exactly the engine's subagent prompt: no identity preamble, no environment or closing line added here.
+  expect(general.system).toBe(`FIXTURE GENERAL PURPOSE PROMPT${FIXTURE_TAIL}`)
+  expect(general.tools.map((tool: any) => tool.name)).toEqual(['Read', 'Bash'])
+  const explore = (await step('Explore', 'codex/gpt-6.1-sol'), wires.at(-1).req)
+  expect(explore.system).toBe(`FIXTURE EXPLORE PROMPT${FIXTURE_TAIL}`)
+  // Explore is offered what the engine offers Explore.
+  expect(explore.tools.map((tool: any) => tool.name)).toEqual(['Read'])
+  // The mod's own agent types run on the engine's prompts, inside the engine's text like any agent file.
+  expect(defs.get('rice-multi-models:codex').prompt).toBe('FIXTURE GENERAL PURPOSE PROMPT')
+  expect(defs.get('rice-multi-models:codex-explore').prompt).toBe('FIXTURE EXPLORE PROMPT')
+  expect(defs.get('rice-multi-models:claude').prompt).toBe('FIXTURE GENERAL PURPOSE PROMPT')
+  const codex = (await step('rice-multi-models:codex', 'codex/gpt-6.1-sol'), wires.at(-1).req)
+  expect(codex.system).toBe(`FIXTURE GENERAL PURPOSE PROMPT${FIXTURE_TAIL}`)
+  expect(JSON.stringify([general, explore, codex].map(req => req.system))).not.toContain('styx')
+  const status = await command('status')
+  expect(status).toContain("Tool definitions and agent prompts: Claude Code's own, read from the installed claude 2.1.296 (built-in agent types Explore, general-purpose)")
+})
+
+test('a built-in agent type the installed claude did not start is refused, never sent with a made-up prompt', async () => {
+  const before = wires.length
+  const refused = await step('claude-code-guide', 'codex/gpt-6.1-sol')
+  expect(refused.nextCalls).toBe(0)
+  expect(wires.length).toBe(before)
+  expect(JSON.stringify(refused.result)).toContain('did not start a claude-code-guide agent')
+})
+
+test("without the installed claude's definitions a main step falls back and says so, and a subagent step is refused", async () => {
+  const list = host.tool.list
+  // A combination of built-in tools not read yet, whose read fails.
+  host.tool.list = async () => [...(await list()), { name: 'Write', description: 'Writes a', mcp: false }]
+  toolCaptureFails = true
+  try {
+    const main = await mainStep()
+    expect(main.tools.find((tool: any) => tool.name === 'Read').description).toBe('Read')
+    const write = main.tools.find((tool: any) => tool.name === 'Write')
+    expect(write.description).toBe('Writes a')
+    expect(write.schema.properties.file_path).toBeDefined()
+    expect(await command('status')).toContain("the installed claude's could not be read (fixture tool capture failure); built-in tools use the schema table generated for")
+    expect(JSON.parse(await command('doctor')).integration.toolDefinitions).toMatchObject({ source: expect.stringContaining('generated schema table'), error: 'fixture tool capture failure' })
+    const before = wires.length
+    const refused = await step('general-purpose', 'codex/gpt-6.1-sol')
+    expect(refused.nextCalls).toBe(0)
+    expect(wires.length).toBe(before)
+    expect(JSON.stringify(refused.result)).toContain("Claude Code's own prompt for the general-purpose agent could not be read from the installed claude (fixture tool capture failure)")
+    // A failed read is not run again for every step; a refresh tries it again.
+    const runs = toolCaptureRuns
+    await step('general-purpose', 'codex/gpt-6.1-sol')
+    expect(toolCaptureRuns).toBe(runs)
+    toolCaptureFails = false
+    await command('refresh')
+    const general = (await step('general-purpose', 'codex/gpt-6.1-sol'), wires.at(-1).req)
+    expect(toolCaptureRuns).toBe(runs + 1)
+    expect(general.system).toBe(`FIXTURE GENERAL PURPOSE PROMPT${FIXTURE_TAIL}`)
+  } finally {
+    host.tool.list = list
+    toolCaptureFails = false
   }
 })

@@ -76,7 +76,7 @@ function fixture() {
     },
     fs: { exists: async (path: string) => path.endsWith('/dist/helper.mjs') || files.has(path), read: async (path: string) => { const text = files.get(path); if (text === undefined) throw new Error('ENOENT'); return text }, list: async () => [], write: async () => { throw new Error('Hook must not write settings directly') } },
     command: { register: async (spec: any) => { commands.push(spec) } },
-    tool: { register: async () => ({}) },
+    tool: { register: async () => ({}), list: async () => [] },
     agent: { register: async () => ({}), list: async () => [] },
     store: { keys: async () => [...store.keys()], get: async (key: string) => store.get(key), set: async (key: string, value: unknown) => { store.set(key, value) } },
     ui: { log: (text: string, options: any) => { if (options?.to !== 'debug') notices.push(text) }, ask: async () => { throw new Error('Onboarding must never ask') }, status: () => {}, toast: () => {} },

@@ -1,17 +1,20 @@
 // Copied from Trosfy/claude-styx hooks/prompts.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
-// Modified by Mo Abualruz: a small Memory and Route stand in for styx's Session and Route; imports from ./util.
+// Modified by Mo Abualruz: a small Memory and Route stand in for styx's Session and Route; imports from ./util; a
+// subagent's prompt is the one the installed claude sends (native-tools.ts), not one styx wrote.
 // The system prompt of a routed step, and the model identity its transcript states. Main gets the prompt
 // the engine composes for its own model, with the lines that name that model rewritten to name the routed
-// model and provider. A built-in agent type gets the prompt styx writes for it (hooks/agents.ts); the `claude`
-// type, which natively runs on main's own prompt, gets main's rewritten prompt; a custom agent type, or a
-// built-in one with exactly one agent file naming it, gets the body of that file, and a custom one whose
-// definition does not read runs as general-purpose.
-// A subagent's prompt closes with the notes, its environment, how it hands back, and what answers it.
-// `systemFor` is the one place a step's prompt is chosen. Pure over a port.
+// model and provider. A subagent gets the prompt the installed claude sends for its agent type, as captured
+// (native-tools.ts): a built-in type's own prompt, or the body of the agent file that defines a custom type (or a
+// built-in one with exactly one agent file naming it), inside the text the engine puts around every subagent's
+// prompt; a custom type whose definition does not read runs as general-purpose. Its environment and the model
+// that answers it are in its transcript, as the engine sends them. A fork runs on the prompt of the conversation
+// it forks. `systemFor` is the one place a step's prompt is chosen. Pure over a port.
 import type { Memory as Session, Route } from './memory'
-import { agentSystem, BUILTIN_AGENTS, BUILTIN_MODELS, BUILTIN_NOTES, builtinPrompt, dateOf, HANDBACK_TOOL, identityLine, isFork, NO_FRONTMATTER, NOT_REPRODUCED, parseAgentFile, parseInstalled, pluginRoot } from './agents'
+import { BUILTIN_AGENTS, BUILTIN_MODELS, identityLine, isFork, NO_FRONTMATTER, NOT_REPRODUCED, parseAgentFile, parseInstalled, pluginRoot } from './agents'
 import type { AgentDef, Parsed } from './agents'
+import { agentPrompt, builtinPrompt } from './native-tools'
+import type { NativeCapture } from './native-tools'
 import { own } from './util'
 import type { ApiMessage } from './protocol'
 
@@ -184,7 +187,7 @@ async function loadAgentDir(io: PromptsPort, s: Session, dir: string, plugin: bo
         const missing = plugin || 'error' in def ? [] : (['name', 'description'] as const).filter(k => !def[k])
         const bare = !plugin && 'error' in def && def.error === NO_FRONTMATTER
         const skipped = bare ? 'no frontmatter' : missing.length === 0 ? undefined : `no ${missing.join(' or ')}`
-        if (skipped !== undefined && !bare) noteOnce(io, s, `skipped ${path}`, `agents: ${path} has ${skipped}, which Claude Code requires of a file in .claude/agents, so it skips the file and so does styx`)
+        if (skipped !== undefined && !bare) noteOnce(io, s, `skipped ${path}`, `agents: ${path} has ${skipped}, which Claude Code requires of a file in .claude/agents, so it skips the file and so does this mod`)
         return { path, name: ('error' in def ? undefined : def.name) || path.slice(path.lastIndexOf('/') + 1, -3), def, ...(skipped === undefined ? {} : { skipped }) }
       }),
     )
@@ -234,13 +237,10 @@ export async function contested(io: PromptsPort, s: Session, type: string): Prom
   }
 }
 
-// The built-in agent type that runs on main's own system prompt (the engine's `appendSystemPrompt`).
-const MAIN_PROMPT_TYPE = 'claude'
-
 // A routed subagent's own definition when an agent file names its type and the definition reads, else
 // undefined. Each type's outcome is logged once; a custom type whose definition does not read is also said in
 // /styx, as it runs as general-purpose. A built-in type with no file, or with more than one, has no definition
-// and says nothing: it runs on styx's own prompt. A built-in type with one file that reads says in /styx that it
+// and says nothing: it runs on the engine's own prompt. A built-in type with one file that reads says in /styx that it
 // runs on that file; a file that does not read, and so may define one under a name styx cannot see, is said too. A
 // fork has no definition of its own: it runs on its parent's prompt.
 export async function definitionOf(io: PromptsPort, s: Session, type: string | undefined): Promise<AgentDef | undefined> {
@@ -252,7 +252,7 @@ export async function definitionOf(io: PromptsPort, s: Session, type: string | u
       const named = await definingFiles(io, s, type)
       if ('error' in named) return undefined
       for (const f of named.unread) {
-        noteOnce(io, s, `unread ${f.path}`, `agents: ${f.path} cannot be read (${(f.def as { error: string }).error}); if it defines a built-in agent type, that type runs on styx's prompt instead of the file`)
+        noteOnce(io, s, `unread ${f.path}`, `agents: ${f.path} cannot be read (${(f.def as { error: string }).error}); if it defines a built-in agent type, that type runs on the engine's own prompt instead of the file`)
       }
       if (named.files.length !== 1) return undefined
       single = true
@@ -269,8 +269,8 @@ export async function definitionOf(io: PromptsPort, s: Session, type: string | u
   if (!s.agentNotes.has(`def ${type}`)) {
     s.agentNotes.add(`def ${type}`)
     io.debug('error' in found ? `styx agent-def ${type}: ${found.error}` : `styx agent-def ${type} from ${found.path}`)
-    const unreadable = `agents: ${type} has ${single ? 'one agent file styx cannot read' : 'no readable definition'}`
-    if ('error' in found) s.notes.push(single ? `${unreadable} (${found.error}); a plain call stays native and a styx agent call is refused` : `${unreadable} (${found.error}); it runs ${builtin ? `on ${type === MAIN_PROMPT_TYPE ? "main's" : "styx's"} prompt` : 'as general-purpose'}`)
+    const unreadable = `agents: ${type} has ${single ? 'one agent file this mod cannot read' : 'no readable definition'}`
+    if ('error' in found) s.notes.push(`${unreadable} (${found.error}); it runs ${builtin ? "on the engine's own prompt" : 'as general-purpose'}`)
     else if (builtin) s.notes.push(`agents: ${type} runs on ${found.path}, which overrides the built-in`)
   }
   return 'error' in found ? undefined : found.def
@@ -345,55 +345,29 @@ export async function resolveType(io: PromptsPort, s: Session, type: string | un
 
 // --- the prompt of a step ------------------------------------------------------------------------------------
 
-// The installed helper already requires Node; its platform is portable to native Windows.
-async function platformOf(io: Pick<PromptsPort, 'run'>, s: Session): Promise<string | undefined> {
-  if (s.platform === undefined) {
-    try {
-      const r = await io.run(['node', '-p', 'process.platform'])
-      const name = r.stdout.trim()
-      s.platform = r.exitCode === 0 && ['darwin', 'linux', 'win32'].includes(name) ? name : null
-    } catch { s.platform = null }
-  }
-  return s.platform ?? undefined
-}
-
 // What a step's prompt is chosen from: the agent file's definition when one names the type, the subagent's route
 // (none for main), the engine model the main prompt is composed for, the routed target (`provider/model`),
-// its model and provider, and the tools offered. For a fork these are its parent's: the nearest ancestor's route
-// and definition that is not itself a fork (none when that is main), and `fork` says so.
-type SystemInput = { def?: AgentDef; route?: Route; fork?: boolean; engineModel: string; target: string; model: string; provider: string; tools: readonly string[] }
+// its model and provider, the tools offered, and the installed claude's capture (or why it is missing), which a
+// subagent's prompt comes from. For a fork these are its parent's: the nearest ancestor's route and definition that
+// is not itself a fork (none when that is main), and `fork` says so.
+type SystemInput = { def?: AgentDef; route?: Route; fork?: boolean; engineModel: string; target: string; model: string; provider: string; tools: readonly string[]; native?: NativeCapture | Error }
 
-// A routed step's system prompt and where it came from: `main` (the composed prompt, identity rewritten: main's
-// own, and a `claude` subagent's when no agent file names it; one in a worktree is not told the session's
-// directory), `custom` (an agent file's body: a custom type's, or a built-in type's that one file names) or
-// `styx` (the prompt styx writes for a built-in type). A subagent's prompt is completed by agentSystem. A fork's is
-// its parent's, as `fork of <source>`: a fork of main gets main's prompt alone, and a fork of a subagent that
-// subagent's prompt less the handback guidance. Every fork is told how it reports in its messages (fork.ts), and
-// Claude Code offers a fork no SubagentHandback, so no fork is told of it.
+// A routed step's system prompt and where it came from: `main` (the composed prompt, identity rewritten), `custom`
+// (an agent file's body: a custom type's, or a built-in type's that one file names) or `engine` (a built-in type's
+// own prompt, as the installed claude sends it). A subagent's prompt is the agent's own inside the text the engine
+// puts around every subagent prompt; the identity preamble the engine opens it with is left out, as the main
+// prompt's identity sections are. Without the capture a subagent's prompt is unknown, and this throws: the step is
+// refused rather than sent with a prompt this mod made up. A fork's is its parent's, as `fork of <source>`.
 export async function systemFor(io: PromptsPort, s: Session, i: SystemInput): Promise<{ text: string; source: string }> {
-  const fromMain = async (elsewhere = false) => rewriteMain(await io.compose(i.engineModel, i.tools), identityLine(i.model, i.provider), elsewhere)
-  const handback = i.tools.includes(HANDBACK_TOOL.name)
   if (i.route === undefined) {
-    const text = await fromMain()
+    const text = rewriteMain(await io.compose(i.engineModel, i.tools), identityLine(i.model, i.provider))
     return { text, source: i.fork ? 'fork of main' : 'main' }
   }
   const type = i.route.type ?? 'general-purpose'
-  const prompt =
-    i.def !== undefined
-      ? { body: i.def.prompt, source: 'custom', notes: BUILTIN_NOTES }
-      : type === MAIN_PROMPT_TYPE
-        ? { body: await fromMain(i.route.worktree !== undefined), source: 'main', notes: BUILTIN_NOTES }
-        : { body: builtinPrompt(BUILTIN_AGENTS.includes(type) ? type : 'general-purpose', new Set(i.tools)), source: 'styx', notes: BUILTIN_NOTES }
-  const text = agentSystem(prompt.body, {
-    cwd: i.route.worktree?.path ?? (await io.cwd()),
-    platform: await platformOf(io, s),
-    date: dateOf(await io.now()),
-    model: i.model,
-    provider: i.provider,
-    type,
-    alias: i.route.label === i.target ? undefined : i.route.label,
-    notes: prompt.notes,
-    handback: handback && !i.fork,
-  })
-  return { text, source: i.fork ? `fork of ${prompt.source}` : prompt.source }
+  const native = i.native
+  if (native === undefined || native instanceof Error) throw new Error(`Claude Code's own prompt for the ${type} agent could not be read from the installed claude${native ? ` (${native.message})` : ''}; nothing was sent`)
+  const body = i.def !== undefined ? i.def.prompt : builtinPrompt(native, BUILTIN_AGENTS.includes(type) ? type : 'general-purpose')
+  if (body === undefined) throw new Error(`the installed claude ${native.version} did not start a ${type} agent when its prompts were read, so its prompt is unknown; nothing was sent`)
+  const source = i.def !== undefined ? 'custom' : 'engine'
+  return { text: agentPrompt(native, body), source: i.fork ? `fork of ${source}` : source }
 }
