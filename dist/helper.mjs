@@ -9633,13 +9633,6 @@ The response body was not retrieved. Use an authenticated tool if this page requ
 }
 var runWebFetch = createWebFetch();
 
-// helper/native-compaction.ts
-import { spawn as spawn4 } from "node:child_process";
-import { createServer as createServer2 } from "node:http";
-import { mkdir as mkdir4, mkdtemp, readdir, readFile as readFile5, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
-import { tmpdir as tmpdir2 } from "node:os";
-import path6 from "node:path";
-
 // hooks/native-compaction.ts
 var TRANSCRIPT_TOKEN = "{{transcript}}";
 var SUMMARY_MARK = "RICECAPTURESUMMARYBODY";
@@ -9668,28 +9661,42 @@ function deriveTemplate(capture) {
   };
 }
 
-// helper/native-compaction.ts
+// helper/native-run.ts
+import { spawn as spawn4 } from "node:child_process";
+import { createServer as createServer2 } from "node:http";
+import { mkdir as mkdir4, mkdtemp, readdir, readFile as readFile5, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
+import { tmpdir as tmpdir2 } from "node:os";
+import path6 from "node:path";
 var RUN_LIMIT_MS = 9e4;
 var KEPT_ENV = ["PATH", "Path", "PATHEXT", "LANG", "LC_ALL", "SHELL", "TMPDIR", "TEMP", "TMP", "SystemRoot", "SystemDrive", "WINDIR", "ComSpec", "ProgramFiles", "ProgramFiles(x86)", "ProgramData", "APPDATA", "LOCALAPPDATA", "CLAUDE_CODE_GIT_BASH_PATH"];
+var NOT_A_KEY = "rice-capture-not-a-key";
 function claude(args) {
-  return process.platform === "win32" ? { file: "cmd.exe", args: ["/d", "/s", "/c", "claude", ...args] } : { file: "claude", args };
+  return process.platform === "win32" ? { file: "cmd.exe", args: ["/d", "/s", "/c", "claude", ...args] } : { file: "claude", args: [...args] };
 }
 function textOf2(content) {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content.map((block) => block && typeof block === "object" && typeof block.text === "string" ? block.text : "").join("\n");
 }
-function sse(response, model2, reply) {
+function sse(response, model2, answer) {
   response.writeHead(200, { "content-type": "text/event-stream" });
   const send = (event, value) => response.write(`event: ${event}
 data: ${JSON.stringify(value)}
 
 `);
+  const calls = "toolUses" in answer ? answer.toolUses : [];
   send("message_start", { type: "message_start", message: { id: "rice-capture", type: "message", role: "assistant", model: model2, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 1 } } });
-  send("content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
-  send("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: reply } });
-  send("content_block_stop", { type: "content_block_stop", index: 0 });
-  send("message_delta", { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 8 } });
+  if ("text" in answer) {
+    send("content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+    send("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: answer.text } });
+    send("content_block_stop", { type: "content_block_stop", index: 0 });
+  }
+  calls.forEach((call, index) => {
+    send("content_block_start", { type: "content_block_start", index, content_block: { type: "tool_use", id: call.id, name: call.name, input: {} } });
+    send("content_block_delta", { type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: JSON.stringify(call.input) } });
+    send("content_block_stop", { type: "content_block_stop", index });
+  });
+  send("message_delta", { type: "message_delta", delta: { stop_reason: calls.length ? "tool_use" : "end_turn", stop_sequence: null }, usage: { output_tokens: 8 } });
   send("message_stop", { type: "message_stop" });
   response.end();
 }
@@ -9699,8 +9706,9 @@ async function body(request2) {
   return Buffer.concat(chunks).toString("utf8");
 }
 function stop(child) {
-  if (child.exitCode !== null || child.signalCode !== null || child.pid === void 0) return;
-  if (process.platform === "win32") spawn4("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+  if (child.pid === void 0) return;
+  if (process.platform === "win32") spawn4("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true }).once("error", () => {
+  });
   else try {
     process.kill(-child.pid, "SIGTERM");
   } catch {
@@ -9722,12 +9730,44 @@ async function version(env, cwd, signal) {
   if (!found) throw new Error("the installed claude did not report a version");
   return found;
 }
-async function captureCompaction(outer) {
-  const root = await mkdtemp(path6.join(tmpdir2(), "rice-native-compaction-"));
+async function transcriptRows(projects) {
+  let files;
+  try {
+    files = (await readdir(projects, { recursive: true })).filter((name) => typeof name === "string" && name.endsWith(".jsonl")).sort();
+  } catch {
+    return [];
+  }
+  const rows = [];
+  for (const file of files) {
+    for (const line of (await readFile5(path6.join(projects, file), "utf8")).split("\n")) {
+      if (!line) continue;
+      try {
+        rows.push(JSON.parse(line));
+      } catch {
+      }
+    }
+  }
+  return rows;
+}
+async function runNative(options) {
+  const root = await mkdtemp(path6.join(tmpdir2(), `rice-native-${options.label}-`));
   const config = path6.join(root, ".claude");
-  const deadline = AbortSignal.timeout(RUN_LIMIT_MS);
-  const signal = outer ? AbortSignal.any([outer, deadline]) : deadline;
-  const prompts = [];
+  const deadline = AbortSignal.timeout(options.limitMs ?? RUN_LIMIT_MS);
+  const signal = options.signal ? AbortSignal.any([options.signal, deadline]) : deadline;
+  const requests2 = [];
+  const events = [];
+  const waiting = [];
+  let finish;
+  const run2 = {
+    requests: requests2,
+    events,
+    event: (match) => {
+      const seen = events.find(match);
+      return seen ? Promise.resolve(seen) : new Promise((resolve2) => {
+        waiting.push({ match, resolve: resolve2 });
+      });
+    }
+  };
   const server = createServer2(async (request2, response) => {
     try {
       const raw = await body(request2);
@@ -9742,23 +9782,26 @@ async function captureCompaction(outer) {
         return;
       }
       const parsed = JSON.parse(raw);
-      const last = textOf2(parsed.messages?.at(-1)?.content);
-      const summary = last.includes("<analysis>") && last.includes("<summary>");
-      if (summary) prompts.push(last);
-      sse(response, parsed.model ?? "capture", summary ? `<analysis>analysis</analysis>
-<summary>
-${SUMMARY_MARK}
-</summary>` : "ok");
+      requests2.push(parsed);
+      sse(response, typeof parsed.model === "string" ? parsed.model : "capture", options.answer ? await options.answer(parsed, run2) : { text: "ok" });
+      if (options.done?.(run2)) finish?.();
     } catch {
-      response.writeHead(500);
+      if (!response.headersSent) response.writeHead(500);
       response.end();
     }
   });
   let child;
+  let closed = false;
   try {
     await mkdir4(config, { recursive: true });
-    const global = JSON.stringify({ hasCompletedOnboarding: true, customApiKeyResponses: { approved: ["rice-capture-not-a-key"], rejected: [] } });
+    const global = JSON.stringify({ hasCompletedOnboarding: true, customApiKeyResponses: { approved: [NOT_A_KEY], rejected: [] } });
     await Promise.all([writeFile2(path6.join(config, "settings.json"), "{}\n"), writeFile2(path6.join(config, ".claude.json"), global), writeFile2(path6.join(root, ".claude.json"), global)]);
+    for (const [name, text2] of Object.entries(options.files ?? {})) {
+      const file = path6.join(config, name);
+      if (!file.startsWith(config + path6.sep)) throw new Error(`${name} is outside the isolated configuration`);
+      await mkdir4(path6.dirname(file), { recursive: true });
+      await writeFile2(file, text2);
+    }
     await new Promise((resolve2, reject) => {
       server.once("error", reject);
       server.listen(0, "127.0.0.1", resolve2);
@@ -9767,15 +9810,17 @@ ${SUMMARY_MARK}
     if (address2 === null || typeof address2 === "string") throw new Error("the loopback stub did not start");
     const env = {};
     for (const name of KEPT_ENV) if (process.env[name] !== void 0) env[name] = process.env[name];
-    Object.assign(env, { HOME: root, USERPROFILE: root, CLAUDE_CONFIG_DIR: config, ANTHROPIC_API_KEY: "rice-capture-not-a-key", ANTHROPIC_BASE_URL: `http://127.0.0.1:${address2.port}`, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", DISABLE_AUTOUPDATER: "1" });
+    Object.assign(env, { HOME: root, USERPROFILE: root, CLAUDE_CONFIG_DIR: config, ANTHROPIC_API_KEY: NOT_A_KEY, ANTHROPIC_BASE_URL: `http://127.0.0.1:${address2.port}`, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", DISABLE_AUTOUPDATER: "1" });
     const installed = await version(env, root, signal);
-    const command = claude(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--setting-sources", "user"]);
+    const command = claude(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--setting-sources", "user", ...options.args ?? []]);
     child = spawn4(command.file, command.args, { cwd: root, env, signal, windowsHide: true, detached: process.platform !== "win32", stdio: ["pipe", "pipe", "ignore"] });
     const running = child;
-    const script = ["capture one", "/compact", "capture two", `/compact ${INSTRUCTIONS_MARK}`];
+    const { script } = options;
     const send = (line) => running.stdin.write(`${JSON.stringify({ type: "user", message: { role: "user", content: line } })}
 `);
     let pending = "", results = 0;
+    running.stdin.on("error", () => {
+    });
     running.stdout.on("data", (bytes) => {
       pending += bytes;
       for (let newline = pending.indexOf("\n"); newline !== -1; newline = pending.indexOf("\n")) {
@@ -9787,6 +9832,11 @@ ${SUMMARY_MARK}
         } catch {
           continue;
         }
+        events.push(event);
+        for (const wait of waiting.filter((each) => each.match(event))) {
+          waiting.splice(waiting.indexOf(wait), 1);
+          wait.resolve(event);
+        }
         if (event.type !== "result") continue;
         results++;
         if (results < script.length) send(script[results]);
@@ -9795,36 +9845,55 @@ ${SUMMARY_MARK}
     });
     send(script[0]);
     await new Promise((resolve2, reject) => {
+      finish = resolve2;
       running.once("error", reject);
-      running.once("close", () => results === script.length ? resolve2() : reject(new Error(`the installed claude finished ${results} of ${script.length} capture steps`)));
+      running.once("close", () => {
+        closed = true;
+        results >= script.length || options.done?.(run2) ? resolve2() : reject(new Error(`the installed claude finished ${results} of ${script.length} capture steps`));
+      });
       signal.addEventListener("abort", () => reject(new Error("the capture was stopped")), { once: true });
     });
-    if (prompts.length !== 2) throw new Error(`the installed claude sent ${prompts.length} summary requests, not 2`);
-    const projects = path6.join(config, "projects");
-    const files = (await readdir(projects, { recursive: true })).filter((name) => typeof name === "string" && name.endsWith(".jsonl"));
-    let summary = "";
-    for (const file of files) {
-      for (const line of (await readFile5(path6.join(projects, file), "utf8")).split("\n")) {
-        if (!line) continue;
-        let row;
-        try {
-          row = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        if (row.isCompactSummary && !summary) summary = textOf2(row.message?.content);
-      }
-    }
-    if (!summary) throw new Error("the installed claude wrote no compaction summary row");
-    const transcriptPath = /read the full transcript at: (.+)/.exec(summary)?.[1]?.trim() ?? "";
-    return deriveTemplate({ version: installed, plain: prompts[0], custom: prompts[1], summaryMessage: summary, transcriptPath });
+    return { version: installed, requests: requests2, events, transcript: await transcriptRows(path6.join(config, "projects")) };
   } finally {
-    if (child) stop(child);
+    if (child && !closed) {
+      stop(child);
+      await new Promise((resolve2) => {
+        const timer = setTimeout(resolve2, 5e3);
+        child.once("close", () => {
+          clearTimeout(timer);
+          resolve2();
+        });
+      });
+    }
     server.closeAllConnections();
     await new Promise((resolve2) => server.close(() => resolve2()));
     await rm3(root, { recursive: true, force: true }).catch(() => {
     });
   }
+}
+
+// helper/native-compaction.ts
+async function captureCompaction(outer) {
+  const prompts = [];
+  const run2 = await runNative({
+    label: "compaction",
+    script: ["capture one", "/compact", "capture two", `/compact ${INSTRUCTIONS_MARK}`],
+    answer: (parsed) => {
+      const last = textOf2(parsed.messages?.at(-1)?.content);
+      const summary2 = last.includes("<analysis>") && last.includes("<summary>");
+      if (summary2) prompts.push(last);
+      return { text: summary2 ? `<analysis>analysis</analysis>
+<summary>
+${SUMMARY_MARK}
+</summary>` : "ok" };
+    },
+    signal: outer
+  });
+  if (prompts.length !== 2) throw new Error(`the installed claude sent ${prompts.length} summary requests, not 2`);
+  const summary = run2.transcript.filter((row) => row.isCompactSummary).map((row) => textOf2(row.message?.content)).find((text2) => text2 !== "") ?? "";
+  if (!summary) throw new Error("the installed claude wrote no compaction summary row");
+  const transcriptPath = /read the full transcript at: (.+)/.exec(summary)?.[1]?.trim() ?? "";
+  return deriveTemplate({ version: run2.version, plain: prompts[0], custom: prompts[1], summaryMessage: summary, transcriptPath });
 }
 
 // helper/main.ts
