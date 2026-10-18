@@ -71,7 +71,7 @@ try {
   })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   first.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${server.address().port}`
-  child = spawn(native, ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--setting-sources', 'user', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}'], { cwd: first.home, env: first.env, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'] })
+  child = spawn(native, ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--setting-sources', 'user', '--permission-mode', 'default', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}'], { cwd: first.home, env: first.env, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'] })
   console.log(JSON.stringify({ phase: 'independent-native-run', ownedPid: child.pid }))
   let pending = ''
   child.stdout.on('data', bytes => {
@@ -144,7 +144,7 @@ try {
   writeFileSync(file, source)
   const checked = spawnSync(native, ['plugin', 'validate', '--strict', plugin], { cwd: second.home, env: second.env, encoding: 'utf8', timeout: 20_000 })
   assert.equal(checked.status, 0, (checked.stdout + checked.stderr).slice(-2000))
-  child = spawn(native, ['-p', '--model', 'codex/owned-public', '--plugin-dir', plugin, '--setting-sources', 'user', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--output-format', 'json', 'Use one Explore agent, then finish.'], { cwd: second.home, env: second.env, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] })
+  child = spawn(native, ['-p', '--model', 'codex/owned-public', '--plugin-dir', plugin, '--setting-sources', 'user', '--permission-mode', 'default', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--output-format', 'json', 'Use one Explore agent, then finish.'], { cwd: second.home, env: second.env, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] })
   console.log(JSON.stringify({ phase: 'routed-session', ownedPid: child.pid }))
   let stdout = '', stderr = ''
   child.stdout.on('data', bytes => stdout += bytes); child.stderr.on('data', bytes => stderr += bytes)

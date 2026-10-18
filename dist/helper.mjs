@@ -9975,7 +9975,8 @@ async function captureTools(names, outer) {
   const run2 = await runNative({
     label: "tools",
     script: [MAIN_MARK],
-    args: ["--tools", tools.join(",")],
+    // Default mode, which some versions do not start a headless run in: an auto-mode classifier would judge each Agent call.
+    args: ["--permission-mode", "default", "--tools", tools.join(",")],
     files: { [`agents/${MARKER_AGENT}.md`]: markerAgentFile() },
     answer: async (body2, current) => {
       const opening = textOf2(body2.messages?.[0]?.content);

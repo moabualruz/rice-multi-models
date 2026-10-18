@@ -459,11 +459,12 @@ async function registerAgentTypes($: EngineInterface): Promise<void> {
   const model = defaultModel('codex')
   // The general-purpose and Explore prompts these types run on are the installed claude's own. Until they are read
   // the types are not offered; a capture is started, and they are registered when it ends.
-  const names = builtinNames(await $.tool.list())
-  const native = await readyTools($, names).catch(() => undefined)
+  // Startup never fails for want of them: without the session's tool list nothing is read and the types wait.
+  const names = await $.tool.list().then(builtinNames, () => undefined)
+  const native = names && await readyTools($, names).catch(() => undefined)
   const general = native && builtinPrompt(native, 'general-purpose')
   const explore = native && builtinPrompt(native, 'Explore')
-  if (!native && (model || routedFamilies().length)) void stepTools($, names).then(capture => capture instanceof Error ? undefined : registerAgents($))
+  if (names && !native && (model || routedFamilies().length)) void stepTools($, names).then(capture => capture instanceof Error ? undefined : registerAgents($))
   const agents: { name: string; description: string; def: AgentDef }[] = [
     ...(general ? [{
       name: 'codex',
@@ -889,7 +890,7 @@ async function stepTools($: EngineInterface, names: readonly string[]): Promise<
 
 /** Where the tool definitions and agent prompts of routed steps come from now, for status and doctor. */
 async function toolDefinitionsState($: EngineInterface): Promise<{ source: string; version: string | null; agentTypes: string[]; error: string | null }> {
-  const capture = await readyTools($, builtinNames(await $.tool.list())).catch(() => undefined)
+  const capture = await $.tool.list().then(infos => readyTools($, builtinNames(infos))).catch(() => undefined)
   if (capture) return { source: 'installed claude', version: capture.version, agentTypes: Object.keys(capture.prompts).sort(), error: null }
   return { source: `generated schema table (${STAMP.engineVersion})`, version: null, agentTypes: [], error: toolCaptureFailure?.error ?? 'not read yet' }
 }
@@ -1340,7 +1341,7 @@ export const register: Register = on => {
       // Ready before the first compaction; a one-shot run reads it only when it compacts.
       if (e.isInteractive) void nativeCompaction($).catch(() => {})
       // The tools' own definitions and agent prompts, ready before the first routed step.
-      if (e.isInteractive) void stepTools($, builtinNames(await $.tool.list()))
+      if (e.isInteractive) void $.tool.list().then(infos => stepTools($, builtinNames(infos)), () => {})
     }
     preferSession((await read($, prefsAtom)).helper !== 'once')
     await ensureHelper($)

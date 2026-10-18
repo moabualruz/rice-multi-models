@@ -22,7 +22,8 @@ export async function captureTools(names: readonly string[], outer?: AbortSignal
   const run = await runNative({
     label: 'tools',
     script: [MAIN_MARK],
-    args: ['--tools', tools.join(',')],
+    // Default mode, which some versions do not start a headless run in: an auto-mode classifier would judge each Agent call.
+    args: ['--permission-mode', 'default', '--tools', tools.join(',')],
     files: { [`agents/${MARKER_AGENT}.md`]: markerAgentFile() },
     answer: async (body, current) => {
       const opening = textOf((body.messages as { content?: unknown }[] | undefined)?.[0]?.content)
