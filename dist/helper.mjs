@@ -3400,12 +3400,12 @@ var require_websocket_server = __commonJS({
         }
         if (options.port != null) {
           this._server = http.createServer((req, res) => {
-            const body = http.STATUS_CODES[426];
+            const body2 = http.STATUS_CODES[426];
             res.writeHead(426, {
-              "Content-Length": body.length,
+              "Content-Length": body2.length,
               "Content-Type": "text/plain"
             });
-            res.end(body);
+            res.end(body2);
           });
           this._server.listen(
             options.port,
@@ -3521,7 +3521,7 @@ var require_websocket_server = __commonJS({
         socket.on("error", socketOnError);
         const key = req.headers["sec-websocket-key"];
         const upgrade = req.headers.upgrade;
-        const version = +req.headers["sec-websocket-version"];
+        const version2 = +req.headers["sec-websocket-version"];
         if (req.method !== "GET") {
           const message = "Invalid HTTP method";
           abortHandshakeOrEmitwsClientError(this, req, socket, 405, message);
@@ -3537,7 +3537,7 @@ var require_websocket_server = __commonJS({
           abortHandshakeOrEmitwsClientError(this, req, socket, 400, message);
           return;
         }
-        if (version !== 13 && version !== 8) {
+        if (version2 !== 13 && version2 !== 8) {
           const message = "Missing or invalid Sec-WebSocket-Version header";
           abortHandshakeOrEmitwsClientError(this, req, socket, 400, message, {
             "Sec-WebSocket-Version": "13, 8"
@@ -3581,7 +3581,7 @@ var require_websocket_server = __commonJS({
         }
         if (this.options.verifyClient) {
           const info = {
-            origin: req.headers[`${version === 8 ? "sec-websocket-origin" : "origin"}`],
+            origin: req.headers[`${version2 === 8 ? "sec-websocket-origin" : "origin"}`],
             secure: !!(req.socket.authorized || req.socket.encrypted),
             req
           };
@@ -3809,120 +3809,120 @@ var isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 var own = (map, key) => Object.hasOwn(map, key) ? map[key] : void 0;
 var isCount = (v) => typeof v === "number" && Number.isInteger(v) && v > 0;
 var isKind = (v) => typeof v === "string" && Object.hasOwn(KINDS, v);
-function allowKeys(obj2, keys3, path6, errors) {
-  for (const k of Object.keys(obj2)) if (!keys3.includes(k)) errors.push(`${path6}.${k}: unknown key`);
+function allowKeys(obj2, keys3, path7, errors) {
+  for (const k of Object.keys(obj2)) if (!keys3.includes(k)) errors.push(`${path7}.${k}: unknown key`);
 }
-function params(v, kinds, path6, errors) {
+function params(v, kinds, path7, errors) {
   if (v === void 0) return {};
-  if (!isObject(v)) return errors.push(`${path6}: must be an object`), {};
-  for (const k of new Set((typeof kinds === "string" ? [kinds] : kinds).flatMap((kind) => KINDS[kind].reservedParams))) if (k in v) errors.push(`${path6}.${k}: reserved; styx sets it`);
+  if (!isObject(v)) return errors.push(`${path7}: must be an object`), {};
+  for (const k of new Set((typeof kinds === "string" ? [kinds] : kinds).flatMap((kind) => KINDS[kind].reservedParams))) if (k in v) errors.push(`${path7}.${k}: reserved; styx sets it`);
   return v;
 }
-function effortMap(v, kind, path6, errors) {
+function effortMap(v, kind, path7, errors) {
   if (v === void 0) return void 0;
-  if (!isObject(v)) return errors.push(`${path6}: must be an object`), void 0;
-  allowKeys(v, EFFORTS, path6, errors);
+  if (!isObject(v)) return errors.push(`${path7}: must be an object`), void 0;
+  allowKeys(v, EFFORTS, path7, errors);
   const levels = {};
   for (const level of EFFORTS) {
     if (!(level in v)) continue;
-    if (!isObject(v[level])) errors.push(`${path6}.${level}: must be an object of params`);
-    else levels[level] = params(v[level], kind, `${path6}.${level}`, errors);
+    if (!isObject(v[level])) errors.push(`${path7}.${level}: must be an object of params`);
+    else levels[level] = params(v[level], kind, `${path7}.${level}`, errors);
   }
   return levels;
 }
-function cacheOf(v, kind, path6, errors, off) {
+function cacheOf(v, kind, path7, errors, off) {
   if (v === void 0) return void 0;
-  if (!KINDS[kind].cache) errors.push(`${path6}: not supported on the ${kind} kind (it caches on its own)`);
+  if (!KINDS[kind].cache) errors.push(`${path7}: not supported on the ${kind} kind (it caches on its own)`);
   else if (v === null && off) return void 0;
-  else if (v !== "5m" && v !== "1h") errors.push(`${path6}: must be "5m" or "1h"${off ? " (null turns the model's cache off)" : ""}`);
+  else if (v !== "5m" && v !== "1h") errors.push(`${path7}: must be "5m" or "1h"${off ? " (null turns the model's cache off)" : ""}`);
   return v;
 }
-function thinkingBudget(p, max, path6, errors) {
+function thinkingBudget(p, max, path7, errors) {
   const nested = p["additionalModelRequestFields"];
   for (const holder of [p, isObject(nested) ? nested : {}]) {
     const t = holder["thinking"];
     const budget = isObject(t) ? t["budget_tokens"] : void 0;
-    if (typeof budget === "number" && budget >= max) errors.push(`${path6}.thinking.budget_tokens: ${budget} must be below maxOutputTokens (${max})`);
+    if (typeof budget === "number" && budget >= max) errors.push(`${path7}.thinking.budget_tokens: ${budget} must be below maxOutputTokens (${max})`);
   }
 }
-function requests(v, kind, path6, errors, max, alias = false) {
-  const effort = effortMap(v["effort"], kind, `${path6}.effort`, errors);
-  const p = params(v["params"], kind, `${path6}.params`, errors);
-  thinkingBudget(p, max, `${path6}.params`, errors);
-  for (const [level, lp] of Object.entries(effort ?? {})) thinkingBudget(lp, max, `${path6}.effort.${level}`, errors);
-  return { effort, params: p, ..."cache" in v ? { cache: cacheOf(v["cache"], kind, `${path6}.cache`, errors, alias) } : {}, headers: headers(v["headers"], `${path6}.headers`, errors) };
+function requests(v, kind, path7, errors, max, alias = false) {
+  const effort = effortMap(v["effort"], kind, `${path7}.effort`, errors);
+  const p = params(v["params"], kind, `${path7}.params`, errors);
+  thinkingBudget(p, max, `${path7}.params`, errors);
+  for (const [level, lp] of Object.entries(effort ?? {})) thinkingBudget(lp, max, `${path7}.effort.${level}`, errors);
+  return { effort, params: p, ..."cache" in v ? { cache: cacheOf(v["cache"], kind, `${path7}.cache`, errors, alias) } : {}, headers: headers(v["headers"], `${path7}.headers`, errors) };
 }
-function headers(v, path6, errors) {
+function headers(v, path7, errors) {
   if (v === void 0) return {};
-  if (!isObject(v)) return errors.push(`${path6}: must be an object`), {};
+  if (!isObject(v)) return errors.push(`${path7}: must be an object`), {};
   const out = {};
   for (const [name, value] of Object.entries(v)) {
-    if (!HEADER_NAME_RE.test(name)) errors.push(`${path6}.${name}: not a header name`);
-    else if (SECRET_HEADER_RE.test(name)) errors.push(`${path6}.${name}: auth-bearing headers are not allowed; the key comes from auth.command`);
-    else if (typeof value !== "string" || !HEADER_VALUE_RE.test(value)) errors.push(`${path6}.${name}: must be printable ASCII text`);
+    if (!HEADER_NAME_RE.test(name)) errors.push(`${path7}.${name}: not a header name`);
+    else if (SECRET_HEADER_RE.test(name)) errors.push(`${path7}.${name}: auth-bearing headers are not allowed; the key comes from auth.command`);
+    else if (typeof value !== "string" || !HEADER_VALUE_RE.test(value)) errors.push(`${path7}.${name}: must be printable ASCII text`);
     else out[name] = value;
   }
   return out;
 }
-function toolsOf(v, path6, errors) {
-  if (!Array.isArray(v)) return bool(v, true, path6, errors);
+function toolsOf(v, path7, errors) {
+  if (!Array.isArray(v)) return bool(v, true, path7, errors);
   if (v.length > 0 && v.every((x) => typeof x === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(x))) return v;
-  errors.push(`${path6}: true, false, or a non-empty list of tool names`);
+  errors.push(`${path7}: true, false, or a non-empty list of tool names`);
   return true;
 }
-function bool(v, fallback, path6, errors) {
+function bool(v, fallback, path7, errors) {
   if (v === void 0) return fallback;
-  if (typeof v !== "boolean") errors.push(`${path6}: must be true or false`);
+  if (typeof v !== "boolean") errors.push(`${path7}: must be true or false`);
   return v === true;
 }
-function auth(id, v, path6, errors) {
+function auth(id, v, path7, errors) {
   const login = `configure an absolute credential-helper argv in "auth": { "command": [...] } for ${id}; use /rice-models opencode for OpenCode's existing login`;
   const a = v["auth"];
-  if (v["apiKeyEnv"] !== void 0) errors.push(`${path6}.apiKeyEnv: no longer read; keys come from a credential helper. Run ${login} in its place`);
-  else if (a === void 0) errors.push(`${path6}.auth: missing; run ${login}, or set "auth": "none" for a server that checks no key`);
+  if (v["apiKeyEnv"] !== void 0) errors.push(`${path7}.apiKeyEnv: no longer read; keys come from a credential helper. Run ${login} in its place`);
+  else if (a === void 0) errors.push(`${path7}.auth: missing; run ${login}, or set "auth": "none" for a server that checks no key`);
   if (a === void 0) return { command: [], ttlSeconds: KEY_TTL_S };
   if (a === "none") return a;
-  if (!isObject(a)) return errors.push(`${path6}.auth: must be { "command": ["/absolute/helper", ...] } or "none"`), { command: [], ttlSeconds: KEY_TTL_S };
+  if (!isObject(a)) return errors.push(`${path7}.auth: must be { "command": ["/absolute/helper", ...] } or "none"`), { command: [], ttlSeconds: KEY_TTL_S };
   for (const k of Object.keys(a)) {
-    if (k === "env") errors.push(`${path6}.auth.env: not supported; keys come from "command" (run ${login})`);
-    else if (k !== "command" && k !== "ttlSeconds") errors.push(`${path6}.auth.${k}: unknown key`);
+    if (k === "env") errors.push(`${path7}.auth.env: not supported; keys come from "command" (run ${login})`);
+    else if (k !== "command" && k !== "ttlSeconds") errors.push(`${path7}.auth.${k}: unknown key`);
   }
   const { command, ttlSeconds } = a;
   const argv = Array.isArray(command) && command.every((s) => typeof s === "string") ? command : void 0;
-  if (argv === void 0 || argv.length === 0) errors.push(`${path6}.auth.command: must be a non-empty list of strings`);
-  else if (!(argv[0].startsWith("/") || /^[A-Za-z]:[\\/]/.test(argv[0]) || /^\\\\[^\\]+\\[^\\]+/.test(argv[0]))) errors.push(`${path6}.auth.command: the first entry must be an absolute path (no shell expands ~ or searches PATH)`);
-  else if (argv.some((s) => new RegExp("\\p{Cc}", "u").test(s))) errors.push(`${path6}.auth.command: must not contain control characters`);
-  if (ttlSeconds !== void 0 && !isCount(ttlSeconds)) errors.push(`${path6}.auth.ttlSeconds: must be a positive integer`);
+  if (argv === void 0 || argv.length === 0) errors.push(`${path7}.auth.command: must be a non-empty list of strings`);
+  else if (!(argv[0].startsWith("/") || /^[A-Za-z]:[\\/]/.test(argv[0]) || /^\\\\[^\\]+\\[^\\]+/.test(argv[0]))) errors.push(`${path7}.auth.command: the first entry must be an absolute path (no shell expands ~ or searches PATH)`);
+  else if (argv.some((s) => new RegExp("\\p{Cc}", "u").test(s))) errors.push(`${path7}.auth.command: must not contain control characters`);
+  if (ttlSeconds !== void 0 && !isCount(ttlSeconds)) errors.push(`${path7}.auth.ttlSeconds: must be a positive integer`);
   return { command: argv ?? [], ttlSeconds: ttlSeconds ?? KEY_TTL_S };
 }
-function modelKind(v, providerKind, path6, errors) {
+function modelKind(v, providerKind, path7, errors) {
   const k = v["kind"];
   if (k === void 0) return void 0;
-  if (!isKind(k) || k === "bedrock") errors.push(`${path6}.kind: must be "openai", "responses", "anthropic" or "gemini"`);
-  else if (providerKind === "bedrock") errors.push(`${path6}.kind: a bedrock provider's models are all bedrock`);
+  if (!isKind(k) || k === "bedrock") errors.push(`${path7}.kind: must be "openai", "responses", "anthropic" or "gemini"`);
+  else if (providerKind === "bedrock") errors.push(`${path7}.kind: a bedrock provider's models are all bedrock`);
   else return k;
   return void 0;
 }
-function model(id, providerKind, v, path6, errors) {
-  if (!isObject(v)) return errors.push(`${path6}: must be an object`), void 0;
-  const kind = modelKind(v, providerKind, path6, errors) ?? providerKind;
+function model(id, providerKind, v, path7, errors) {
+  if (!isObject(v)) return errors.push(`${path7}: must be an object`), void 0;
+  const kind = modelKind(v, providerKind, path7, errors) ?? providerKind;
   const spec = KINDS[kind];
-  allowKeys(v, [...MODEL_KEYS, ...spec.modelKeys], path6, errors);
+  allowKeys(v, [...MODEL_KEYS, ...spec.modelKeys], path7, errors);
   const mine = (k) => spec.modelKeys.includes(k) ? v[k] : void 0;
   const { contextWindow, maxInputTokens, maxOutputTokens } = v;
-  if (v.webSearch !== void 0 && !["auto", "native", "off"].includes(String(v.webSearch))) errors.push(`${path6}.webSearch: must be auto, native or off`);
+  if (v.webSearch !== void 0 && !["auto", "native", "off"].includes(String(v.webSearch))) errors.push(`${path7}.webSearch: must be auto, native or off`);
   const maxTokensParam = mine("maxTokensParam");
   const systemRole = mine("systemRole");
-  if (contextWindow !== void 0 && !isCount(contextWindow)) errors.push(`${path6}.contextWindow: must be a positive integer`);
-  if (maxOutputTokens !== void 0 && !isCount(maxOutputTokens)) errors.push(`${path6}.maxOutputTokens: must be a positive integer`);
+  if (contextWindow !== void 0 && !isCount(contextWindow)) errors.push(`${path7}.contextWindow: must be a positive integer`);
+  if (maxOutputTokens !== void 0 && !isCount(maxOutputTokens)) errors.push(`${path7}.maxOutputTokens: must be a positive integer`);
   if (maxInputTokens !== void 0 && (!isCount(maxInputTokens) || isCount(contextWindow) && maxInputTokens > contextWindow)) {
-    errors.push(`${path6}.maxInputTokens: must be a positive integer no larger than contextWindow`);
+    errors.push(`${path7}.maxInputTokens: must be a positive integer no larger than contextWindow`);
   }
   if (maxTokensParam !== void 0 && maxTokensParam !== "max_tokens" && maxTokensParam !== "max_completion_tokens") {
-    errors.push(`${path6}.maxTokensParam: must be max_tokens or max_completion_tokens`);
+    errors.push(`${path7}.maxTokensParam: must be max_tokens or max_completion_tokens`);
   }
   if (systemRole !== void 0 && systemRole !== "system" && systemRole !== "developer" && systemRole !== "user") {
-    errors.push(`${path6}.systemRole: must be system, developer or user`);
+    errors.push(`${path7}.systemRole: must be system, developer or user`);
   }
   const out = {
     id,
@@ -3932,72 +3932,72 @@ function model(id, providerKind, v, path6, errors) {
     ...maxOutputTokens === void 0 ? {} : { maxOutputTokens },
     ...maxTokensParam === void 0 ? {} : { maxTokensParam },
     systemRole: systemRole ?? "system",
-    tools: toolsOf(v["tools"], `${path6}.tools`, errors),
-    parallelToolCalls: bool(mine("parallelToolCalls"), true, `${path6}.parallelToolCalls`, errors),
-    vision: bool(v["vision"], true, `${path6}.vision`, errors),
+    tools: toolsOf(v["tools"], `${path7}.tools`, errors),
+    parallelToolCalls: bool(mine("parallelToolCalls"), true, `${path7}.parallelToolCalls`, errors),
+    vision: bool(v["vision"], true, `${path7}.vision`, errors),
     ...["auto", "native", "off"].includes(String(v.webSearch)) ? { webSearch: v.webSearch } : {},
-    ...requests(v, kind, path6, errors, isCount(maxOutputTokens) ? maxOutputTokens : Infinity)
+    ...requests(v, kind, path7, errors, isCount(maxOutputTokens) ? maxOutputTokens : Infinity)
   };
   const budget = inputBudget(out);
   if (budget !== null && budget <= 0) {
-    errors.push(`${path6}: maxOutputTokens leaves no input budget inside contextWindow`);
+    errors.push(`${path7}: maxOutputTokens leaves no input budget inside contextWindow`);
   }
   return out;
 }
-function provider(id, v, path6, errors) {
-  if (!ID_RE.test(id) || id === "native") errors.push(`${path6}: provider ids are lowercase letters, digits and dashes (not "native")`);
-  if (!isObject(v)) return errors.push(`${path6}: must be an object`), void 0;
+function provider(id, v, path7, errors) {
+  if (!ID_RE.test(id) || id === "native") errors.push(`${path7}: provider ids are lowercase letters, digits and dashes (not "native")`);
+  if (!isObject(v)) return errors.push(`${path7}: must be an object`), void 0;
   const { kind: rawKind, baseUrl, timeoutMs, maxTools, models } = v;
-  if (!isKind(rawKind)) errors.push(`${path6}.kind: must be ${KIND_NAMES}`);
+  if (!isKind(rawKind)) errors.push(`${path7}.kind: must be ${KIND_NAMES}`);
   const kind = isKind(rawKind) ? rawKind : "openai";
   const raw = isObject(models) ? Object.values(models) : [];
   const kinds = [.../* @__PURE__ */ new Set([kind, ...raw.flatMap((m) => isObject(m) && isKind(m["kind"]) && m["kind"] !== "bedrock" && kind !== "bedrock" ? [m["kind"]] : [])])];
   const providerKeys = kinds.flatMap((k) => KINDS[k].providerKeys);
-  allowKeys(v, [...PROVIDER_KEYS, ...providerKeys, "apiKeyEnv"], path6, errors);
-  const allowHttp = bool(v["allowHttp"], false, `${path6}.allowHttp`, errors);
+  allowKeys(v, [...PROVIDER_KEYS, ...providerKeys, "apiKeyEnv"], path7, errors);
+  const allowHttp = bool(v["allowHttp"], false, `${path7}.allowHttp`, errors);
   let origin = "";
   let base = "";
-  if (typeof baseUrl !== "string") errors.push(`${path6}.baseUrl: must be ${allowHttp ? "an http or https" : "an https"} URL`);
-  else if (/[\\\s]/.test(baseUrl)) errors.push(`${path6}.baseUrl: must not contain a backslash or whitespace`);
-  else if (/[[\]{}]/.test(baseUrl)) errors.push(`${path6}.baseUrl: must not contain [, ], { or } (URL templates and IPv6 literals are not supported)`);
+  if (typeof baseUrl !== "string") errors.push(`${path7}.baseUrl: must be ${allowHttp ? "an http or https" : "an https"} URL`);
+  else if (/[\\\s]/.test(baseUrl)) errors.push(`${path7}.baseUrl: must not contain a backslash or whitespace`);
+  else if (/[[\]{}]/.test(baseUrl)) errors.push(`${path7}.baseUrl: must not contain [, ], { or } (URL templates and IPv6 literals are not supported)`);
   else {
     let url;
     try {
       url = new URL(baseUrl);
     } catch {
-      errors.push(`${path6}.baseUrl: not a URL`);
+      errors.push(`${path7}.baseUrl: not a URL`);
     }
     if (url !== void 0) {
       const plain = url.protocol === "http:";
-      if (url.protocol !== "https:" && !(plain && allowHttp)) errors.push(`${path6}.baseUrl: must use https${plain ? ' (plain http needs "allowHttp": true on the provider)' : ""}`);
-      else if (!HOST_RE.test(url.hostname)) errors.push(`${path6}.baseUrl: the host must be a DNS name (letters, digits and dashes, with no trailing dot)`);
-      if (url.username !== "" || url.password !== "") errors.push(`${path6}.baseUrl: must not carry credentials`);
-      if (/[?#]/.test(baseUrl)) errors.push(`${path6}.baseUrl: must not carry a query or fragment`);
+      if (url.protocol !== "https:" && !(plain && allowHttp)) errors.push(`${path7}.baseUrl: must use https${plain ? ' (plain http needs "allowHttp": true on the provider)' : ""}`);
+      else if (!HOST_RE.test(url.hostname)) errors.push(`${path7}.baseUrl: the host must be a DNS name (letters, digits and dashes, with no trailing dot)`);
+      if (url.username !== "" || url.password !== "") errors.push(`${path7}.baseUrl: must not carry credentials`);
+      if (/[?#]/.test(baseUrl)) errors.push(`${path7}.baseUrl: must not carry a query or fragment`);
       origin = url.origin;
       base = url.href.replace(/\/+$/, "");
     }
   }
-  const key = auth(id, v, path6, errors);
-  if (key === "none" && kind === "bedrock") errors.push(`${path6}.auth: "none" is not allowed on a bedrock provider; Bedrock needs a key`);
+  const key = auth(id, v, path7, errors);
+  if (key === "none" && kind === "bedrock") errors.push(`${path7}.auth: "none" is not allowed on a bedrock provider; Bedrock needs a key`);
   const authHeader = v["authHeader"];
   const authHeaderOk = authHeader === "bearer" || authHeader === "x-api-key" || authHeader === "x-goog-api-key";
-  if (authHeader !== void 0 && !authHeaderOk) errors.push(`${path6}.authHeader: must be "bearer", "x-api-key" or "x-goog-api-key"`);
-  if (timeoutMs !== void 0 && !(isCount(timeoutMs) && timeoutMs <= MAX_TIMEOUT_MS)) errors.push(`${path6}.timeoutMs: must be a positive integer of at most ${MAX_TIMEOUT_MS}`);
-  if (maxTools !== void 0 && !isCount(maxTools)) errors.push(`${path6}.maxTools: must be a positive integer`);
+  if (authHeader !== void 0 && !authHeaderOk) errors.push(`${path7}.authHeader: must be "bearer", "x-api-key" or "x-goog-api-key"`);
+  if (timeoutMs !== void 0 && !(isCount(timeoutMs) && timeoutMs <= MAX_TIMEOUT_MS)) errors.push(`${path7}.timeoutMs: must be a positive integer of at most ${MAX_TIMEOUT_MS}`);
+  if (maxTools !== void 0 && !isCount(maxTools)) errors.push(`${path7}.maxTools: must be a positive integer`);
   const sessionHeader = v["sessionHeader"];
   const sessionHeaderOk = typeof sessionHeader === "string" && HEADER_NAME_RE.test(sessionHeader);
-  if (sessionHeader !== void 0 && !sessionHeaderOk) errors.push(`${path6}.sessionHeader: must be a header name`);
+  if (sessionHeader !== void 0 && !sessionHeaderOk) errors.push(`${path7}.sessionHeader: must be a header name`);
   const out = {};
-  if (models !== void 0 && !isObject(models)) errors.push(`${path6}.models: must be a map of model ids`);
+  if (models !== void 0 && !isObject(models)) errors.push(`${path7}.models: must be a map of model ids`);
   else if (isObject(models)) {
     for (const [mid, m] of Object.entries(models)) {
-      if (mid === "") errors.push(`${path6}.models: a model id is empty`);
-      const parsed = model(mid, kind, m, `${path6}.models.${mid}`, errors);
+      if (mid === "") errors.push(`${path7}.models: a model id is empty`);
+      const parsed = model(mid, kind, m, `${path7}.models.${mid}`, errors);
       if (parsed !== void 0) out[mid] = parsed;
     }
   }
-  const shared = params(v["params"], kinds, `${path6}.params`, errors);
-  thinkingBudget(shared, Math.min(...Object.values(out).map((m) => m.maxOutputTokens ?? Infinity)), `${path6}.params`, errors);
+  const shared = params(v["params"], kinds, `${path7}.params`, errors);
+  thinkingBudget(shared, Math.min(...Object.values(out).map((m) => m.maxOutputTokens ?? Infinity)), `${path7}.params`, errors);
   return {
     id,
     kind,
@@ -4006,10 +4006,10 @@ function provider(id, v, path6, errors) {
     allowHttp,
     auth: key,
     ...authHeaderOk ? { authHeader } : {},
-    headers: headers(v["headers"], `${path6}.headers`, errors),
+    headers: headers(v["headers"], `${path7}.headers`, errors),
     params: shared,
     ...timeoutMs === void 0 ? {} : { timeoutMs },
-    streamUsage: bool(providerKeys.includes("streamUsage") ? v["streamUsage"] : void 0, true, `${path6}.streamUsage`, errors),
+    streamUsage: bool(providerKeys.includes("streamUsage") ? v["streamUsage"] : void 0, true, `${path7}.streamUsage`, errors),
     maxTools: maxTools ?? 128,
     ...sessionHeaderOk ? { sessionHeader: sessionHeader.toLowerCase() } : {},
     models: out
@@ -4038,32 +4038,32 @@ function parseConfig(text2) {
   const partial = { providers, aliases: {} };
   if (raw["aliases"] !== void 0 && !isObject(raw["aliases"])) errors.push("aliases: must be an object");
   for (const [name, a] of Object.entries(isObject(raw["aliases"]) ? raw["aliases"] : {})) {
-    const path6 = `aliases.${name}`;
-    if (!ALIAS_RE.test(name)) errors.push(`${path6}: alias names start with a lowercase letter and hold lowercase letters, digits, dashes and dots (no "..", at most 64 characters)`);
-    if (RESERVED_ALIASES.has(name)) errors.push(`${path6}: "${name}" is a built-in model name`);
+    const path7 = `aliases.${name}`;
+    if (!ALIAS_RE.test(name)) errors.push(`${path7}: alias names start with a lowercase letter and hold lowercase letters, digits, dashes and dots (no "..", at most 64 characters)`);
+    if (RESERVED_ALIASES.has(name)) errors.push(`${path7}: "${name}" is a built-in model name`);
     const alias = typeof a === "string" ? { target: a } : isObject(a) ? a : void 0;
     if (alias === void 0) {
-      errors.push(`${path6}: must be "provider/model" or { target, note }`);
+      errors.push(`${path7}: must be "provider/model" or { target, note }`);
       continue;
     }
-    if (isObject(a)) allowKeys(a, ["target", "note", ...REQUEST_KEYS], path6, errors);
+    if (isObject(a)) allowKeys(a, ["target", "note", ...REQUEST_KEYS], path7, errors);
     const { target, note } = alias;
     if (note !== void 0 && (typeof note !== "string" || note.length > 120 || /[\r\n]/.test(note))) {
-      errors.push(`${path6}.note: must be one line of at most 120 characters`);
+      errors.push(`${path7}.note: must be one line of at most 120 characters`);
     }
     if (typeof target !== "string") {
-      errors.push(`${path6}.target: must be "provider/model"`);
+      errors.push(`${path7}.target: must be "provider/model"`);
       continue;
     }
     const why = undeclared(partial, target);
-    if (why !== void 0) errors.push(`${path6} → ${why}`);
+    if (why !== void 0) errors.push(`${path7} → ${why}`);
     const slash = target.indexOf("/");
     const host = why === void 0 ? own(providers, target.slice(0, slash)) : void 0;
     const set = REQUEST_KEYS.some((k) => k in alias);
-    if (set && why === void 0 && host === void 0) errors.push(`${path6}: ${REQUEST_KEYS.join(", ")} need a provider/model target, not a native one`);
+    if (set && why === void 0 && host === void 0) errors.push(`${path7}: ${REQUEST_KEYS.join(", ")} need a provider/model target, not a native one`);
     const aimed = host === void 0 ? void 0 : own(host.models, target.slice(slash + 1));
     const max = aimed?.maxOutputTokens ?? Infinity;
-    aliases[name] = { target, ...typeof note === "string" ? { note } : {}, ...set && host !== void 0 ? requests(alias, aimed?.kind ?? host.kind, path6, errors, max, true) : {} };
+    aliases[name] = { target, ...typeof note === "string" ? { note } : {}, ...set && host !== void 0 ? requests(alias, aimed?.kind ?? host.kind, path7, errors, max, true) : {} };
   }
   return errors.length > 0 ? { errors } : { config: { providers, aliases, ...raw["tiers"] === void 0 ? {} : { tiers: parsedTiers.tiers } }, errors };
 }
@@ -4130,7 +4130,7 @@ function wireIdentifier(value, prefix) {
 }
 var toolName = (value) => wireIdentifier(value, "multi_tool_");
 var callId = (value) => wireIdentifier(value, "multi_call_");
-function originalToolNames(body) {
+function originalToolNames(body2) {
   const names = /* @__PURE__ */ new Map();
   const add = (name) => {
     const alias = toolName(name);
@@ -4139,7 +4139,7 @@ function originalToolNames(body) {
     }
     names.set(alias, name);
   };
-  for (const tool of body.tools ?? []) {
+  for (const tool of body2.tools ?? []) {
     if (tool.name) {
       add(tool.name);
     }
@@ -4384,11 +4384,11 @@ function normalizeConversation(messages, decodeReasoning2 = () => void 0) {
 }
 
 // helper/core/direct-tools.ts
-function isDirectToolAvailable(body, name) {
-  if (body.tool_choice?.type === "tool" && body.tool_choice.name === name) {
+function isDirectToolAvailable(body2, name) {
+  if (body2.tool_choice?.type === "tool" && body2.tool_choice.name === name) {
     return true;
   }
-  for (const message of body.messages ?? []) {
+  for (const message of body2.messages ?? []) {
     if (!Array.isArray(message.content)) {
       continue;
     }
@@ -4447,13 +4447,13 @@ function errorDetail(error) {
   return { message, type: `${text2(inner["type"])} ${text2(inner["code"])}`.trim() };
 }
 var allowedModels = (message) => (/models=\[([^\]]*)\]/.exec(message)?.[1] ?? "").split(",").map((s) => s.trim().replace(/^['"]|['"]$/g, "")).filter((s) => MODEL_NAME_RE.test(s) && !/^sk-/i.test(s));
-function httpErrorText(p, status, body, model2) {
-  if (/^\s*</.test(body) && /<(?:!doctype\s+html|html|head|body)\b/i.test(body.slice(0, 512))) {
-    const raw = /<title>([^<]{1,80})<\/title>/i.exec(body)?.[1];
+function httpErrorText(p, status, body2, model2) {
+  if (/^\s*</.test(body2) && /<(?:!doctype\s+html|html|head|body)\b/i.test(body2.slice(0, 512))) {
+    const raw = /<title>([^<]{1,80})<\/title>/i.exec(body2)?.[1];
     const title = raw === void 0 ? "" : oneLine(raw.replace(new RegExp("\\p{Cc}+", "gu"), " ").replace(/\s+/g, " "));
     return `rice-multi-models: ${p.id} blocked the request at its gateway (HTTP ${status}${title ? `, "${title}"` : ""}), before the API answered; ask the ${p.id} platform team what their edge rule rejected`;
   }
-  const { message, type } = errorDetail(body);
+  const { message, type } = errorDetail(body2);
   const said = oneLine(message, 300) || "no error message";
   if (/key_model_access_denied/.test(type) || /not allowed to access model/i.test(message)) {
     const allowed = allowedModels(message);
@@ -4778,24 +4778,24 @@ function isReasoningState(value) {
 function isEffort(value) {
   return EFFORTS2.includes(value);
 }
-function validateRequestOptions(body) {
-  if (body.stop_sequences !== void 0 && (!Array.isArray(body.stop_sequences) || body.stop_sequences.some((s) => typeof s !== "string" || !s.length))) {
+function validateRequestOptions(body2) {
+  if (body2.stop_sequences !== void 0 && (!Array.isArray(body2.stop_sequences) || body2.stop_sequences.some((s) => typeof s !== "string" || !s.length))) {
     throw new Error("Invalid stop sequences");
   }
-  if (body.tools !== void 0 && !Array.isArray(body.tools)) {
+  if (body2.tools !== void 0 && !Array.isArray(body2.tools)) {
     throw new Error("tools must be an array");
   }
-  if (body.stream !== void 0 && typeof body.stream !== "boolean") {
+  if (body2.stream !== void 0 && typeof body2.stream !== "boolean") {
     throw new Error("stream must be boolean");
   }
   for (const key of ["output_config", "output_format", "thinking", "tool_choice"]) {
-    if (body[key] != null && !isRecord(body[key])) {
+    if (body2[key] != null && !isRecord(body2[key])) {
       throw new Error(`Invalid ${key}`);
     }
   }
 }
-function outputFormat(body) {
-  const format = body.output_config?.format ?? body.output_format;
+function outputFormat(body2) {
+  const format = body2.output_config?.format ?? body2.output_format;
   if (format != null && (format.type !== "json_schema" || !format.schema || typeof format.schema !== "object" || Array.isArray(format.schema))) {
     throw new Error("Unsupported output format: expected json_schema with an object schema");
   }
@@ -4867,8 +4867,8 @@ function budgetEffort(thinking) {
   }
   return "xhigh";
 }
-function reasoningEffort(body) {
-  const thinking = body.thinking;
+function reasoningEffort(body2) {
+  const thinking = body2.thinking;
   if (thinking && !["enabled", "adaptive", "disabled", "auto"].includes(thinking.type)) {
     throw new Error("Unsupported thinking configuration");
   }
@@ -4876,7 +4876,7 @@ function reasoningEffort(body) {
   if (budget !== void 0 && (!Number.isSafeInteger(budget) || budget < 0)) {
     throw new Error("Invalid thinking budget");
   }
-  const effort = body.output_config?.effort ?? budgetEffort(thinking);
+  const effort = body2.output_config?.effort ?? budgetEffort(thinking);
   if (!isEffort(effort)) {
     throw new Error(`Unsupported reasoning effort: ${effort}`);
   }
@@ -4901,18 +4901,18 @@ function decodeReasoning(signaturePrefix) {
     };
   };
 }
-function toResponses(body, model2, signaturePrefix = OPENAI_SIGNATURE_PREFIX) {
-  validateRequestOptions(body);
-  const format = outputFormat(body);
-  const input = normalizeConversation(body.messages, decodeReasoning(signaturePrefix));
-  const tools = (body.tools ?? []).filter(
-    (tool) => !isDeferredTool(tool) || typeof tool.name === "string" && isDirectToolAvailable(body, tool.name)
+function toResponses(body2, model2, signaturePrefix = OPENAI_SIGNATURE_PREFIX) {
+  validateRequestOptions(body2);
+  const format = outputFormat(body2);
+  const input = normalizeConversation(body2.messages, decodeReasoning(signaturePrefix));
+  const tools = (body2.tools ?? []).filter(
+    (tool) => !isDeferredTool(tool) || typeof tool.name === "string" && isDirectToolAvailable(body2, tool.name)
   ).map(inputTool);
-  const choice = toolChoice(body.tool_choice, tools);
-  const effort = reasoningEffort(body);
+  const choice = toolChoice(body2.tool_choice, tools);
+  const effort = reasoningEffort(body2);
   return {
     model: model2,
-    instructions: textContent(body.system ?? ""),
+    instructions: textContent(body2.system ?? ""),
     input,
     tools,
     ...format ? {
@@ -4926,7 +4926,7 @@ function toResponses(body, model2, signaturePrefix = OPENAI_SIGNATURE_PREFIX) {
       }
     } : {},
     tool_choice: choice,
-    parallel_tool_calls: !body.tool_choice?.disable_parallel_tool_use,
+    parallel_tool_calls: !body2.tool_choice?.disable_parallel_tool_use,
     reasoning: { effort, summary: "auto" },
     include: ["reasoning.encrypted_content"],
     // Codex subscriptions require store:false and streaming; max_tokens is unsupported.
@@ -5339,11 +5339,11 @@ var ResponseStream = class {
   }
   textLimit(slot) {
     let matchAt = Infinity;
-    for (const stop of this.options.stopSequences ?? []) {
-      const at = slot.text.indexOf(stop);
+    for (const stop2 of this.options.stopSequences ?? []) {
+      const at = slot.text.indexOf(stop2);
       if (at >= 0 && at < matchAt) {
         matchAt = at;
-        this.stopped = stop;
+        this.stopped = stop2;
       }
     }
     if (this.stopped) {
@@ -5418,9 +5418,9 @@ var ResponseStream = class {
 };
 function prefixSafeLength(text2, stops) {
   let limit = text2.length;
-  for (const stop of stops) {
-    for (let length = 1; length < stop.length; length++) {
-      if (text2.endsWith(stop.slice(0, length))) {
+  for (const stop2 of stops) {
+    for (let length = 1; length < stop2.length; length++) {
+      if (text2.endsWith(stop2.slice(0, length))) {
         limit = Math.min(limit, text2.length - length);
       }
     }
@@ -5954,7 +5954,7 @@ var CodexSocket = class _CodexSocket {
    * rate-limit report going to `onLimits` instead. An aborted or abandoned response closes the connection,
    * since the backend would go on streaming it; a finished one leaves it open for the next.
    */
-  response(body, signal, readLimits, onLimits) {
+  response(body2, signal, readLimits, onLimits) {
     signal.throwIfAborted();
     if (!this.isUsable) throw new SocketError("the Codex WebSocket is not open");
     this.busy = true;
@@ -5992,7 +5992,7 @@ var CodexSocket = class _CodexSocket {
       this.close(true);
     };
     signal.addEventListener("abort", abort, { once: true });
-    this.socket.send(JSON.stringify({ type: "response.create", ...body }));
+    this.socket.send(JSON.stringify({ type: "response.create", ...body2 }));
     const self = this;
     return {
       async *[Symbol.asyncIterator]() {
@@ -6115,7 +6115,7 @@ import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
 import { Readable } from "node:stream";
-async function postStream(url, headers2, body, signal) {
+async function postStream(url, headers2, body2, signal) {
   signal.throwIfAborted();
   const parsed = new URL(url);
   const send = parsed.protocol === "https:" ? httpsRequest : httpRequest;
@@ -6133,7 +6133,7 @@ async function postStream(url, headers2, body, signal) {
     incoming = await new Promise((resolve2, reject) => {
       outgoing.once("response", resolve2);
       outgoing.once("error", reject);
-      outgoing.end(body);
+      outgoing.end(body2);
     });
     const encoding = incoming.headers["content-encoding"]?.trim().toLowerCase();
     const decoder6 = encoding === "gzip" ? createGunzip() : encoding === "deflate" ? createInflate() : encoding === "br" ? createBrotliDecompress() : void 0;
@@ -6153,8 +6153,8 @@ async function postStream(url, headers2, body, signal) {
     throw error;
   }
 }
-async function postResponse(url, headers2, body, signal) {
-  const response = await postStream(url, headers2, body, signal);
+async function postResponse(url, headers2, body2, signal) {
+  const response = await postStream(url, headers2, body2, signal);
   if ([204, 205, 304].includes(response.status)) {
     response.cancel();
     return new Response(null, { status: response.status, headers: response.headers });
@@ -6177,7 +6177,7 @@ function codexAuthFile(env = process.env) {
   return `${env.CODEX_HOME || `${homedir()}/.codex`}/auth.json`;
 }
 function messagesBody(req, model2) {
-  const body = {
+  const body2 = {
     model: model2,
     system: req.system,
     messages: req.transcript,
@@ -6193,12 +6193,12 @@ function messagesBody(req, model2) {
     ...req.native?.toolChoice && !req.native.webSearch ? { tool_choice: req.native.toolChoice } : {},
     ...req.native?.outputSchema && !req.native.webSearch ? { output_format: { type: "json_schema", schema: req.native.outputSchema } } : {}
   };
-  if (typeof req.effort === "string") body.output_config = { effort: req.effort };
-  else if (typeof req.effort === "number") body.thinking = { type: "enabled", budget_tokens: req.effort };
-  return body;
+  if (typeof req.effort === "string") body2.output_config = { effort: req.effort };
+  else if (typeof req.effort === "number") body2.thinking = { type: "enabled", budget_tokens: req.effort };
+  return body2;
 }
-function responsesRequest(req, model2, body) {
-  const translated = toResponses(body, model2);
+function responsesRequest(req, model2, body2) {
+  const translated = toResponses(body2, model2);
   const search = req.native?.webSearch;
   if (search?.blockedDomains?.length) throw new Error("Codex search cannot enforce these search restrictions");
   if (search?.maxUses !== void 0 && (!Number.isSafeInteger(search.maxUses) || search.maxUses < 1 || search.maxUses > 20)) throw new Error("Codex search use limit must be an integer from 1 to 20");
@@ -6369,10 +6369,10 @@ async function* codexStep(req, model2, signal, options = {}) {
   let ttfb = null;
   let transport = "none";
   const authFile = options.authFile ?? codexAuthFile(options.env);
-  const body = messagesBody(req, model2);
+  const body2 = messagesBody(req, model2);
   let request2;
   try {
-    request2 = responsesRequest(req, model2, body);
+    request2 = responsesRequest(req, model2, body2);
   } catch (error) {
     yield { type: "error", kind: "request", text: `codex: cannot translate this conversation: ${error instanceof Error ? error.message : String(error)}` };
     yield { type: "stats", ttfbMs: null, totalMs: Date.now() - started, transport };
@@ -6404,17 +6404,17 @@ async function* codexStep(req, model2, signal, options = {}) {
     onAuth(auth2);
     const headers2 = { ...auth2, originator: ORIGINATOR, session_id: sessionId, "OpenAI-Beta": WS_BETA };
     const url = options.wsUrl ?? WS_URL;
-    const { stream: _stream, ...body2 } = request2;
+    const { stream: _stream, ...body3 } = request2;
     if (options.pool) {
       const account = createHash2("sha256").update(auth2["chatgpt-account-id"]).digest("hex");
       const taken = await options.pool.take(`${account}:${sessionId}`, url, headers2, attemptSignal);
       transport = taken.reused ? "ws reused" : "ws";
-      const stream = taken.socket.response(body2, attemptSignal, limitsOf, onLimits);
+      const stream = taken.socket.response(body3, attemptSignal, limitsOf, onLimits);
       return options.pool.holds(taken.socket) ? stream : closeAfter(stream, taken.socket);
     }
     const socket = await CodexSocket.open(url, headers2, attemptSignal);
     transport = "ws";
-    return closeAfter(socket.response(body2, attemptSignal, limitsOf, onLimits), socket);
+    return closeAfter(socket.response(body3, attemptSignal, limitsOf, onLimits), socket);
   };
   const open2 = async () => {
     if (choice !== "sse") {
@@ -6468,7 +6468,7 @@ async function* codexStep(req, model2, signal, options = {}) {
         try {
           signal.throwIfAborted();
           const response = await fromResponses(touching(await open2(), arm), req.target, mapper.emit, {
-            toolNames: originalToolNames(body),
+            toolNames: originalToolNames(body2),
             inputTokens: estimateInputTokens(request2),
             ...req.native?.webSearch ? { onSearchSources: (evidence) => push({ type: "search_sources", ...evidence }) } : {}
           });
@@ -6551,10 +6551,10 @@ function startProcess(argv, cwd) {
   });
   void exited.catch(() => {
   });
-  const stop = () => {
+  const stop2 = () => {
     if (child.pid) terminateProcessTree(child.pid, { signal: "SIGKILL" });
   };
-  return { child, exited, stderr: () => stderr.trim().split("\n").at(-1)?.slice(0, 300) ?? "", stop };
+  return { child, exited, stderr: () => stderr.trim().split("\n").at(-1)?.slice(0, 300) ?? "", stop: stop2 };
 }
 async function runCommand(argv, timeoutMs) {
   const running = startProcess(argv);
@@ -6836,7 +6836,7 @@ function parseJson(text2) {
 var obj = (v) => isObject(v) ? v : {};
 var isIndex = (v) => typeof v === "number" && Number.isInteger(v) && v >= 0;
 var count = (v) => isIndex(v) ? v : 0;
-var joinUrl = (base, path6) => base.endsWith("/v1") && path6.startsWith("/v1/") ? `${base}${path6.slice(3)}` : `${base}${path6}`;
+var joinUrl = (base, path7) => base.endsWith("/v1") && path7.startsWith("/v1/") ? `${base}${path7.slice(3)}` : `${base}${path7}`;
 function merge(a, b) {
   const out = { ...a };
   for (const [k, v] of Object.entries(b)) {
@@ -6855,8 +6855,8 @@ function effortLevel(m, requested) {
 }
 function params2(base, p, m, effort) {
   const level = effortLevel(m, effort);
-  const body = [p.params, m.params, m.overrides ?? {}, level === void 0 ? {} : m.effort?.[level] ?? {}].reduce(merge, base);
-  return { body, level };
+  const body2 = [p.params, m.params, m.overrides ?? {}, level === void 0 ? {} : m.effort?.[level] ?? {}].reduce(merge, base);
+  return { body: body2, level };
 }
 var lostThinking = (thinking, messages) => isObject(thinking) && (thinking["type"] === "enabled" || thinking["type"] === "adaptive") && messages.slice(messages.findLastIndex((m) => m.role === "user" && !m.content.some((b) => b.type === "tool_result")) + 1).some((m) => m.unsealed);
 var lastUsers = (messages) => messages.filter((m) => m.role === "user").slice(-2);
@@ -7034,14 +7034,14 @@ var anthropic = {
     const tools = m.tools ? n.tools : [];
     const base = { max_tokens: m.maxOutputTokens };
     if (!m.parallelToolCalls && tools.length > 0) base["tool_choice"] = { type: "auto", disable_parallel_tool_use: true };
-    const { body, level } = params2(base, p, m, n.effort);
-    const lost = lostThinking(body["thinking"], n.messages);
-    if (lost) delete body["thinking"];
+    const { body: body2, level } = params2(base, p, m, n.effort);
+    const lost = lostThinking(body2["thinking"], n.messages);
+    if (lost) delete body2["thinking"];
     const mark = m.cache === void 0 ? {} : { cache_control: { type: "ephemeral", ttl: m.cache } };
     const messages = toMessages(n.messages);
     for (const turn of lastUsers(messages)) turn.content = turn.content.map((b, i, all) => i === all.length - 1 ? { ...b, ...mark } : b);
     const sent = {
-      ...body,
+      ...body2,
       model: m.id,
       ...n.system === "" ? {} : { system: m.cache === void 0 ? n.system : [{ type: "text", text: n.system, ...mark }] },
       messages,
@@ -7144,9 +7144,9 @@ function decoder2() {
   function event({ out, fail }, f) {
     const type = f.headers[":message-type"];
     const name = f.headers[":event-type"] ?? f.headers[":exception-type"] ?? f.headers[":error-code"] ?? "";
-    const body = parseJson(f.payload);
-    if (body === void 0 && type === "event") return fail(`unparseable ${name} event`);
-    const o = obj(body);
+    const body2 = parseJson(f.payload);
+    if (body2 === void 0 && type === "event") return fail(`unparseable ${name} event`);
+    const o = obj(body2);
     if (type !== "event") return fail(`${name}: ${str(o["message"]) || f.headers[":error-message"] || f.payload}`);
     const i = o["contentBlockIndex"];
     if (name === "contentBlockStart") {
@@ -7188,16 +7188,16 @@ var bedrock = {
   encode(n, p, m) {
     if (m.maxOutputTokens === void 0) throw new Error(`rice-multi-models: ${p.id}/${m.id} requires an explicit maxOutputTokens request policy because its output limit was not reported`);
     const tools = m.tools ? n.tools : [];
-    const { body, level } = params2({ inferenceConfig: { maxTokens: m.maxOutputTokens } }, p, m, n.effort);
-    const fields = body["additionalModelRequestFields"];
+    const { body: body2, level } = params2({ inferenceConfig: { maxTokens: m.maxOutputTokens } }, p, m, n.effort);
+    const fields = body2["additionalModelRequestFields"];
     const lost = isObject(fields) && lostThinking(fields["thinking"], n.messages);
-    if (lost) body["additionalModelRequestFields"] = { ...fields, thinking: void 0 };
+    if (lost) body2["additionalModelRequestFields"] = { ...fields, thinking: void 0 };
     const point = m.cache === void 0 ? [] : [{ cachePoint: { type: "default", ...m.cache === "1h" ? { ttl: m.cache } : {} } }];
     const messages = toMessages2(n.messages);
     for (const turn of lastUsers(messages)) turn.content.push(...point);
-    const inference = obj(body["inferenceConfig"]);
+    const inference = obj(body2["inferenceConfig"]);
     const sent = {
-      ...body,
+      ...body2,
       inferenceConfig: { ...inference, maxTokens: Math.min(m.maxOutputTokens, typeof inference["maxTokens"] === "number" ? inference["maxTokens"] : Infinity) },
       messages,
       ...n.system.trim() === "" ? {} : { system: [{ text: n.system }, ...point] },
@@ -7241,9 +7241,9 @@ function toContents(n, m) {
     const images = [];
     for (const b of msg.content) {
       if (b.type === "tool_result") {
-        const body = b.content.flatMap((c) => c.type === "text" ? [c.text] : []).join("\n");
+        const body2 = b.content.flatMap((c) => c.type === "text" ? [c.text] : []).join("\n");
         const name = names.get(b.tool_use_id) ?? "tool";
-        parts.push({ functionResponse: { name, response: { name, content: b.is_error ? `Error: ${body}` : body || "Tool executed successfully." } } });
+        parts.push({ functionResponse: { name, response: { name, content: b.is_error ? `Error: ${body2}` : body2 || "Tool executed successfully." } } });
         for (const c of b.content) if (c.type === "image") images.push(c.source.type === "base64" ? { inlineData: { mimeType: c.source.media_type, data: c.source.data } } : { text: `[image: ${c.source.url}]` });
       } else if (b.type === "text") parts.push({ text: b.text });
       else if (b.type === "image") parts.push(b.source.type === "base64" ? { inlineData: { mimeType: b.source.media_type, data: b.source.data } } : { text: `[image: ${b.source.url}]` });
@@ -7314,10 +7314,10 @@ function decoder3() {
 var gemini = {
   encode(n, p, m) {
     const tools = m.tools ? n.tools : [];
-    const { body, level } = params2({}, p, m, n.effort);
-    const generation = isObject(body["generationConfig"]) ? body["generationConfig"] : {};
+    const { body: body2, level } = params2({}, p, m, n.effort);
+    const generation = isObject(body2["generationConfig"]) ? body2["generationConfig"] : {};
     const sent = {
-      ...body,
+      ...body2,
       ...m.maxOutputTokens === void 0 ? {} : { generationConfig: { ...generation, maxOutputTokens: Math.min(m.maxOutputTokens, typeof generation["maxOutputTokens"] === "number" ? generation["maxOutputTokens"] : Infinity) } },
       contents: toContents(n, m),
       ...n.system.trim() === "" ? {} : { systemInstruction: { parts: [{ text: n.system }] } },
@@ -7357,9 +7357,9 @@ ${n.system}` } : { role: m.systemRole, content: n.system }];
     const moved = [];
     for (const b of msg.content) {
       if (b.type === "tool_result") {
-        const body = b.content.flatMap((c) => c.type === "text" ? [c.text] : []).join("\n");
+        const body2 = b.content.flatMap((c) => c.type === "text" ? [c.text] : []).join("\n");
         moved.push(...b.content.filter((c) => c.type === "image").map(toPart));
-        out.push({ role: "tool", tool_call_id: b.tool_use_id, content: b.is_error ? `Error: ${body}` : body });
+        out.push({ role: "tool", tool_call_id: b.tool_use_id, content: b.is_error ? `Error: ${body2}` : body2 });
       } else if (b.type === "text" || b.type === "image") parts.push(toPart(b));
     }
     const all = [...moved, ...parts];
@@ -7471,10 +7471,10 @@ var openai = {
     const base = {};
     if (m.maxTokensParam && m.maxOutputTokens !== void 0) base[m.maxTokensParam] = m.maxOutputTokens;
     if (!m.parallelToolCalls && tools.length > 0) base["parallel_tool_calls"] = false;
-    const { body, level } = params2(base, p, m, n.effort);
+    const { body: body2, level } = params2(base, p, m, n.effort);
     const sent = {
-      ...body,
-      ...m.maxTokensParam && m.maxOutputTokens !== void 0 ? { [m.maxTokensParam]: Math.min(m.maxOutputTokens, typeof body[m.maxTokensParam] === "number" ? body[m.maxTokensParam] : Infinity) } : {},
+      ...body2,
+      ...m.maxTokensParam && m.maxOutputTokens !== void 0 ? { [m.maxTokensParam]: Math.min(m.maxOutputTokens, typeof body2[m.maxTokensParam] === "number" ? body2[m.maxTokensParam] : Infinity) } : {},
       model: m.id,
       messages: toMessages3(n, m),
       ...tools.length > 0 ? { tools: tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.schema } })) } : {},
@@ -7528,9 +7528,9 @@ function toInput(n) {
     const moved = [];
     for (const b of msg.content) {
       if (b.type === "tool_result") {
-        const body = b.content.flatMap((c) => c.type === "text" ? [c.text] : []).join("\n");
+        const body2 = b.content.flatMap((c) => c.type === "text" ? [c.text] : []).join("\n");
         moved.push(...b.content.filter((c) => c.type === "image").map(toContent));
-        out.push({ type: "function_call_output", call_id: b.tool_use_id, output: b.is_error ? `Error: ${body}` : body });
+        out.push({ type: "function_call_output", call_id: b.tool_use_id, output: b.is_error ? `Error: ${body2}` : body2 });
       } else if (b.type === "text" || b.type === "image") parts.push(toContent(b));
     }
     const all = [...moved, ...parts];
@@ -7620,10 +7620,10 @@ var responses = {
     const tools = m.tools ? n.tools : [];
     const base = { store: false, include: ["reasoning.encrypted_content"], ...n.cacheKey === void 0 ? {} : { prompt_cache_key: n.cacheKey } };
     if (!m.parallelToolCalls && tools.length > 0) base["parallel_tool_calls"] = false;
-    const { body, level } = params2(base, p, m, n.effort);
+    const { body: body2, level } = params2(base, p, m, n.effort);
     const sent = {
-      ...body,
-      ...m.maxOutputTokens === void 0 ? {} : { max_output_tokens: Math.min(m.maxOutputTokens, typeof body["max_output_tokens"] === "number" ? body["max_output_tokens"] : Infinity) },
+      ...body2,
+      ...m.maxOutputTokens === void 0 ? {} : { max_output_tokens: Math.min(m.maxOutputTokens, typeof body2["max_output_tokens"] === "number" ? body2["max_output_tokens"] : Infinity) },
       model: m.id,
       instructions: n.system,
       input: toInput(n),
@@ -7726,9 +7726,9 @@ var UNOWNED = Object.freeze({ unowned: true });
 
 // helper/native/constraints.ts
 var object = (value) => record2(value) ? value : {};
-function nativeConstraints(body, model2, native) {
-  if (!native) return body;
-  const sent = JSON.parse(body);
+function nativeConstraints(body2, model2, native) {
+  if (!native) return body2;
+  const sent = JSON.parse(body2);
   if (!record2(sent)) throw new Error("invalid native provider body");
   const cap = (value) => Math.min(native.maxTokens ?? Infinity, typeof value === "number" ? value : model2.maxOutputTokens ?? Infinity);
   const choice = native.toolChoice;
@@ -7874,9 +7874,9 @@ function assembler(codec, provider2, ids, mint = mintToolId) {
     turn: () => turn
   };
 }
-async function errorBody({ body, cancel }) {
+async function errorBody({ body: body2, cancel }) {
   let text2 = "";
-  for await (const piece of body) if ((text2 += new TextDecoder().decode(piece)).length >= ERROR_TEXT_MAX) break;
+  for await (const piece of body2) if ((text2 += new TextDecoder().decode(piece)).length >= ERROR_TEXT_MAX) break;
   cancel();
   return text2.slice(0, ERROR_TEXT_MAX);
 }
@@ -8034,7 +8034,7 @@ async function post(r, signal) {
     return { cut: { kind: "redirect", detail: String(res.status) } };
   }
   const cancel = () => (release(), res.cancel(), ac.abort());
-  async function* body() {
+  async function* body2() {
     try {
       arm();
       for await (const chunk of res.body ?? []) {
@@ -8048,7 +8048,7 @@ async function post(r, signal) {
       cancel();
     }
   }
-  return { status: res.status, body: body(), cancel };
+  return { status: res.status, body: body2(), cancel };
 }
 
 // helper/run.ts
@@ -8161,8 +8161,8 @@ function serve(lifetime) {
   let inFlight = 0;
   const server = createServer(async (request2, response) => {
     try {
-      const path6 = request2.url?.split("?")[0];
-      if (request2.method !== "POST" || path6 !== "/step" && path6 !== "/status") {
+      const path7 = request2.url?.split("?")[0];
+      if (request2.method !== "POST" || path7 !== "/step" && path7 !== "/status") {
         response.writeHead(404).end("not found");
         return;
       }
@@ -8180,7 +8180,7 @@ function serve(lifetime) {
         response.writeHead(401).end("unauthorized");
         return;
       }
-      if (path6 === "/status") {
+      if (path7 === "/status") {
         response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ pid: process.pid, inFlight, sockets: pool.size }));
         return;
       }
@@ -8226,7 +8226,7 @@ function serve(lifetime) {
     if (dir) rmSync(dir, { recursive: true, force: true });
   };
   let stopped = false;
-  const stop = async (exitCode = 0) => {
+  const stop2 = async (exitCode = 0) => {
     if (stopped) return;
     stopped = true;
     const pending = [...active.values()];
@@ -8239,21 +8239,21 @@ function serve(lifetime) {
     process.exit(exitCode);
   };
   for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, () => {
-    void stop();
+    void stop2();
   });
   lifetime?.addEventListener("abort", () => {
-    void stop(1);
+    void stop2(1);
   }, { once: true });
   server.once("error", () => {
     cleanup();
     process.stderr.write("rice-multi-models: local helper could not listen\n");
     process.exit(2);
   });
-  withLocalSocketPath(socketPath, (path6) => server.listen(path6, () => {
+  withLocalSocketPath(socketPath, (path7) => server.listen(path7, () => {
     if (dir) chmodSync(socketPath, 384);
     setInterval(() => {
       pool.sweep();
-      if (process.ppid !== parent) stop();
+      if (process.ppid !== parent) stop2();
     }, 5e3);
     process.stdout.write(`ready ${JSON.stringify({ socketPath, token })}
 `);
@@ -8264,17 +8264,17 @@ function serve(lifetime) {
 import { request } from "node:http";
 import { once } from "node:events";
 var CLIENT_UNAVAILABLE = 3;
-async function client(socketPath, body, lifetime) {
+async function client(socketPath, body2, lifetime) {
   let delivered = false;
   let connected = false;
   let outgoing;
   try {
-    outgoing = withLocalSocketPath(socketPath, (path6) => request({ socketPath: path6, path: "/step", method: "POST", headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) } }));
+    outgoing = withLocalSocketPath(socketPath, (path7) => request({ socketPath: path7, path: "/step", method: "POST", headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body2) } }));
   } catch {
     return CLIENT_UNAVAILABLE;
   }
-  const stop = () => outgoing.destroy(new Error("client stopped"));
-  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, stop);
+  const stop2 = () => outgoing.destroy(new Error("client stopped"));
+  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, stop2);
   const timer = setTimeout(() => outgoing.destroy(new Error("local helper did not connect")), 1500);
   outgoing.once("socket", (socket) => {
     const reached = () => {
@@ -8288,9 +8288,9 @@ async function client(socketPath, body, lifetime) {
     const incoming = await new Promise((resolve2, reject) => {
       outgoing.once("response", resolve2);
       outgoing.once("error", reject);
-      lifetime?.addEventListener("abort", stop, { once: true });
-      if (lifetime?.aborted) stop();
-      else outgoing.end(body);
+      lifetime?.addEventListener("abort", stop2, { once: true });
+      if (lifetime?.aborted) stop2();
+      else outgoing.end(body2);
     });
     if (incoming.statusCode !== 200) {
       incoming.resume();
@@ -8307,8 +8307,8 @@ async function client(socketPath, body, lifetime) {
   } finally {
     clearTimeout(timer);
     outgoing.destroy();
-    lifetime?.removeEventListener("abort", stop);
-    for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.off(signal, stop);
+    lifetime?.removeEventListener("abort", stop2);
+    for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.off(signal, stop2);
   }
 }
 
@@ -8605,9 +8605,9 @@ async function installedVersion(executable, signal) {
   signal.throwIfAborted();
   const argv = executable.endsWith(".js") ? [process.execPath, executable, "--version"] : [executable, "--version"];
   const running = startProcess(argv);
-  const stop = () => running.stop();
-  signal.addEventListener("abort", stop, { once: true });
-  if (signal.aborted) stop();
+  const stop2 = () => running.stop();
+  signal.addEventListener("abort", stop2, { once: true });
+  if (signal.aborted) stop2();
   try {
     let stdout = "";
     for await (const chunk of running.child.stdout) {
@@ -8617,11 +8617,11 @@ async function installedVersion(executable, signal) {
     }
     const code2 = await running.exited;
     signal.throwIfAborted();
-    const version = /^codex-cli (\d+\.\d+\.\d+)(?:[-+][a-zA-Z0-9.-]+)?\s*$/.exec(stdout)?.[1];
-    if (code2 !== 0 || !version) throw new CatalogueFailure("cli-version-invalid");
-    return version;
+    const version2 = /^codex-cli (\d+\.\d+\.\d+)(?:[-+][a-zA-Z0-9.-]+)?\s*$/.exec(stdout)?.[1];
+    if (code2 !== 0 || !version2) throw new CatalogueFailure("cli-version-invalid");
+    return version2;
   } finally {
-    signal.removeEventListener("abort", stop);
+    signal.removeEventListener("abort", stop2);
     if (running.child.exitCode === null) running.stop();
   }
 }
@@ -8676,9 +8676,9 @@ async function discoverCodex(options = {}) {
       const info = await setupInfo(env);
       signal.throwIfAborted();
       if (!info.clis.codex) throw new CatalogueFailure("cli-unavailable");
-      const version = await installedVersion(info.clis.codex, signal);
+      const version2 = await installedVersion(info.clis.codex, signal);
       const url = new URL(options.url ?? MODELS_URL);
-      url.searchParams.set("client_version", version);
+      url.searchParams.set("client_version", version2);
       const response = await codexRequest(codexAuthFile(env), signal, (headers2) => fetch(url, { method: "GET", headers: { ...headers2, accept: "application/json" }, signal, redirect: "error", cache: "no-store" }), { env, executable: info.clis.codex });
       if (!response.ok) {
         await response.body?.cancel().catch(() => {
@@ -8969,12 +8969,12 @@ async function workerCatalogue(provider2, executable, signal) {
   const unavailable = (error) => ({ models: [], providers: [{ provider: provider2, status: "unavailable", source, error }] });
   if (!executable) return unavailable("cli-unavailable");
   let running;
-  const stop = () => running?.stop();
-  signal.addEventListener("abort", stop, { once: true });
+  const stop2 = () => running?.stop();
+  signal.addEventListener("abort", stop2, { once: true });
   try {
     signal.throwIfAborted();
     running = startProcess([executable, "models"]);
-    if (signal.aborted) stop();
+    if (signal.aborted) stop2();
     let text2 = "";
     for await (const chunk of running.child.stdout) {
       text2 += String(chunk);
@@ -8991,7 +8991,7 @@ async function workerCatalogue(provider2, executable, signal) {
   } catch {
     return unavailable(signal.aborted ? "deadline-or-cancellation" : "discovery-failed");
   } finally {
-    signal.removeEventListener("abort", stop);
+    signal.removeEventListener("abort", stop2);
     if (running?.child.exitCode === null) {
       running.stop();
       await running.exited.catch(() => {
@@ -9312,18 +9312,18 @@ async function endpointSearch(endpoint2, query, signal, request2 = fetch, enviro
   if (endpoint2.kind !== "searxng" && !key) throw new SearchUnavailable("Search endpoint requires a credential reference.");
   if (endpoint2.kind === "brave" && (query.length > 600 || query.trim().split(/\s+/).length > 75)) throw new SearchUnavailable("Query exceeds this search service limit.");
   const url = new URL(endpoint2.url), headers2 = { accept: "application/json" };
-  let body;
+  let body2;
   if (endpoint2.kind === "tavily") {
     headers2["content-type"] = "application/json";
     headers2.authorization = `Bearer ${key}`;
-    body = JSON.stringify({ query, search_depth: "basic", max_results: 10, include_answer: false, include_raw_content: false });
+    body2 = JSON.stringify({ query, search_depth: "basic", max_results: 10, include_answer: false, include_raw_content: false });
   } else {
     url.searchParams.set("q", query);
     if (endpoint2.kind === "searxng") url.searchParams.set("format", "json");
     else url.searchParams.set("count", "10");
     if (key) headers2[endpoint2.kind === "brave" ? "x-subscription-token" : "authorization"] = endpoint2.kind === "brave" ? key : `Bearer ${key}`;
   }
-  const response = await request2(url, { method: body ? "POST" : "GET", headers: headers2, ...body ? { body } : {}, redirect: "error", signal: AbortSignal.any([signal, AbortSignal.timeout(15e3)]) });
+  const response = await request2(url, { method: body2 ? "POST" : "GET", headers: headers2, ...body2 ? { body: body2 } : {}, redirect: "error", signal: AbortSignal.any([signal, AbortSignal.timeout(15e3)]) });
   const status = response.status;
   if (!response.ok) {
     const reader = response.body?.getReader();
@@ -9522,11 +9522,11 @@ async function bodyOf(response, signal) {
   if (!reader) return Buffer.alloc(0);
   const pieces = [];
   let size = 0;
-  const stop = () => {
+  const stop2 = () => {
     void reader.cancel(signal.reason).catch(() => {
     });
   };
-  signal.addEventListener("abort", stop, { once: true });
+  signal.addEventListener("abort", stop2, { once: true });
   try {
     while (true) {
       signal.throwIfAborted();
@@ -9538,7 +9538,7 @@ async function bodyOf(response, signal) {
       pieces.push(item.value);
     }
   } finally {
-    signal.removeEventListener("abort", stop);
+    signal.removeEventListener("abort", stop2);
     await reader.cancel().catch(() => {
     });
   }
@@ -9633,6 +9633,200 @@ The response body was not retrieved. Use an authenticated tool if this page requ
 }
 var runWebFetch = createWebFetch();
 
+// helper/native-compaction.ts
+import { spawn as spawn4 } from "node:child_process";
+import { createServer as createServer2 } from "node:http";
+import { mkdir as mkdir4, mkdtemp, readdir, readFile as readFile5, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
+import { tmpdir as tmpdir2 } from "node:os";
+import path6 from "node:path";
+
+// hooks/native-compaction.ts
+var TRANSCRIPT_TOKEN = "{{transcript}}";
+var SUMMARY_MARK = "RICECAPTURESUMMARYBODY";
+var INSTRUCTIONS_MARK = "ZZRICECAPTUREINSTRUCTIONSZZ";
+function deriveTemplate(capture) {
+  const { plain, custom } = capture;
+  const added = custom.length - plain.length;
+  if (added <= 0) throw new Error("the prompt with instructions is not longer than the prompt without");
+  let at = 0;
+  while (at < plain.length && plain[at] === custom[at]) at++;
+  if (custom.slice(at + added) !== plain.slice(at)) throw new Error("the instructions are not one insertion into the summary prompt");
+  const inserted = custom.slice(at, at + added);
+  const mark = inserted.indexOf(INSTRUCTIONS_MARK);
+  if (mark < 0) throw new Error("the instructions do not appear in the summary prompt");
+  const body2 = capture.summaryMessage.indexOf(SUMMARY_MARK);
+  if (body2 <= 0) throw new Error("the summary body does not appear in the summary message");
+  const tail = capture.summaryMessage.slice(body2 + SUMMARY_MARK.length);
+  return {
+    version: capture.version,
+    promptHead: plain.slice(0, at),
+    promptTail: plain.slice(at),
+    instructionsBefore: inserted.slice(0, mark),
+    instructionsAfter: inserted.slice(mark + INSTRUCTIONS_MARK.length),
+    summaryHead: capture.summaryMessage.slice(0, body2),
+    summaryTail: capture.transcriptPath ? tail.split(capture.transcriptPath).join(TRANSCRIPT_TOKEN) : tail
+  };
+}
+
+// helper/native-compaction.ts
+var RUN_LIMIT_MS = 9e4;
+var KEPT_ENV = ["PATH", "Path", "PATHEXT", "LANG", "LC_ALL", "SHELL", "TMPDIR", "TEMP", "TMP", "SystemRoot", "SystemDrive", "WINDIR", "ComSpec", "ProgramFiles", "ProgramFiles(x86)", "ProgramData", "APPDATA", "LOCALAPPDATA", "CLAUDE_CODE_GIT_BASH_PATH"];
+function claude(args) {
+  return process.platform === "win32" ? { file: "cmd.exe", args: ["/d", "/s", "/c", "claude", ...args] } : { file: "claude", args };
+}
+function textOf2(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((block) => block && typeof block === "object" && typeof block.text === "string" ? block.text : "").join("\n");
+}
+function sse(response, model2, reply) {
+  response.writeHead(200, { "content-type": "text/event-stream" });
+  const send = (event, value) => response.write(`event: ${event}
+data: ${JSON.stringify(value)}
+
+`);
+  send("message_start", { type: "message_start", message: { id: "rice-capture", type: "message", role: "assistant", model: model2, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 1 } } });
+  send("content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+  send("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: reply } });
+  send("content_block_stop", { type: "content_block_stop", index: 0 });
+  send("message_delta", { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 8 } });
+  send("message_stop", { type: "message_stop" });
+  response.end();
+}
+async function body(request2) {
+  const chunks = [];
+  for await (const chunk of request2) chunks.push(Buffer.from(chunk));
+  return Buffer.concat(chunks).toString("utf8");
+}
+function stop(child) {
+  if (child.exitCode !== null || child.signalCode !== null || child.pid === void 0) return;
+  if (process.platform === "win32") spawn4("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+  else try {
+    process.kill(-child.pid, "SIGTERM");
+  } catch {
+    child.kill("SIGTERM");
+  }
+}
+async function version(env, cwd, signal) {
+  const command = claude(["--version"]);
+  const child = spawn4(command.file, command.args, { cwd, env, signal, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+  let out = "";
+  child.stdout.on("data", (bytes) => {
+    out += bytes;
+  });
+  await new Promise((resolve2, reject) => {
+    child.once("error", reject);
+    child.once("close", (code2) => code2 === 0 ? resolve2() : reject(new Error(`claude --version exited ${code2}`)));
+  });
+  const found = /^(\S+) \(Claude Code\)/.exec(out.trim())?.[1];
+  if (!found) throw new Error("the installed claude did not report a version");
+  return found;
+}
+async function captureCompaction(outer) {
+  const root = await mkdtemp(path6.join(tmpdir2(), "rice-native-compaction-"));
+  const config = path6.join(root, ".claude");
+  const deadline = AbortSignal.timeout(RUN_LIMIT_MS);
+  const signal = outer ? AbortSignal.any([outer, deadline]) : deadline;
+  const prompts = [];
+  const server = createServer2(async (request2, response) => {
+    try {
+      const raw = await body(request2);
+      if (request2.url?.startsWith("/v1/messages/count_tokens")) {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end('{"input_tokens":10}');
+        return;
+      }
+      if (request2.method !== "POST" || !request2.url?.startsWith("/v1/messages")) {
+        response.writeHead(404);
+        response.end();
+        return;
+      }
+      const parsed = JSON.parse(raw);
+      const last = textOf2(parsed.messages?.at(-1)?.content);
+      const summary = last.includes("<analysis>") && last.includes("<summary>");
+      if (summary) prompts.push(last);
+      sse(response, parsed.model ?? "capture", summary ? `<analysis>analysis</analysis>
+<summary>
+${SUMMARY_MARK}
+</summary>` : "ok");
+    } catch {
+      response.writeHead(500);
+      response.end();
+    }
+  });
+  let child;
+  try {
+    await mkdir4(config, { recursive: true });
+    const global = JSON.stringify({ hasCompletedOnboarding: true, customApiKeyResponses: { approved: ["rice-capture-not-a-key"], rejected: [] } });
+    await Promise.all([writeFile2(path6.join(config, "settings.json"), "{}\n"), writeFile2(path6.join(config, ".claude.json"), global), writeFile2(path6.join(root, ".claude.json"), global)]);
+    await new Promise((resolve2, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve2);
+    });
+    const address2 = server.address();
+    if (address2 === null || typeof address2 === "string") throw new Error("the loopback stub did not start");
+    const env = {};
+    for (const name of KEPT_ENV) if (process.env[name] !== void 0) env[name] = process.env[name];
+    Object.assign(env, { HOME: root, USERPROFILE: root, CLAUDE_CONFIG_DIR: config, ANTHROPIC_API_KEY: "rice-capture-not-a-key", ANTHROPIC_BASE_URL: `http://127.0.0.1:${address2.port}`, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", DISABLE_AUTOUPDATER: "1" });
+    const installed = await version(env, root, signal);
+    const command = claude(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--setting-sources", "user"]);
+    child = spawn4(command.file, command.args, { cwd: root, env, signal, windowsHide: true, detached: process.platform !== "win32", stdio: ["pipe", "pipe", "ignore"] });
+    const running = child;
+    const script = ["capture one", "/compact", "capture two", `/compact ${INSTRUCTIONS_MARK}`];
+    const send = (line) => running.stdin.write(`${JSON.stringify({ type: "user", message: { role: "user", content: line } })}
+`);
+    let pending = "", results = 0;
+    running.stdout.on("data", (bytes) => {
+      pending += bytes;
+      for (let newline = pending.indexOf("\n"); newline !== -1; newline = pending.indexOf("\n")) {
+        const line = pending.slice(0, newline);
+        pending = pending.slice(newline + 1);
+        let event;
+        try {
+          event = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (event.type !== "result") continue;
+        results++;
+        if (results < script.length) send(script[results]);
+        else running.stdin.end();
+      }
+    });
+    send(script[0]);
+    await new Promise((resolve2, reject) => {
+      running.once("error", reject);
+      running.once("close", () => results === script.length ? resolve2() : reject(new Error(`the installed claude finished ${results} of ${script.length} capture steps`)));
+      signal.addEventListener("abort", () => reject(new Error("the capture was stopped")), { once: true });
+    });
+    if (prompts.length !== 2) throw new Error(`the installed claude sent ${prompts.length} summary requests, not 2`);
+    const projects = path6.join(config, "projects");
+    const files = (await readdir(projects, { recursive: true })).filter((name) => typeof name === "string" && name.endsWith(".jsonl"));
+    let summary = "";
+    for (const file of files) {
+      for (const line of (await readFile5(path6.join(projects, file), "utf8")).split("\n")) {
+        if (!line) continue;
+        let row;
+        try {
+          row = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (row.isCompactSummary && !summary) summary = textOf2(row.message?.content);
+      }
+    }
+    if (!summary) throw new Error("the installed claude wrote no compaction summary row");
+    const transcriptPath = /read the full transcript at: (.+)/.exec(summary)?.[1]?.trim() ?? "";
+    return deriveTemplate({ version: installed, plain: prompts[0], custom: prompts[1], summaryMessage: summary, transcriptPath });
+  } finally {
+    if (child) stop(child);
+    server.closeAllConnections();
+    await new Promise((resolve2) => server.close(() => resolve2()));
+    await rm3(root, { recursive: true, force: true }).catch(() => {
+    });
+  }
+}
+
 // helper/main.ts
 async function readStdin() {
   const chunks = [];
@@ -9723,6 +9917,23 @@ async function main(lifetime) {
       const result = mode === "tool-search" ? await runToolSearch(input, controller.signal) : await runWebFetch(input, controller.signal);
       process.stdout.write(`${JSON.stringify(result)}
 `);
+    } finally {
+      lifetime?.removeEventListener("abort", abort);
+      for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.off(signal, abort);
+    }
+  } else if (mode === "capture-compaction") {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, abort);
+    lifetime?.addEventListener("abort", abort, { once: true });
+    if (lifetime?.aborted) abort();
+    try {
+      process.stdout.write(`${JSON.stringify({ ok: true, template: await captureCompaction(controller.signal) })}
+`);
+    } catch (error) {
+      process.stdout.write(`${JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) })}
+`);
+      process.exitCode = 1;
     } finally {
       lifetime?.removeEventListener("abort", abort);
       for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.off(signal, abort);

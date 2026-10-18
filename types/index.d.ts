@@ -11,6 +11,8 @@ declare module 'claude-code' {
     'rice-multi-models': {
       prefs: ModelPrefs
       nativeContext: { original: string | null; applied: string | null; relinquished: boolean }
+      /** The main transcript's file, as the engine's classic hooks name it (a compaction summary cites it). */
+      transcript: { path: string | null }
     }
   }
 }

@@ -96,7 +96,7 @@ parent's own model. Entries naming a model from another family are ignored.
 | Claude Code feature | In a routed conversation |
 | --- | --- |
 | Main and subagent turns | Selected provider, with Claude Code's tools and permissions |
-| `/compact` and automatic compaction | Selected provider summary sized to the model's input bound (long tool outputs shortened); a bounded tail of recent messages and their tool pairs kept verbatim; a failed summary keeps the original transcript |
+| `/compact` and automatic compaction | Claude Code's own summary prompt (with your `/compact` instructions in its slot) over the conversation as real messages, answered by the selected provider with its reported output bound; the engine's own summary message wording, citing the transcript file; a bounded tail of recent messages and their tool pairs kept verbatim; a failed or unreadable-prompt compaction keeps the original transcript |
 | Session titles | Selected provider, local fallback, manual names kept |
 | Auto-mode permission judgments | Selected provider with your effective auto-mode policy; native rules, hooks and managed limits still decide first |
 | WebFetch | Page fetched directly, extracted by the selected provider |
@@ -109,6 +109,8 @@ parent's own model. Entries naming a model from another family are ignored.
 
 These come from what Claude Code exposes to plugins today:
 
+- **Compaction.** The engine cannot send its own summary request to another provider, so the mod sends it: once per Claude Code version it runs the installed `claude` for a few seconds in a throwaway folder against a loopback stub (no network, none of your settings or sessions) to read the engine's own summary prompt and summary-message wording, and keeps them. Nothing of that text is copied into this repository. If it cannot be read, a routed conversation is not compacted and says why. Two things the host gives a plugin no way to do: your `PreCompact` hooks do not run for a routed compaction and `PostCompact` hooks receive an empty summary, and the summary appears as a message in the conversation, not as the collapsed "Compacted" row.
+- **A long step shows a stale label.** After a compaction or a subagent spawn the engine's spinner keeps reading "Running SessionStart hooks..." for the whole next routed step, which can take minutes on a large context. The session is working; the label is the engine's.
 - **Auto-mode handoff review.** When a subagent finishes while its parent is in
   auto mode, Claude Code reviews the report with its own classifier, which uses
   Claude. If Claude is unavailable the report is still delivered, with a note.

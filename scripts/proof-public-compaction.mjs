@@ -25,17 +25,19 @@ try {
   on('state.get', {plugin:'rice-multi-models',key:'prefs'}, () => ({value:{value:{effort:null,transport:'auto',helper:'once',workers:'read'},version:0}}))
   on('process.run', async ($, e, next) => {
     if (!e.argv.includes('discover')) return next(e)
-    const metadata={contextWindow:500000,maxContextWindow:500000,inputTokenLimit:null,outputTokenLimit:8192,autoCompactTokenLimit:null,inputModalities:['text'],reasoningEfforts:null,tools:null,parallelToolCalls:null}
+    const metadata={contextWindow:500000,maxContextWindow:500000,inputTokenLimit:null,outputTokenLimit:32768,autoCompactTokenLimit:null,inputModalities:['text'],reasoningEfforts:null,tools:null,parallelToolCalls:null}
     return {value:{exitCode:0,stdout:JSON.stringify({models:[{model:'codex/owned-public',label:'Owned',execution:'native provider',source:'owned fixture',observedAt:1800000000000,metadata}],providers:[{provider:'codex',status:'fresh',source:'owned fixture'}]}),stderr:'',isStdoutTruncated:false,isStderrTruncated:false}}
   })
   on('process.spawn', async function* ($, e, next) {
     if (!e.argv.includes('once')) return yield* next(e)
     const wire=JSON.parse(e.input || '{}')
     const rows=await $.fs.exists(${JSON.stringify(evidence)})?JSON.parse(await $.fs.read(${JSON.stringify(evidence)})):[]
-    const summary=wire.req.system.startsWith('Create a precise continuation summary')
-    rows.push({target:wire.req.target,who:wire.req.who,summary,prompt:JSON.stringify(wire.req.transcript),maxTokens:wire.req.native?.maxTokens})
+    // The engine's own summary prompt asks for the two blocks its answer is read by.
+    const last=JSON.stringify(wire.req.transcript.at(-1))
+    const summary=last.includes('<analysis>')&&last.includes('<summary>')
+    rows.push({target:wire.req.target,who:wire.req.who,summary,prompt:JSON.stringify(wire.req.transcript),messages:wire.req.transcript.length,last,system:wire.req.system.slice(0,200),maxTokens:wire.req.native?.maxTokens})
     await $.fs.write(${JSON.stringify(evidence)},JSON.stringify(rows))
-    const text=summary?'OWNED_PRODUCT_SUMMARY: Preserve /repo/task.ts; approval remains pending.':'OWNED_PRODUCT_ANSWER'
+    const text=summary?'<analysis>owned analysis</analysis>\\n<summary>\\nOWNED_PRODUCT_SUMMARY: Preserve /repo/task.ts; approval remains pending.\\n</summary>':'OWNED_PRODUCT_ANSWER'
     for (const event of [{type:'text',text},{type:'usage',in:10000,out:20,cacheRead:0,cacheWrite:0},{type:'stop',reason:'end_turn'}]) yield {stream:'stdout',text:JSON.stringify(event)+'\\n'}
     return {value:{code:0,signal:null}}
   })
@@ -67,11 +69,22 @@ try {
   const afterCompact = JSON.parse(readFileSync(evidence, 'utf8'))
   const summary = afterCompact.find(row => row.summary)
   assert.equal(summary?.target, 'codex/owned-public')
-  assert.ok(summary.prompt.includes('publication approval gate'))
-  assert.ok(summary.prompt.includes('/repo/task.ts'))
+  // The request is the engine's own: the conversation as real messages, then its prompt with the person's instructions in its slot.
+  assert.ok(summary.messages >= 2, 'the conversation is sent as messages, not as one JSON document')
+  assert.ok(summary.prompt.includes('/repo/task.ts'), 'the conversation reaches the summarizer')
+  assert.ok(summary.last.includes('CRITICAL: Respond with TEXT ONLY'), 'the engine\'s own summary prompt is used')
+  assert.ok(summary.last.includes('Additional Instructions:') && summary.last.includes('Retain the publication approval gate'), 'the /compact instructions go in the engine\'s slot')
+  assert.ok(!summary.prompt.includes('continuationInstructions'), 'no mod-made JSON wrapper')
+  assert.equal(summary.maxTokens, 32768, 'the summary may use the output bound the provider reported, not a mod-made cap')
   await run('manual-resume', manual, ['--resume', manual], 'Continue the pending work.')
   const afterResume = JSON.parse(readFileSync(evidence, 'utf8'))
-  assert.ok(afterResume.at(-1).prompt.includes('OWNED_PRODUCT_SUMMARY'), 'native resume consumes production summary')
+  const resumed = afterResume.at(-1).prompt
+  assert.ok(resumed.includes('OWNED_PRODUCT_SUMMARY'), 'native resume consumes production summary')
+  assert.ok(!resumed.includes('<analysis>') && !resumed.includes('owned analysis'), 'the analysis block is not kept')
+  assert.ok(resumed.includes('This session is being continued from a previous conversation'), 'the summary message is the engine\'s own wording')
+  assert.ok(/read the full transcript at: \S+\.jsonl/.test(resumed), 'it cites the session transcript file')
+  assert.ok(resumed.includes('Continue the conversation from where it left off'), 'it carries the engine\'s continuation directive')
+  assert.ok(!resumed.includes('The conversation was compacted. Continue from this summary'), 'the old mod-made wrapper is gone')
   env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = '1'
   const automatic = randomUUID()
   await run('auto-seed', automatic, ['--session-id', automatic], 'Preserve the approval gate. ' + 'OWNED_HISTORY '.repeat(2500))

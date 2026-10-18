@@ -16,7 +16,10 @@ import { collectText, helperStep, preferSession, readyLine, sessionHelper, setSe
 import type { HelperPort } from './backend'
 import { carryFor, remember, withCarry } from './carry'
 import type { Reasoning } from './carry'
-import { compactionPlan, compactedMessages, COMPACTION_SYSTEM, withUserText } from './compact'
+import { retainedTail, withUserText } from './compact'
+import type { CompactMessage } from './compact'
+import { compactionPrompt, fitTranscript, isTemplate, summaryBody, summaryMessage } from './native-compaction'
+import type { CompactionTemplate } from './native-compaction'
 import { createMemory } from './memory'
 import { CATALOG_URL, kindCounts, liveIds, opencodeProvider, TIERS } from './opencode'
 import type { Tier } from './opencode'
@@ -66,6 +69,8 @@ const WORKERS: Readonly<Record<string, { label: string; ask: string }>> = {
 }
 const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 const prefsAtom = atom({ plugin: 'rice-multi-models', key: 'prefs' } as const, { effort: null, transport: 'auto', helper: 'session', workers: 'read' })
+/** The main transcript's file, as the engine's classic hooks name it; a compaction cites it in its summary message. */
+const transcriptAtom = atom({ plugin: 'rice-multi-models', key: 'transcript' } as const, { path: null })
 
 const memory = createMemory()
 const described = new Map<string, Described>()
@@ -106,6 +111,8 @@ let declared: Loaded = emptyLoaded(CONFIG_FILE)
 let loaded: Loaded = declared
 let catalogue: ModelCatalogue = { models: [], providers: [] }
 let nativeContextSync = Promise.resolve()
+let compactionTemplate: Promise<CompactionTemplate> | undefined
+let seenTranscriptPath: string | undefined
 
 async function auxiliaryOwner($: EngineInterface) {
   // Public model.fork is explicitly a fork of the main thread's last sent
@@ -740,6 +747,42 @@ async function installedClaude($: EngineInterface, args: readonly string[], opti
 }
 
 /**
+ * Claude Code's own compaction prompt and summary message, read from the installed claude by the helper once
+ * per running version and kept in the plugin's store. Rejects, naming why, when they cannot be read: a routed
+ * conversation is then not compacted rather than compacted with text this mod made up.
+ */
+function nativeCompaction($: EngineInterface): Promise<CompactionTemplate> {
+  compactionTemplate ??= (async () => {
+    const version = (await $.session.version()).version
+    const key = `native-compaction:${version}`
+    const cached = await $.store.get(key)
+    if (isTemplate(cached)) return cached
+    if (!runtime.executable || runtime.error) throw new Error(runtime.error || 'the Node.js helper is unavailable; /rice-models setup repair')
+    const ran = await $.process.run([runtime.executable, helperFile($.plugin.root), 'capture-compaction'], { timeoutMs: 100_000 })
+    let result: { ok?: boolean; template?: unknown; error?: unknown } = {}
+    try { result = JSON.parse(ran.stdout) as typeof result } catch { /* reported below */ }
+    if (ran.exitCode !== 0 || result.ok !== true || !isTemplate(result.template)) throw new Error(typeof result.error === 'string' ? result.error : 'the helper could not capture it')
+    await $.store.set(key, result.template)
+    if (result.template.version !== version) $.ui.log(`${PLUGIN}: compaction text comes from the installed claude ${result.template.version}; this session runs ${version}`, { to: 'debug' })
+    return result.template
+  })()
+  compactionTemplate.catch(() => { compactionTemplate = undefined })
+  return compactionTemplate
+}
+
+/** The main transcript's file path, from the latest classic hook that named it; kept across a plugin reload. */
+async function transcriptPath($: EngineInterface): Promise<string | undefined> {
+  return seenTranscriptPath ?? (await read($, transcriptAtom)).path ?? undefined
+}
+
+/** Remembers the transcript path a main-conversation classic hook names. */
+async function noteTranscript($: EngineInterface, e: { transcript_path: string; agent_id?: string }): Promise<void> {
+  if (e.agent_id !== undefined || !e.transcript_path || e.transcript_path === seenTranscriptPath) return
+  seenTranscriptPath = e.transcript_path
+  await update($, transcriptAtom, () => ({ path: e.transcript_path }))
+}
+
+/**
  * The native auto-mode defaults are built into each Claude Code version, not read
  * from settings. They are cached per version, so a background update of the
  * installed CLI does not break a session still running the previous version.
@@ -837,7 +880,7 @@ async function statusText($: EngineInterface): Promise<string> {
     `Discovery: ${catalogue.providers.map(provider => `${provider.provider}: ${provider.status}${provider.error ? ` (${provider.error})` : ''}`).join('; ')}`,
     `Primary context (${context.model}): active context ${context.activeContextWindow ?? 'unknown'}, maximum context ${context.maxContextWindow ?? 'unknown'}, reported input ${context.inputTokenLimit ?? 'unknown'}, effective input bound ${context.effectiveInputBound ?? 'unknown'}, native window ${context.nativeWindow}; override ${context.override}.`,
     `Native context scope: ${context.scope}. Numeric per-model registration is unsupported.`,
-    'Compaction: the supported session.compact hook summarizes with the selected conversation provider. Failed or incomplete summaries retain the original transcript.',
+    'Compaction: the supported session.compact hook sends Claude Code\'s own summary prompt (read from the installed claude) over the conversation to the selected provider and writes the engine\'s own summary message. Failed or incomplete summaries retain the original transcript.',
     `tool schemas: generated for ${STAMP.engineVersion}${version.version !== STAMP.engineVersion ? ` (this is ${version.version}: regenerate with scripts/gen-schemas.ts)` : ''}`,
     limitsText() ? `ChatGPT limits: ${limitsText()}` : 'ChatGPT limits: shown after the first WebSocket request',
     lastStep ? `last step: ${lastStep.model} for ${lastStep.who}, ${lastStep.ms} ms over ${lastStep.transport}` : 'no routed step yet',
@@ -1112,6 +1155,7 @@ export const register: Register = on => {
   })
 
   on('classic.UserPromptSubmit', async ($, e, next) => {
+    await noteTranscript($, e).catch(() => {})
     const result = await next(e)
     if (result.block || result.preventContinuation || e.session_title || result.sessionTitle || e.source && e.source !== 'user' && e.source !== 'sdk') return result
     const model = await $.session.model()
@@ -1135,6 +1179,11 @@ export const register: Register = on => {
     const result = next.called ? {} : await next(e)
     return e.session_title || result.sessionTitle ? result : { ...result, sessionTitle: fallbackTitle(e.prompt) }
   })
+  // Startup, resume and every compaction name the transcript file; observe only.
+  on('classic.SessionStart', async ($, e, next) => {
+    await noteTranscript($, e).catch(() => {})
+    return next(e)
+  }).catch(($, e, next) => next.called ? {} : next(e))
   on('session.start', async ($, e, next) => {
     permissionContextNonce = crypto.randomUUID()
     await $.env.set('RICE_MULTI_MODELS_PERMISSION_CONTEXT_NONCE', permissionContextNonce)
@@ -1154,7 +1203,11 @@ export const register: Register = on => {
     // is pending so its settings change cannot invalidate one.
     let routedMain = false
     try { routedMain = isRouted(await $.session.model()) } catch {}
-    if (routedFamilies().length || routedMain || Object.keys(loaded.config?.providers ?? {}).length) void nativePermissionDefaults($).catch(() => {})
+    if (routedFamilies().length || routedMain || Object.keys(loaded.config?.providers ?? {}).length) {
+      void nativePermissionDefaults($).catch(() => {})
+      // Ready before the first compaction; a one-shot run reads it only when it compacts.
+      if (e.isInteractive) void nativeCompaction($).catch(() => {})
+    }
     preferSession((await read($, prefsAtom)).helper !== 'once')
     await ensureHelper($)
     const rows = routedRows()
@@ -1178,6 +1231,7 @@ export const register: Register = on => {
   }).catch(() => ({ permissionDecision: 'deny', permissionDecisionReason: `${PLUGIN}: model-switch context check failed; current model and transcript retained` }))
 
   on('classic.PostModelSwitch', async ($, e, next) => {
+    await noteTranscript($, e).catch(() => {})
     const switched = await next(e)
     await syncNativeContext($)
     return switched
@@ -1366,32 +1420,57 @@ export const register: Register = on => {
     if (model === undefined) return { skip: `${PLUGIN}: subagent active model is unknown; compaction was not attempted, original transcript retained. Its next observed turn establishes the model after reload.` }
     if (!isRouted(model)) return next(e)
     next.signal.throwIfAborted()
-    const outputBound = activeContext(model)?.outputTokenLimit
-    const maxTokens = outputBound && outputBound > 0 ? Math.min(8192, outputBound) : 8192
-    // Size the summary request and the verbatim tail from the model's input
-    // bound, so a long conversation always shrinks. The request JSON-encodes the
-    // prompt once more; halve the prompt bound until the guard accepts it.
-    const budget = requestBudget(model)
-    const session = await $.session.id()
-    let promptShare = 0.7
-    let plan: ReturnType<typeof compactionPlan> | undefined
-    let req: StepRequest | undefined
-    for (let attempt = 0; attempt < 4; attempt++) {
-      try {
-        plan = compactionPlan(e.messages, e.instructions, budget === null ? {} : { promptChars: Math.floor(budget * promptShare * 3.5), retainChars: Math.floor(budget * 0.15 * 3.5) })
-      } catch (error) {
-        return { skip: `${PLUGIN}: ${error instanceof Error ? error.message : String(error)}; original transcript retained` }
-      }
-      req = { target: model, system: COMPACTION_SYSTEM, tools: [], transcript: [{ role: 'user', content: plan.prompt }], who: e.agentId ?? 'main', session, native: { maxTokens } }
-      if (!budgetError(req)) break
-      promptShare /= 2
+    const who = e.agentId ?? 'main'
+    // The engine cannot send its own summary request to another provider, so this hook sends it: the engine's
+    // prompt and summary format (learned from the installed claude), over the conversation as the engine holds
+    // it, to the conversation's own provider. Nothing is sent to Claude, and a failure keeps the transcript.
+    let template: CompactionTemplate
+    try {
+      template = await nativeCompaction($)
+    } catch (error) {
+      return { skip: `${PLUGIN}: Claude Code's own compaction text could not be read from the installed claude (${error instanceof Error ? error.message : String(error)}); ${model} was not asked to compact, original transcript retained` }
     }
-    if (!plan || !req || budgetError(req)) return { skip: `${PLUGIN}: the summary request does not fit ${model}'s input bound; original transcript retained` }
-    const answer = await complete($, req, undefined, true)
+    next.signal.throwIfAborted()
+    const api = await $.session.messages({ as: 'api', ...(e.agentId === undefined ? {} : { agentId: e.agentId }) })
+    if (!Array.isArray(api)) return { skip: `${PLUGIN}: the conversation of ${who} is unreadable (${api.deny}); original transcript retained` }
+    const budget = requestBudget(model)
+    let retained: readonly CompactMessage[]
+    try {
+      retained = retainedTail(e.messages, budget === null ? {} : { retainChars: Math.floor(budget * 0.15 * 3.5) })
+    } catch (error) {
+      return { skip: `${PLUGIN}: ${error instanceof Error ? error.message : String(error)}; original transcript retained` }
+    }
+    const outputBound = activeContext(model)?.outputTokenLimit
+    const prefs = await read($, prefsAtom)
+    const effort = prefs.effort ?? (model.startsWith('codex/') ? codexDefaults.effort : undefined)
+    const system = rewriteMain((await $.prompt.compose({ model })).sections, identityLine(targetOf(model)?.model ?? model, targetOf(model)?.label ?? 'codex'))
+    const prompt = compactionPrompt(template, e.instructions)
+    const session = await $.session.id()
+    // Fit the conversation to the model's input bound by shortening tool outputs, then leaving out the oldest
+    // exchanges; halve the share until the local guard accepts the request.
+    let share = 1
+    let request: StepRequest | undefined
+    let omitted = 0
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const room = budget === null ? Infinity : Math.floor(budget * 0.9 * 3.5 * share) - system.length - prompt.length
+      const fitted = fitTranscript(api as ApiMessage[], Math.max(room, 0))
+      omitted = fitted.omitted
+      request = { target: model, system, tools: [], transcript: withUserText(fitted.messages, prompt), who, session, ...(effort === undefined ? {} : { effort }), ...(outputBound && outputBound > 0 ? { native: { maxTokens: outputBound } } : {}) }
+      if (!budgetError(request)) break
+      request = undefined
+      share /= 2
+    }
+    if (!request) return { skip: `${PLUGIN}: the summary request does not fit ${model}'s input bound; original transcript retained` }
+    if (omitted) $.ui.log(`${PLUGIN}: ${omitted} of the oldest messages were left out of the summary request to fit ${model}'s input bound`, { to: 'debug' })
+    const answer = await complete($, request, undefined, true)
     next.signal.throwIfAborted()
     if (!answer.isAnswered) return { skip: `${PLUGIN}: ${model} compaction failed (${answer.reason}); original transcript retained` }
-    usageAnchors.delete(e.agentId ?? 'main')
-    return { messages: compactedMessages(answer.text, plan.retained) }
+    const body = summaryBody(answer.text)
+    if (body === undefined) return { skip: `${PLUGIN}: ${model} returned no summary; original transcript retained` }
+    usageAnchors.delete(who)
+    // The summary message is the engine's own wording; a subagent's transcript file is not known, so its line is left out.
+    const cite = e.agentId === undefined ? await transcriptPath($) : undefined
+    return { messages: [{ role: 'user' as const, text: summaryMessage(template, body, cite), toolUses: [] }, ...retained] }
   }).catch(() => ({ skip: `${PLUGIN}: compaction routing check failed; original transcript retained` }))
 
 

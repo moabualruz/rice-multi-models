@@ -1,6 +1,7 @@
 import { beforeAll, expect, mock, test } from 'bun:test'
 import { fileURLToPath } from 'node:url'
 import { unknownMetadata, type ModelCatalogue } from '../hooks/catalogue'
+import { deriveTemplate, INSTRUCTIONS_MARK, SUMMARY_MARK } from '../hooks/native-compaction'
 
 const root = fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]$/, '')
 const helperBranches: string[] = []
@@ -67,6 +68,15 @@ let approvalAskCount = 0
 let agyInstalled = false
 let emitLimits = false
 let completionStop = 'end_turn'
+// The engine's compaction text as the helper would capture it, stood in for by an owned fixture of the same structure.
+const FIXTURE_PLAIN = 'FIXTURE SUMMARY PROMPT <analysis> <summary>\n\nREMINDER: text only.'
+const fixtureTemplate = deriveTemplate({
+  version: '2.1.296', plain: FIXTURE_PLAIN, custom: FIXTURE_PLAIN.replace('\n\nREMINDER', `\n\nAdditional Instructions:\n${INSTRUCTIONS_MARK}\n\nREMINDER`),
+  summaryMessage: `FIXTURE CONTINUED SESSION\n\nSummary:\n${SUMMARY_MARK}\n\nRead the full transcript at: /fixture/transcript.jsonl\nResume directly.`, transcriptPath: '/fixture/transcript.jsonl',
+})
+let captureFails = false
+let completionText = 'fixture response'
+let captures = 0
 const reportedLimits = { plan: 'fixture-subscription', windows: [{ label: 'weekly', usedPercent: 97, resetsAt: 1_800_000_100_000 }] }
 const environment = new Map<string, string>([['HOME', '/fixture-home']])
 const sessionState = new Map<string, unknown>()
@@ -94,6 +104,10 @@ const host: any = {
         if (discoveryUnavailable) return { exitCode: 1, stdout: '', stderr: 'fixture discovery unavailable' }
         return { exitCode: 0, stdout: JSON.stringify(discoveryOverride ?? freshCatalogue(input.configText)), stderr: '' }
       }
+      if (argv[2] === 'capture-compaction') {
+        captures++
+        return captureFails ? { exitCode: 1, stdout: JSON.stringify({ ok: false, error: 'fixture capture failure' }), stderr: '' } : { exitCode: 0, stdout: JSON.stringify({ ok: true, template: fixtureTemplate }), stderr: '' }
+      }
       if (argv[0] === 'node') return { exitCode: 0, stdout: JSON.stringify({ executable: '/fixture/node', version: '22.20.0' }), stderr: '' }
       if (argv[2] === 'doctor') return { exitCode: 0, stdout: JSON.stringify({ node: { executable: '/fixture/node', version: '22.20.0', supported: true }, platform: 'linux', home: '/fixture-home', configDir: '/fixture-home/.claude', codexHome: '/fixture-home/.codex', opencodeAuthFile: '/fixture-home/opencode-auth.json', auth: { codex: false, opencode: false }, clis: agyInstalled ? { agy: '/fixture/agy' } : {} }), stderr: '' }
       if (argv[2] === 'sync-picker') return { exitCode: 0, stdout: JSON.stringify({ ok: true, changed: false, count: 1, path: '/fixture-home/.claude/settings.json' }), stderr: '' }
@@ -103,7 +117,7 @@ const host: any = {
       if (!options.input) throw new Error('Fixture forbids helper startup')
       wires.push(JSON.parse(options.input))
       if (emitLimits) yield { stream: 'stdout', text: JSON.stringify({ type: 'limits', limits: reportedLimits }) + '\n' }
-      yield { stream: 'stdout', text: JSON.stringify({ type: 'text', text: 'fixture response' }) + '\n' + JSON.stringify({ type: 'stop', reason: completionStop }) + '\n' }
+      yield { stream: 'stdout', text: JSON.stringify({ type: 'text', text: completionText }) + '\n' + JSON.stringify({ type: 'stop', reason: completionStop }) + '\n' }
       return { code: 0 }
     },
   },
@@ -353,6 +367,34 @@ test('oversized complete and fork requests refuse without helper dispatch or nat
   }
 })
 
+test('compaction is refused, visibly and with the transcript kept, when the engine\'s own text cannot be read', async () => {
+  const sessionModel = host.session.model
+  host.session.model = async () => 'codex/gpt-6.1-sol'
+  // First in the file on purpose: the template is kept in memory for the session once it has been read.
+  const transcript = [{ role: 'user', text: 'Approval still pending', toolUses: [], handle: 'original' }]
+  let nativeCalls = 0
+  const before = wires.length
+  try {
+    captureFails = true
+    const refused = await hook('session.compact')(host, { trigger: 'auto', messages: transcript }, async () => { nativeCalls++; return {} })
+    expect(refused.messages).toBeUndefined()
+    expect(refused.skip).toContain('fixture capture failure')
+    expect(refused.skip).toContain('original transcript retained')
+    expect(wires.length).toBe(before)
+    expect(nativeCalls).toBe(0)
+    // A failed capture is retried at the next compaction, then kept per Claude Code version.
+    captureFails = false
+    const used = captures
+    const first = await hook('session.compact')(host, { trigger: 'auto', messages: transcript }, async () => { nativeCalls++; return {} })
+    expect(first.messages[0].text).toContain('FIXTURE CONTINUED SESSION')
+    expect(captures).toBe(used + 1)
+    expect(store.get('native-compaction:2.1.296')).toEqual(fixtureTemplate)
+    await hook('session.compact')(host, { trigger: 'auto', messages: transcript }, async () => { nativeCalls++; return {} })
+    expect(captures).toBe(used + 1)
+    expect(nativeCalls).toBe(0)
+  } finally { captureFails = false; host.session.model = sessionModel }
+})
+
 test('routed compaction uses its selected provider for every native trigger and retains recent handles', async () => {
   const sessionModel = host.session.model
   host.session.model = async () => 'codex/gpt-6.1-sol'
@@ -366,13 +408,40 @@ test('routed compaction uses its selected provider for every native trigger and 
       expect(result.messages[0].text).toContain('fixture response')
       expect(result.messages[1]).toBe(transcript[2])
       expect(wires.length).toBe(before + 1)
-      expect(wires.at(-1).req).toMatchObject({ target: 'codex/gpt-6.1-sol', tools: [], who: 'main', native: { maxTokens: 8192 } })
-      expect(wires.at(-1).req.transcript[0].content).toContain('retain constraints')
-      expect(wires.at(-1).req.transcript[0].content).not.toContain('old-user')
+      expect(wires.at(-1).req).toMatchObject({ target: 'codex/gpt-6.1-sol', tools: [], who: 'main' })
+      // The request is the conversation as the engine holds it, then the engine's own prompt with the instructions in its slot.
+      const sent = JSON.stringify(wires.at(-1).req.transcript)
+      expect(sent).toContain('fixture conversation')
+      expect(sent).toContain('FIXTURE SUMMARY PROMPT')
+      expect(sent).toContain('Additional Instructions:\\nretain constraints')
+      expect(sent).not.toContain('old-user')
+      expect(result.messages[0].text).toContain('FIXTURE CONTINUED SESSION')
     }
     expect(nativeCalls).toBe(0)
     expect(JSON.stringify(transcript)).toBe(snapshot)
   } finally { host.session.model = sessionModel }
+})
+
+test('the summary keeps only the summary block, in the engine\'s wording, and cites the transcript for the main conversation alone', async () => {
+  const sessionModel = host.session.model
+  host.session.model = async () => 'codex/gpt-6.1-sol'
+  const transcript = [{ role: 'user', text: 'Goal', toolUses: [], handle: 'a' }, { role: 'assistant', text: 'Done', toolUses: [], handle: 'b' }, { role: 'user', text: 'Next', toolUses: [], handle: 'c' }]
+  try {
+    completionText = '<analysis>private reasoning</analysis>\n<summary>\n1. Primary Request: ship it\n</summary>'
+    // Startup, resume and compaction name the transcript file to the classic SessionStart hook.
+    await hook('classic.SessionStart')(host, { source: 'resume', transcript_path: '/fixture/session.jsonl' }, async () => ({}))
+    const main = await hook('session.compact')(host, { trigger: 'manual', messages: transcript }, async () => ({}))
+    expect(main.messages[0].text).toBe('FIXTURE CONTINUED SESSION\n\nSummary:\n1. Primary Request: ship it\n\nRead the full transcript at: /fixture/session.jsonl\nResume directly.')
+    expect(main.messages[0].text).not.toContain('private reasoning')
+    expect(main.messages[1]).toBe(transcript[2])
+    const child = await step('general-purpose', 'codex/gpt-6.1-sol')
+    const sub = await hook('session.compact')(host, { agentId: child.id, trigger: 'auto', messages: [{ role: 'user', text: 'Child task', toolUses: [] }] }, async () => ({}))
+    expect(sub.messages[0].text).toBe('FIXTURE CONTINUED SESSION\n\nSummary:\n1. Primary Request: ship it\n\nResume directly.')
+    completionText = '<analysis>only reasoning, no summary</analysis>'
+    const empty = await hook('session.compact')(host, { trigger: 'manual', messages: transcript }, async () => ({}))
+    expect(empty.messages).toBeUndefined()
+    expect(empty.skip).toContain('returned no summary')
+  } finally { completionText = 'fixture response'; host.session.model = sessionModel }
 })
 
 test('truncated or refused compaction never replaces history or falls back to Claude', async () => {

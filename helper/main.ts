@@ -14,6 +14,7 @@ import { discover } from './discover.ts'
 import { searchConfiguration } from './search-config.ts'
 import { runToolSearch } from './search/tool-search.ts'
 import { runWebFetch } from './web-fetch.ts'
+import { captureCompaction } from './native-compaction.ts'
 
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = []
@@ -94,6 +95,22 @@ export async function main(lifetime?: AbortSignal): Promise<void> {
       const input = JSON.parse(await readStdin())
       const result = mode === 'tool-search' ? await runToolSearch(input, controller.signal) : await runWebFetch(input, controller.signal)
       process.stdout.write(`${JSON.stringify(result)}\n`)
+    } finally {
+      lifetime?.removeEventListener('abort', abort)
+      for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.off(signal, abort)
+    }
+  } else if (mode === 'capture-compaction') {
+    // The installed claude's own compaction text; the caller caches it per version. Ending the session stops it.
+    const controller = new AbortController()
+    const abort = () => controller.abort()
+    for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.on(signal, abort)
+    lifetime?.addEventListener('abort', abort, { once: true })
+    if (lifetime?.aborted) abort()
+    try {
+      process.stdout.write(`${JSON.stringify({ ok: true, template: await captureCompaction(controller.signal) })}\n`)
+    } catch (error) {
+      process.stdout.write(`${JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) })}\n`)
+      process.exitCode = 1
     } finally {
       lifetime?.removeEventListener('abort', abort)
       for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.off(signal, abort)

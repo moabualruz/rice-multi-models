@@ -47,7 +47,7 @@ test('family guidance keeps each conversation in its family and names explicit n
 test('native window explanations distinguish primary integration from per-model registration without changing report keys', () => {
   const report = JSON.parse(modelsReport([], [], { status: 'unavailable', windows: [] }))
   expect(Object.keys(report)).toEqual(['models', 'discovery', 'providerApprovals', 'codexLimits', 'compaction', 'nativeContextRegistration'])
-  expect(report.compaction).toMatchObject({ routed: 'session.compact', customSummarization: true, providerFallback: false, nativeClaude: 'unchanged' })
+  expect(report.compaction).toMatchObject({ routed: 'session.compact', customSummarization: false, providerFallback: false, nativeClaude: 'unchanged' })
   expect(report.compaction.modelSwitchGuard).toContain('not proof of request fit')
   for (const explanation of [report.nativeContextRegistration]) {
     expect(explanation).toContain('main routed native-provider model')
