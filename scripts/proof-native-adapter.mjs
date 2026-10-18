@@ -29,8 +29,6 @@ const plugin = join(fixture, 'plugin space'), configDir = join(fixture, '.claude
 const observations = [], denied = []
 let phase = 'setup', mainCalls = 0
 const protocols = ['openai', 'responses', 'anthropic', 'gemini', 'bedrock']
-// The first line of the routed compaction system prompt (hooks/compact.ts).
-const COMPACTION_MARK = 'Create a precise continuation summary'
 const CHILDREN_PROMPT = 'Use both owned child agents, then report completion.'
 const FAMILY_PROMPT = 'Use two owned subagents, then report completion.'
 const search = createServer((request, response) => {
@@ -53,7 +51,8 @@ const provider = createServer(async (request, response) => {
     response.end(JSON.stringify(family === 'gemini' ? { models: ['main', 'child'].map(id => ({ name: 'models/' + id, inputTokenLimit: 495904, outputTokenLimit: 4096 })) } : { data: ['main', 'child'].map(id => ({ id, ...(family === 'anthropic' ? { max_input_tokens: 495904, max_tokens: 4096 } : {}) })) }))
     return
   }
-  const compaction = text.includes(COMPACTION_MARK)
+  // The engine's own summary prompt, which the routed compaction sends, asks for the two blocks its answer is read by.
+  const compaction = text.includes('<analysis>') && text.includes('<summary>')
   if (protocols.includes(family) && family !== 'openai') {
     observations.push({ phase, kind: 'provider', family, model: body.model ?? 'main', path: request.url.split('?')[0], compaction, nativeCredentials: !!(request.headers.authorization && request.headers.authorization !== 'Bearer owned-bedrock-fixture' || request.headers['x-api-key'] || request.headers['x-goog-api-key']) })
     if (family === 'bedrock') { response.setHeader('content-type', 'application/vnd.amazon.eventstream'); response.end(readFileSync(join(root, 'helper/styx/codecs/fixtures/bedrock/text.eventstream'))); return }
