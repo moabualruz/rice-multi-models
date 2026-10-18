@@ -14,12 +14,13 @@
     "test:routing": "node scripts/proof-native-routing.mjs",
     "test:protocols": "node scripts/proof-native-adapter.mjs protocols",
     "test:compaction": "node scripts/proof-public-compaction.mjs",
+    "test:tools": "node scripts/proof-public-tools.mjs",
     "test:permissions": "node scripts/proof-public-permissions.mjs",
     "test:permission-mode": "node scripts/proof-public-permission-mode.mjs",
     "test:search": "node scripts/proof-public-web-search.mjs && node scripts/proof-public-web-fetch.mjs",
     "test:evaluators": "node scripts/proof-public-evaluator-sources.mjs && node scripts/proof-public-evaluators.mjs",
     "test:titles": "node scripts/proof-public-titles.mjs",
-    "check": "bun run test && bun run typecheck && npm run typecheck:hooks && npm run build:check && npm run test:node && npm run test:install && npm run test:native && npm run test:routing && npm run test:phases && npm run test:compaction && npm run test:permissions && npm run test:permission-mode && npm run test:search && npm run test:evaluators && npm run test:titles && git diff --check",
+    "check": "bun run test && bun run typecheck && npm run typecheck:hooks && npm run build:check && npm run test:node && npm run test:install && npm run test:native && npm run test:routing && npm run test:phases && npm run test:compaction && npm run test:tools && npm run test:permissions && npm run test:permission-mode && npm run test:search && npm run test:evaluators && npm run test:titles && git diff --check",
     "test:phases": "node scripts/proof-native-adapter.mjs"
   },
   "devDependencies": {
