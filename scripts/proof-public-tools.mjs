@@ -49,7 +49,9 @@ try {
   const first = isolated('native')
   writeFileSync(join(first.config, 'agents', 'owned-proof-agent.md'), `---\nname: owned-proof-agent\ndescription: Owned proof agent\n---\n\n${AGENT_BODY}\n\n`)
   const requests = []
-  let listed, spawned = false
+  let listed, spawned = false, started
+  // The agent types come from the engine's start event, which can reach this process after its first request.
+  const start = new Promise(resolve => { started = resolve })
   const server = createServer(async (request, response) => {
     let raw = ''; for await (const bytes of request) raw += bytes
     if (request.url.startsWith('/v1/messages/count_tokens')) { response.writeHead(200, { 'content-type': 'application/json' }); return response.end('{"input_tokens":10}') }
@@ -58,6 +60,7 @@ try {
     const opening = textOf(body.messages[0]?.content)
     const task = /OWNED_PROOF_TASK (\S+) (\S+)/.exec(opening)
     requests.push({ body, type: task?.[1], background: task?.[2] === 'background', main: opening.includes('OWNED_PROOF_MAIN') && !task })
+    if (!task && !spawned) await Promise.race([start, new Promise(resolve => setTimeout(resolve, 20_000))])
     const calls = !task && !spawned && listed && (body.tools ?? []).some(tool => tool.name === 'Agent')
       ? (spawned = true, listed.flatMap((type, index) => [false, true].map(background => ({ id: `toolu_owned_${index}_${background}`, name: 'Agent', input: { description: `Proof ${type}`, prompt: `OWNED_PROOF_TASK ${type} ${background ? 'background' : 'foreground'}`, subagent_type: type, run_in_background: background } }))))
       : []
@@ -79,7 +82,7 @@ try {
     for (let at = pending.indexOf('\n'); at !== -1; at = pending.indexOf('\n')) {
       const line = pending.slice(0, at); pending = pending.slice(at + 1)
       let event; try { event = JSON.parse(line) } catch { continue }
-      if (event.type === 'system' && event.subtype === 'init' && !listed) listed = event.agents
+      if (event.type === 'system' && event.subtype === 'init' && !listed) { listed = event.agents; started() }
       if (event.type === 'result') child.stdin.end()
     }
   })
