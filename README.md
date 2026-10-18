@@ -95,7 +95,7 @@ parent's own model. Entries naming a model from another family are ignored.
 
 | Claude Code feature | In a routed conversation |
 | --- | --- |
-| Main and subagent turns | Selected provider, with Claude Code's tools and permissions |
+| Main and subagent turns | Selected provider, with Claude Code's tools and permissions; each built-in tool with the description and input schema the installed `claude` sends, and a subagent with the system prompt and tools the engine gives its agent type (see Known limits) |
 | `/compact` and automatic compaction | Claude Code's own summary prompt (with your `/compact` instructions in its slot) over the conversation as real messages, answered by the selected provider with its reported output bound; the engine's own summary message wording, citing the transcript file; a bounded tail of recent messages and their tool pairs kept verbatim; a failed or unreadable-prompt compaction keeps the original transcript |
 | Session titles | Selected provider, local fallback, manual names kept |
 | Auto-mode permission judgments | Selected provider with your effective auto-mode policy; native rules, hooks and managed limits still decide first |
@@ -110,6 +110,12 @@ parent's own model. Entries naming a model from another family are ignored.
 These come from what Claude Code exposes to plugins today:
 
 - **Compaction.** The engine cannot send its own summary request to another provider, so the mod sends it: once per Claude Code version it runs the installed `claude` for a few seconds in a throwaway folder against a loopback stub (no network, none of your settings or sessions) to read the engine's own summary prompt and summary-message wording, and keeps them. Nothing of that text is copied into this repository. If it cannot be read, a routed conversation is not compacted and says why. Two things the host gives a plugin no way to do: your `PreCompact` hooks do not run for a routed compaction and `PostCompact` hooks receive an empty summary, and the summary appears as a message in the conversation, not as the collapsed "Compacted" row.
+- **Tool definitions and agent prompts.** A routed session builds no Anthropic request, so the engine never renders its tools or a subagent's prompt for the mod. Once per Claude Code version and combination of your session's built-in tools, the mod runs the installed `claude` for about a second in a throwaway folder against a loopback stub (no network, none of your settings, plugins or sessions): the engine's first request gives the tools as it sends them, and the stub has it start every agent type it lists, plus a marker agent, in the foreground and in the background, to read each agent's system prompt, the text the engine puts around every subagent prompt (agent files included), and the tools it offers each type. The result is kept in the plugin's store; nothing of that text is copied into this repository. The identity line the engine opens a subagent prompt with is left out, as the main prompt's identity sections are; the subagent's environment and model notice reach it in its transcript, as natively. Without the capture a main step sends the schema table generated for this build and the descriptions the session lists, a routed subagent step is refused rather than run on a made-up prompt, and `/rice-models status`, `doctor` and the debug log say so; a failed read is tried again after a minute or at `/rice-models refresh`. What the capture cannot reach:
+  - The run is headless with default settings and permission mode. Where the engine words a tool differently in an interactive session, under another permission mode or for an account feature, the routed model gets the headless wording; in 2.1.302 that is the Agent and Bash descriptions in an interactive session, and Bash under `bypassPermissions`.
+  - Tools a headless run never offers (AskUserQuestion, EnterPlanMode, ExitPlanMode) keep the session's description and the generated schema. MCP tools keep the session's description and a loose schema: the capture runs without your servers and credentials, and the host gives a plugin an MCP tool's description but not its input schema.
+  - An agent type the engine lists only in some sessions (claude-code-guide is not listed to a headless run without an account) has no captured prompt; a routed step of it is refused.
+  - SubagentHandback is offered only in auto mode, where every Agent call passes the engine's own classifier, so the capture cannot start one; the mod keeps its own definition of that tool (the engine's name and input shape).
+  - A headless foreground subagent is offered a few more tools than a background one, and an interactive session's subagents get the background set; the mod follows that.
 - **A long step shows a stale label.** After a compaction or a subagent spawn the engine's spinner keeps reading "Running SessionStart hooks..." for the whole next routed step, which can take minutes on a large context. The session is working; the label is the engine's.
 - **Auto-mode handoff review.** When a subagent finishes while its parent is in
   auto mode, Claude Code reviews the report with its own classifier, which uses
@@ -308,10 +314,11 @@ says which. OpenCode's free Zen models answer only OpenCode itself.
 1. `agent.spawn` decides each new subagent's model with the family rules above,
    before Claude Code resolves it.
 2. `turn.step` sees each step of the main conversation and of every subagent. A
-   routed step is answered by the mod: the system prompt is the one Claude Code
-   composes (a subagent's comes from its agent file or built-in type), the tools are
-   the session's (input schemas generated from this Claude Code build), and the
-   transcript is the engine's own. A step whose family cannot be resolved is refused
+   routed step is answered by the mod: the main system prompt is the one Claude Code
+   composes, a subagent's is the one the installed `claude` sends for its agent type
+   (or its agent file's body inside the engine's text), the tools are the session's
+   with the definitions the installed `claude` sends (the schema table generated
+   from this build is the fallback), and the transcript is the engine's own. A step whose family cannot be resolved is refused
    visibly; it is never sent to Claude instead.
 3. `session.compact`, the WebSearch and WebFetch tools, `tool.check` (auto-mode
    judgments), the title hook, Stop and SubagentStop prompt hooks and the plugin
@@ -415,11 +422,12 @@ WSL is outside this mod's scope.
   `claude plugin test`.
 - `npm run test:install` copies only the shipped payload into an empty home with
   spaces in its path and runs a local provider through both helper modes.
-- The `test:routing`, `test:phases`, `test:protocols`, `test:compaction`,
+- The `test:routing`, `test:phases`, `test:protocols`, `test:compaction`, `test:tools`,
   `test:permissions`, `test:permission-mode`, `test:search`, `test:evaluators` and
   `test:titles` proofs start the real `claude` with `--plugin-dir`, local stand-in
   providers and an Anthropic endpoint that refuses everything, and fail if any
-  routed request reaches it.
+  routed request reaches it. `test:tools` also compares the tool definitions and agent
+  prompts the helper reads with an independent native run, byte for byte.
 - `bun run check` runs all of the above plus `git diff --check`. GitHub Actions
   runs it on Ubuntu for Claude Code 2.1.301 and 2.1.302 and on native Windows for
   2.1.302.
