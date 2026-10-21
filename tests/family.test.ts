@@ -7,9 +7,8 @@ const ports: FamilyPorts = {
   providerOf: model => model.includes('/') ? model.slice(0, model.indexOf('/')) : undefined,
   defaultModel: family => ({ codex: 'codex/gpt-main', a: 'a/main', b: 'b/child' } as Record<string, string>)[family],
 }
-const familyTypes = new Map([['rice-multi-models:codex', 'codex'], ['rice-multi-models:b', 'b'], ['rice-multi-models:claude', CLAUDE_FAMILY]])
 const spawn = (input: Partial<Parameters<typeof spawnDecision>[0]>, tiers = {}) => {
-  const decision = spawnDecision({ parentModel: 'a/main', subagentType: 'general-purpose', fork: false, familyTypes, ...input }, tiers, ports)
+  const decision = spawnDecision({ parentModel: 'a/main', fork: false, ...input }, tiers, ports)
   return { ...decision, native: decision.model === undefined }
 }
 
@@ -23,7 +22,17 @@ describe('family identity', () => {
     expect(tierOf('haiku')).toBe('haiku')
     expect(tierOf('claude-haiku-4-5')).toBe('haiku')
     expect(tierOf('claude-opus-5-5[1m]')).toBe('opus')
+    expect(tierOf('claude-haiku-5-5')).toBe('haiku')
+    expect(tierOf('claude-sonnet-5-5')).toBe('sonnet')
+    expect(tierOf('claude-fable-5-1')).toBe('fable')
+    expect(tierOf('claude-haiku-9-9')).toBeUndefined()
+    expect(tierOf('claude-sonnet-9-9')).toBeUndefined()
+    expect(tierOf('claude-opus-9-9')).toBeUndefined()
+    expect(tierOf('claude-haiku-4-5[1m]')).toBeUndefined()
+    expect(tierOf('claude-haiku-9-9[1m]')).toBeUndefined()
     expect(tierOf('a/opus-like')).toBeUndefined()
+    expect(tierOf('my-haiku-runtime')).toBeUndefined()
+    expect(tierOf('claude-haiku-runtime')).toBeUndefined()
     expect(tierOf('inherit')).toBeUndefined()
   })
 })
@@ -41,6 +50,10 @@ describe('tier resolution inside one family', () => {
   test('without an anchor the family default is used', () => {
     expect(tierModel('b', 'sonnet', undefined, {}, ports)).toBe('b/child')
   })
+  test('a family default from another provider is ignored', () => {
+    const wrongDefault: FamilyPorts = { ...ports, defaultModel: () => 'a/other' }
+    expect(tierModel('b', 'sonnet', undefined, {}, wrongDefault)).toBeUndefined()
+  })
 })
 
 describe('spawn decisions', () => {
@@ -53,11 +66,6 @@ describe('spawn decisions', () => {
   test('explicit routed choices are honored exactly', () => {
     expect(spawn({ definitionModel: 'b/child' })).toMatchObject({ native: true, family: 'b', explicit: true })
     expect(spawn({ requested: 'b/child' })).toMatchObject({ model: 'b/child', family: 'b', explicit: true })
-  })
-  test('family agent types choose the family deliberately', () => {
-    expect(spawn({ subagentType: 'rice-multi-models:claude', requested: 'opus' })).toMatchObject({ native: true, family: CLAUDE_FAMILY, explicit: true })
-    expect(spawn({ subagentType: 'rice-multi-models:b' })).toMatchObject({ model: 'b/child', family: 'b', explicit: true })
-    expect(spawn({ subagentType: 'rice-multi-models:codex', requested: 'haiku' }, { codex: { haiku: 'codex/gpt-mini' } })).toMatchObject({ model: 'codex/gpt-mini', explicit: true })
   })
   test('a Claude parent and forks keep native resolution', () => {
     expect(spawn({ parentModel: 'sonnet', requested: 'haiku' })).toMatchObject({ native: true, family: CLAUDE_FAMILY })

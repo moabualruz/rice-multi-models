@@ -21,12 +21,44 @@ export function isNativeAlias(model: string | undefined): model is NativeAlias {
   return model !== undefined && (NATIVE_ALIASES as readonly string[]).includes(model)
 }
 
-/** The tier a native alias or a full Claude id names (`claude-haiku-4-5` is haiku). */
+/** The tier a native alias or recognized Claude model id names. */
+const CLAUDE_MODEL_TIERS: Readonly<Record<string, NativeAlias>> = {
+  'claude-haiku-4-5': 'haiku',
+  'claude-haiku-5-5': 'haiku',
+  'claude-sonnet-4-5': 'sonnet',
+  'claude-sonnet-4-6': 'sonnet',
+  'claude-sonnet-5': 'sonnet',
+  'claude-sonnet-5-5': 'sonnet',
+  'claude-opus-4-5': 'opus',
+  'claude-opus-4-6': 'opus',
+  'claude-opus-4-7': 'opus',
+  'claude-opus-4-8': 'opus',
+  'claude-opus-5': 'opus',
+  'claude-opus-5-5': 'opus',
+  'claude-fable-5': 'fable',
+  'claude-fable-5-1': 'fable',
+}
+const CLAUDE_1M_MODEL_IDS = new Set([
+  'claude-haiku-5-5',
+  'claude-sonnet-4-6',
+  'claude-sonnet-5',
+  'claude-sonnet-5-5',
+  'claude-opus-4-6',
+  'claude-opus-4-7',
+  'claude-opus-4-8',
+  'claude-opus-5',
+  'claude-opus-5-5',
+  'claude-fable-5',
+  'claude-fable-5-1',
+])
+
 export function tierOf(model: string | undefined): NativeAlias | undefined {
   if (model === undefined) return undefined
   if (isNativeAlias(model)) return model
-  const lower = model.toLowerCase()
-  return lower.includes('/') ? undefined : NATIVE_ALIASES.find(alias => lower.includes(alias))
+  const oneMillion = model.endsWith('[1m]')
+  const id = oneMillion ? model.slice(0, -'[1m]'.length) : model
+  const tier = CLAUDE_MODEL_TIERS[id]
+  return tier !== undefined && (!oneMillion || CLAUDE_1M_MODEL_IDS.has(id)) ? tier : undefined
 }
 
 export function familyOf(model: string | undefined, ports: Pick<FamilyPorts, 'isRouted' | 'providerOf'>): string {
@@ -41,7 +73,7 @@ export function tierModel(family: string, tier: string | undefined, anchor: stri
   if (chosen !== undefined && ports.isRouted(chosen) && familyOf(chosen, ports) === family) return chosen
   if (anchor !== undefined && ports.isRouted(anchor) && familyOf(anchor, ports) === family) return anchor
   const fallback = ports.defaultModel(family)
-  return fallback !== undefined && ports.isRouted(fallback) ? fallback : undefined
+  return fallback !== undefined && ports.isRouted(fallback) && familyOf(fallback, ports) === family ? fallback : undefined
 }
 
 export type SpawnInput = {
@@ -49,13 +81,9 @@ export type SpawnInput = {
   parentModel: string
   /** The Agent tool's `model` argument, or a hook's rewrite. */
   requested?: string
-  /** The resolved agent type. */
-  subagentType: string
   /** The definition's own `model`, when a readable definition names one. */
   definitionModel?: string
   fork: boolean
-  /** Family agent types this mod registered, by full type name. */
-  familyTypes: ReadonlyMap<string, string>
 }
 export type SpawnDecision = { model?: string; family: string; explicit: boolean; reason: string }
 
@@ -63,14 +91,6 @@ export type SpawnDecision = { model?: string; family: string; explicit: boolean;
 export function spawnDecision(input: SpawnInput, tiers: TierMap, ports: FamilyPorts): SpawnDecision {
   const parentFamily = familyOf(input.parentModel, ports)
   if (input.fork) return { family: parentFamily, explicit: false, reason: 'forks inherit their parent model' }
-  const chosenFamily = input.familyTypes.get(input.subagentType)
-  if (chosenFamily !== undefined) {
-    if (chosenFamily === CLAUDE_FAMILY) return { family: CLAUDE_FAMILY, explicit: true, reason: 'the caller chose the Claude family agent type' }
-    const model = tierModel(chosenFamily, input.requested, chosenFamily === parentFamily ? input.parentModel : undefined, tiers, ports)
-    return model === undefined
-      ? { family: chosenFamily, explicit: true, reason: `no ${chosenFamily} model is available` }
-      : { model, family: chosenFamily, explicit: true, reason: `the caller chose the ${chosenFamily} family agent type` }
-  }
   if (input.requested !== undefined && ports.isRouted(input.requested)) return { model: input.requested, family: familyOf(input.requested, ports), explicit: true, reason: 'an explicit routed model was requested' }
   if (input.definitionModel !== undefined && ports.isRouted(input.definitionModel)) return { family: familyOf(input.definitionModel, ports), explicit: true, reason: 'the agent definition names a routed model' }
   if (parentFamily === CLAUDE_FAMILY) return { family: CLAUDE_FAMILY, explicit: false, reason: 'the parent runs on Claude' }
