@@ -7,7 +7,7 @@ import { isObject } from '../../../hooks/config'
 import type { ModelConfig } from '../../../hooks/config'
 import { decoderOver, isIndex, params, parseJson, sseReader } from '../codec'
 import type { Codec, Neutral, Sink } from '../codec'
-import type { Image, Text } from '../history'
+import type { Document, Image, Text } from '../history'
 
 type Json = Record<string, unknown>
 type Part = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }
@@ -18,8 +18,14 @@ type OaMessage =
   | { role: 'assistant'; content: string | null; tool_calls?: ToolCall[] }
   | { role: 'tool'; tool_call_id: string; content: string }
 
-const toPart = (b: Text | Image): Part =>
-  b.type === 'text' ? b : { type: 'image_url', image_url: { url: b.source.type === 'url' ? b.source.url : `data:${b.source.media_type};base64,${b.source.data}` } }
+const documentText = (b: Document): string => b.source.type === 'text'
+  ? `${b.title ? `Document: ${b.title}\n` : ''}${b.source.data}`
+  : '[document omitted: Chat Completions does not accept PDF document blocks]'
+
+const toPart = (b: Text | Image | Document): Part =>
+  b.type === 'text' ? b : b.type === 'image'
+    ? { type: 'image_url', image_url: { url: b.source.type === 'url' ? b.source.url : `data:${b.source.media_type};base64,${b.source.data}` } }
+    : { type: 'text', text: documentText(b) }
 
 // The request as Chat Completions messages: the system prompt in the model's role for it, tool results as
 // `tool` messages ahead of their message's other content, and the images of tool results in a user message
@@ -38,10 +44,10 @@ export function toMessages(n: Neutral, m: ModelConfig): OaMessage[] {
     const moved: Part[] = []
     for (const b of msg.content) {
       if (b.type === 'tool_result') {
-        const body = b.content.flatMap(c => (c.type === 'text' ? [c.text] : [])).join('\n')
+        const body = b.content.flatMap(c => (c.type === 'text' ? [c.text] : c.type === 'document' ? [documentText(c)] : [])).join('\n')
         moved.push(...b.content.filter(c => c.type === 'image').map(toPart))
         out.push({ role: 'tool', tool_call_id: b.tool_use_id, content: b.is_error ? `Error: ${body}` : body })
-      } else if (b.type === 'text' || b.type === 'image') parts.push(toPart(b))
+      } else if (b.type === 'text' || b.type === 'image' || b.type === 'document') parts.push(toPart(b))
     }
     const all = [...moved, ...parts]
     if (all.length > 0) out.push({ role: 'user', content: all.every(p => p.type === 'text') ? all.map(p => (p as Text).text).join('\n\n') : all })

@@ -139,7 +139,7 @@ test('history: tool_use and tool_result blocks keep their shapes, results lead t
   const sent = encode({ messages, ids: { minted1: 'toolu_remote' } }).sent['messages']
   expect(sent).toEqual([
     { role: 'user', content: [{ type: 'text', text: 'hi' }] },
-    { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_remote', name: 'Read', input: { file_path: '/a' } }, { type: 'tool_use', id: 'minted2', name: 'Bash', input: {} }] },
+    { role: 'assistant', content: [{ type: 'text', text: '[thinking omitted: provider-specific reasoning cannot be replayed without a held signature]' }, { type: 'tool_use', id: 'toolu_remote', name: 'Read', input: { file_path: '/a' } }, { type: 'tool_use', id: 'minted2', name: 'Bash', input: {} }] },
     {
       role: 'user',
       content: [

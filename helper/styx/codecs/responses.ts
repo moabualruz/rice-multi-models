@@ -5,11 +5,11 @@
 import { isObject } from '../../../hooks/config'
 import { decoderOver, isIndex, params, parseJson, sseReader } from '../codec'
 import type { Codec, Neutral, Sink } from '../codec'
-import type { Image, Text, Thinking } from '../history'
+import type { Document, Image, Text, Thinking } from '../history'
 import { responsesSearchEvidence } from '../../core/search.ts'
 
 type Json = Record<string, unknown>
-type Content = { type: 'input_text' | 'output_text'; text: string } | { type: 'input_image'; image_url: string; detail: 'auto' }
+type Content = { type: 'input_text' | 'output_text'; text: string } | { type: 'input_image'; image_url: string; detail: 'auto' } | { type: 'input_file'; file_data: string; filename: string }
 type Item =
   | { role: 'user' | 'assistant'; content: Content[] }
   | { type: 'function_call'; call_id: string; name: string; arguments: string }
@@ -33,8 +33,17 @@ function reasoningItem(b: Thinking): Item | undefined {
   }
 }
 
-const toContent = (b: Text | Image): Content =>
-  b.type === 'text' ? { type: 'input_text', text: b.text } : { type: 'input_image', image_url: b.source.type === 'url' ? b.source.url : `data:${b.source.media_type};base64,${b.source.data}`, detail: 'auto' }
+const documentText = (b: Document): string => b.source.type === 'text'
+  ? `${b.title ? `Document: ${b.title}\n` : ''}${b.source.data}`
+  : '[document omitted: PDF was present in a tool result and could not be attached as function output]'
+
+const toContent = (b: Text | Image | Document): Content => b.type === 'text'
+  ? { type: 'input_text', text: b.text }
+  : b.type === 'image'
+    ? { type: 'input_image', image_url: b.source.type === 'url' ? b.source.url : `data:${b.source.media_type};base64,${b.source.data}`, detail: 'auto' }
+    : b.source.type === 'text'
+      ? { type: 'input_text', text: documentText(b) }
+      : { type: 'input_file', file_data: `data:${b.source.media_type};base64,${b.source.data}`, filename: b.title?.endsWith('.pdf') ? b.title : `${b.title || 'document'}.pdf` }
 
 // The request's input items: an assistant turn's text, calls and held reasoning in their order; tool results as
 // `function_call_output` items ahead of their message's other content, and their images in a user message after them.
@@ -64,10 +73,10 @@ export function toInput(n: Neutral): Item[] {
     const moved: Content[] = []
     for (const b of msg.content) {
       if (b.type === 'tool_result') {
-        const body = b.content.flatMap(c => (c.type === 'text' ? [c.text] : [])).join('\n')
-        moved.push(...b.content.filter(c => c.type === 'image').map(toContent))
+        const body = b.content.flatMap(c => (c.type === 'text' ? [c.text] : c.type === 'document' && c.source.type === 'text' ? [documentText(c)] : [])).join('\n')
+        moved.push(...b.content.filter(c => c.type === 'image' || c.type === 'document' && c.source.type === 'base64').map(toContent))
         out.push({ type: 'function_call_output', call_id: b.tool_use_id, output: b.is_error ? `Error: ${body}` : body })
-      } else if (b.type === 'text' || b.type === 'image') parts.push(toContent(b))
+      } else if (b.type === 'text' || b.type === 'image' || b.type === 'document') parts.push(toContent(b))
     }
     const all = [...moved, ...parts]
     if (all.length > 0) out.push({ role: 'user', content: all })

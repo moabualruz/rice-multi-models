@@ -4283,11 +4283,11 @@ function serverToolText(block) {
       if (typeof content.url !== "string") {
         throw new Error("Invalid web_fetch_result");
       }
-      const document = content.content;
-      if (!isRecord(document) || document.type !== "document") {
+      const document2 = content.content;
+      if (!isRecord(document2) || document2.type !== "document") {
         throw new Error("Unsupported server fetch document content");
       }
-      documentInput(document);
+      documentInput(document2);
     } else {
       throw new Error(`Invalid ${block.type} content`);
     }
@@ -6907,13 +6907,16 @@ function frameReader() {
 // helper/styx/codecs/bedrock.ts
 var text = (t) => t.trim() === "" ? [] : [{ text: t }];
 var image = (b) => b.source.type === "url" ? { text: "[image omitted: Bedrock takes inline images only]" } : { image: { format: b.source.media_type.replace("image/", ""), source: { bytes: b.source.data } } };
+var document = (b) => b.source.type === "text" ? text(`${b.title ? `Document: ${b.title}
+` : ""}${b.source.data}`) : [{ document: { format: "pdf", name: (b.title || "document.pdf").replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 100), source: { bytes: b.source.data } } }];
 function blocks(b) {
   if (b.type === "text") return text(b.text);
   if (b.type === "image") return [image(b)];
+  if (b.type === "document") return document(b);
   if (b.type === "tool_use") return [{ toolUse: { toolUseId: b.id, name: b.name, input: b.input } }];
   if (b.type === "thinking") return [{ reasoningContent: { reasoningText: { text: b.thinking, signature: b.signature } } }];
   if (b.type === "redacted_thinking") return [{ reasoningContent: { redactedContent: b.data } }];
-  const content = b.content.flatMap((c) => c.type === "text" ? text(c.text) : [image(c)]);
+  const content = b.content.flatMap((c) => c.type === "text" ? text(c.text) : c.type === "image" ? [image(c)] : document(c));
   return [{ toolResult: { toolUseId: b.tool_use_id, content: content.length > 0 ? content : [{ text: "(no output)" }], ...b.is_error ? { status: "error" } : {} } }];
 }
 function toMessages2(messages) {
@@ -7005,6 +7008,10 @@ var SEAL = "gemini:";
 var SKIP_SIGNATURE = "skip_thought_signature_validator";
 var sealSignature = (signature) => `${SEAL}${signature}`;
 var signs = (m) => /gemini-(?:[3-9]|\d{2,})/.test(m.id);
+var documentText = (b) => b.source.type === "text" ? `${b.title ? `Document: ${b.title}
+` : ""}${b.source.data}` : "[document omitted: PDF was present in a tool result and cannot be part of Gemini functionResponse text]";
+var imagePart = (b) => b.source.type === "base64" ? { inlineData: { mimeType: b.source.media_type, data: b.source.data } } : { text: "[image omitted: Gemini inlineData requires image bytes; URL images are not fetched]" };
+var documentPart = (b) => b.source.type === "text" ? { text: documentText(b) } : { inlineData: { mimeType: b.source.media_type, data: b.source.data } };
 function toContents(n, m) {
   const names = /* @__PURE__ */ new Map();
   const out = [];
@@ -7032,12 +7039,16 @@ function toContents(n, m) {
     const images = [];
     for (const b of msg.content) {
       if (b.type === "tool_result") {
-        const body2 = b.content.flatMap((c) => c.type === "text" ? [c.text] : []).join("\n");
+        const body2 = b.content.flatMap((c) => c.type === "text" ? [c.text] : c.type === "document" && c.source.type === "text" ? [documentText(c)] : []).join("\n");
         const name = names.get(b.tool_use_id) ?? "tool";
         parts.push({ functionResponse: { name, response: { name, content: b.is_error ? `Error: ${body2}` : body2 || "Tool executed successfully." } } });
-        for (const c of b.content) if (c.type === "image") images.push(c.source.type === "base64" ? { inlineData: { mimeType: c.source.media_type, data: c.source.data } } : { text: `[image: ${c.source.url}]` });
+        for (const c of b.content) {
+          if (c.type === "image") images.push(imagePart(c));
+          else if (c.type === "document" && c.source.type === "base64") images.push(documentPart(c));
+        }
       } else if (b.type === "text") parts.push({ text: b.text });
-      else if (b.type === "image") parts.push(b.source.type === "base64" ? { inlineData: { mimeType: b.source.media_type, data: b.source.data } } : { text: `[image: ${b.source.url}]` });
+      else if (b.type === "image") parts.push(imagePart(b));
+      else if (b.type === "document") parts.push(documentPart(b));
     }
     const all = [...parts.filter((p) => "functionResponse" in p), ...images, ...parts.filter((p) => !("functionResponse" in p))];
     if (all.length > 0) out.push({ role: "user", parts: all });
@@ -7141,7 +7152,9 @@ var gemini = {
 };
 
 // helper/styx/codecs/openai.ts
-var toPart = (b) => b.type === "text" ? b : { type: "image_url", image_url: { url: b.source.type === "url" ? b.source.url : `data:${b.source.media_type};base64,${b.source.data}` } };
+var documentText2 = (b) => b.source.type === "text" ? `${b.title ? `Document: ${b.title}
+` : ""}${b.source.data}` : "[document omitted: Chat Completions does not accept PDF document blocks]";
+var toPart = (b) => b.type === "text" ? b : b.type === "image" ? { type: "image_url", image_url: { url: b.source.type === "url" ? b.source.url : `data:${b.source.media_type};base64,${b.source.data}` } } : { type: "text", text: documentText2(b) };
 function toMessages3(n, m) {
   const out = [m.systemRole === "user" ? { role: "user", content: `System instructions:
 
@@ -7158,10 +7171,10 @@ ${n.system}` } : { role: m.systemRole, content: n.system }];
     const moved = [];
     for (const b of msg.content) {
       if (b.type === "tool_result") {
-        const body2 = b.content.flatMap((c) => c.type === "text" ? [c.text] : []).join("\n");
+        const body2 = b.content.flatMap((c) => c.type === "text" ? [c.text] : c.type === "document" ? [documentText2(c)] : []).join("\n");
         moved.push(...b.content.filter((c) => c.type === "image").map(toPart));
         out.push({ role: "tool", tool_call_id: b.tool_use_id, content: b.is_error ? `Error: ${body2}` : body2 });
-      } else if (b.type === "text" || b.type === "image") parts.push(toPart(b));
+      } else if (b.type === "text" || b.type === "image" || b.type === "document") parts.push(toPart(b));
     }
     const all = [...moved, ...parts];
     if (all.length > 0) out.push({ role: "user", content: all.every((p) => p.type === "text") ? all.map((p) => p.text).join("\n\n") : all });
@@ -7302,7 +7315,9 @@ function reasoningItem(b) {
     summary: b.thinking === "" ? [] : [{ type: "summary_text", text: b.thinking }]
   };
 }
-var toContent = (b) => b.type === "text" ? { type: "input_text", text: b.text } : { type: "input_image", image_url: b.source.type === "url" ? b.source.url : `data:${b.source.media_type};base64,${b.source.data}`, detail: "auto" };
+var documentText3 = (b) => b.source.type === "text" ? `${b.title ? `Document: ${b.title}
+` : ""}${b.source.data}` : "[document omitted: PDF was present in a tool result and could not be attached as function output]";
+var toContent = (b) => b.type === "text" ? { type: "input_text", text: b.text } : b.type === "image" ? { type: "input_image", image_url: b.source.type === "url" ? b.source.url : `data:${b.source.media_type};base64,${b.source.data}`, detail: "auto" } : b.source.type === "text" ? { type: "input_text", text: documentText3(b) } : { type: "input_file", file_data: `data:${b.source.media_type};base64,${b.source.data}`, filename: b.title?.endsWith(".pdf") ? b.title : `${b.title || "document"}.pdf` };
 function toInput(n) {
   const out = [];
   for (const msg of n.messages) {
@@ -7329,10 +7344,10 @@ function toInput(n) {
     const moved = [];
     for (const b of msg.content) {
       if (b.type === "tool_result") {
-        const body2 = b.content.flatMap((c) => c.type === "text" ? [c.text] : []).join("\n");
-        moved.push(...b.content.filter((c) => c.type === "image").map(toContent));
+        const body2 = b.content.flatMap((c) => c.type === "text" ? [c.text] : c.type === "document" && c.source.type === "text" ? [documentText3(c)] : []).join("\n");
+        moved.push(...b.content.filter((c) => c.type === "image" || c.type === "document" && c.source.type === "base64").map(toContent));
         out.push({ type: "function_call_output", call_id: b.tool_use_id, output: b.is_error ? `Error: ${body2}` : body2 });
-      } else if (b.type === "text" || b.type === "image") parts.push(toContent(b));
+      } else if (b.type === "text" || b.type === "image" || b.type === "document") parts.push(toContent(b));
     }
     const all = [...moved, ...parts];
     if (all.length > 0) out.push({ role: "user", content: all });
@@ -7442,15 +7457,38 @@ var CODECS = { openai, anthropic, bedrock, responses, gemini };
 
 // helper/styx/history.ts
 function part(b, vision) {
-  if (b["type"] === "text") return { type: "text", text: str(b["text"]) };
-  if (b["type"] === "image") {
+  const type = str(b["type"]) || "unknown";
+  if (type === "text") {
+    if (typeof b["text"] !== "string") return { type: "text", text: "[text block omitted: its text field is not a string]" };
+    const text2 = b["text"];
+    return { type: "text", text: Array.isArray(b["citations"]) && b["citations"].length > 0 ? `${text2}
+[citation metadata omitted: provider-specific annotations are not replayed]` : text2 };
+  }
+  if (type === "image") {
     if (!vision) return { type: "text", text: "[image omitted: model has no vision]" };
     const s = isObject(b["source"]) ? b["source"] : {};
-    return { type: "image", source: s["type"] === "url" ? { type: "url", url: str(s["url"]) } : { type: "base64", media_type: str(s["media_type"]), data: str(s["data"]) } };
+    if (s["type"] === "url" && typeof s["url"] === "string" && s["url"] !== "") return { type: "image", source: { type: "url", url: s["url"] } };
+    if (s["type"] === "base64" && typeof s["media_type"] === "string" && typeof s["data"] === "string" && s["data"] !== "") return { type: "image", source: { type: "base64", media_type: s["media_type"], data: s["data"] } };
+    return { type: "text", text: "[image omitted: source must contain a URL or inline base64 data with a media type]" };
   }
-  if (b["type"] === "document") return { type: "text", text: "[document omitted]" };
-  if (b["type"] === "tool_reference") return { type: "text", text: `[tool loaded: ${str(b["tool_name"])}]` };
-  return { type: "text", text: `[${str(b["type"])} block omitted]` };
+  if (type === "document") {
+    const source = isObject(b["source"]) ? b["source"] : {};
+    const title = typeof b["title"] === "string" ? b["title"] : void 0;
+    if (source["type"] === "base64" && source["media_type"] === "application/pdf" && typeof source["data"] === "string" && source["data"] !== "") {
+      return { type: "document", ...title === void 0 ? {} : { title }, source: { type: "base64", media_type: "application/pdf", data: source["data"] } };
+    }
+    if (source["type"] === "text" && source["media_type"] === "text/plain" && typeof source["data"] === "string" && source["data"] !== "") {
+      return { type: "document", ...title === void 0 ? {} : { title }, source: { type: "text", media_type: "text/plain", data: source["data"] } };
+    }
+    if (source["type"] === "url") return { type: "text", text: "[document omitted: remote URL sources are not fetched by this adapter]" };
+    if (source["type"] === "file") return { type: "text", text: "[document omitted: provider-scoped file identifiers cannot be replayed across routes]" };
+    const mediaType = typeof source["media_type"] === "string" ? source["media_type"] : "unknown media type";
+    return { type: "text", text: `[document omitted: ${mediaType} source is unsupported; only inline application/pdf and text/plain are replayed]` };
+  }
+  if (type === "tool_reference") return { type: "text", text: `[tool loaded: ${str(b["tool_name"]) || "unknown"}]` };
+  if (type === "server_tool_use") return { type: "text", text: `[server tool call ${str(b["name"]) || "unknown"} represented as text: this request exposes client tools only; the call was not reissued]` };
+  if (type === "web_search_tool_result") return { type: "text", text: "[web_search_tool_result omitted: the routed request has no matching Claude-hosted server tool result block]" };
+  return { type: "text", text: `[${type} block omitted: no safe representation is defined for this routed provider request]` };
 }
 var interleave = (content, held) => [
   ...content.flatMap((b, i) => [...held.filter((p) => p.at === i).map((p) => p.block), b]),
@@ -7462,26 +7500,38 @@ function normalize(messages, vision, remoteId, sealed) {
   for (const msg of messages) {
     const content = [];
     let call;
+    let omittedThinking = false;
     for (const b of blocksOf(msg)) {
       const type = b["type"];
-      if (type === "thinking" || type === "redacted_thinking") continue;
-      if (msg.role === "assistant") {
-        if (type === "text") content.push({ type: "text", text: str(b["text"]) });
-        else if (type === "tool_use") {
-          const id = str(b["id"]);
-          seen.add(id);
-          call ??= id;
-          content.push({ type: "tool_use", id: remoteId(id) ?? id, name: str(b["name"]), input: isObject(b["input"]) ? b["input"] : {} });
+      if (type === "thinking" || type === "redacted_thinking") {
+        omittedThinking = true;
+      } else if (msg.role === "assistant" && type === "tool_use") {
+        const id = str(b["id"]);
+        const name = str(b["name"]);
+        if (id === "" || name === "" || !isObject(b["input"])) {
+          content.push({ type: "text", text: "[tool_use omitted: call id, name and object input are required for replay]" });
+          continue;
         }
-      } else if (type === "tool_result") {
+        seen.add(id);
+        call ??= id;
+        content.push({ type: "tool_use", id: remoteId(id) ?? id, name, input: b["input"] });
+      } else if (msg.role === "user" && type === "tool_result") {
         const id = str(b["tool_use_id"]);
-        if (!seen.has(id)) continue;
+        if (!seen.has(id)) {
+          content.push({ type: "text", text: "[tool_result omitted: its matching tool_use is outside the normalized transcript window]" });
+          continue;
+        }
         const raw = b["content"];
-        const parts = (typeof raw === "string" ? [{ type: "text", text: raw }] : Array.isArray(raw) ? raw : []).filter(isObject).map((c) => part(c, vision));
+        const parts = typeof raw === "string" ? [{ type: "text", text: raw }] : Array.isArray(raw) ? raw.filter(isObject).map((c) => part(c, vision)) : [];
+        if (Array.isArray(raw) && raw.some((c) => !isObject(c))) parts.push({ type: "text", text: "[tool result content item omitted: content items must be objects]" });
+        else if (raw !== void 0 && (raw === null || typeof raw !== "string" && !Array.isArray(raw))) parts.push({ type: "text", text: "[tool result content omitted: content must be text or an array of content blocks]" });
         content.push({ type: "tool_result", tool_use_id: remoteId(id) ?? id, content: parts, is_error: b["is_error"] === true });
       } else content.push(part(b, vision));
     }
     const blocks2 = call === void 0 ? void 0 : sealed?.(call);
+    if (omittedThinking && (blocks2 === void 0 || blocks2.length === 0)) {
+      content.unshift({ type: "text", text: "[thinking omitted: provider-specific reasoning cannot be replayed without a held signature]" });
+    }
     if (content.length > 0) out.push({ role: msg.role, content: blocks2 === void 0 ? content : interleave(content, blocks2), ...call !== void 0 && sealed !== void 0 && blocks2 === void 0 ? { unsealed: true } : {} });
   }
   return out;
@@ -7540,9 +7590,9 @@ function parseWebFetchContent(value) {
     return void 0;
   }
   if (sourceUrl.protocol !== "https:" || sourceUrl.username || sourceUrl.password) return void 0;
-  const document = content.content;
-  if (document.type !== "document" || document.source === null || typeof document.source !== "object" || Array.isArray(document.source)) return void 0;
-  const source = document.source;
+  const document2 = content.content;
+  if (document2.type !== "document" || document2.source === null || typeof document2.source !== "object" || Array.isArray(document2.source)) return void 0;
+  const source = document2.source;
   if (source.type !== "text" || typeof source.data !== "string") return void 0;
   return { kind: "document", url: sourceUrl.toString(), text: source.data };
 }

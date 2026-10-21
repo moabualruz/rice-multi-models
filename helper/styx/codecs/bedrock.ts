@@ -6,7 +6,7 @@
 import { isObject } from '../../../hooks/config'
 import { count, decoderOver, lastUsers, lostThinking, obj, params, parseJson, thinkingReader } from '../codec'
 import type { Codec, Sink } from '../codec'
-import type { Message } from '../history'
+import type { Document, Message } from '../history'
 import { str } from '../../../hooks/transcript'
 import { frameReader } from './eventstream'
 import type { Frame } from './eventstream'
@@ -18,13 +18,18 @@ const text = (t: string): Json[] => (t.trim() === '' ? [] : [{ text: t }])
 const image = (b: Extract<Message['content'][number], { type: 'image' }>): Json =>
   b.source.type === 'url' ? { text: '[image omitted: Bedrock takes inline images only]' } : { image: { format: b.source.media_type.replace('image/', ''), source: { bytes: b.source.data } } }
 
+const document = (b: Document): Json[] => b.source.type === 'text'
+  ? text(`${b.title ? `Document: ${b.title}\n` : ''}${b.source.data}`)
+  : [{ document: { format: 'pdf', name: (b.title || 'document.pdf').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 100), source: { bytes: b.source.data } } }]
+
 function blocks(b: Message['content'][number]): Json[] {
   if (b.type === 'text') return text(b.text)
   if (b.type === 'image') return [image(b)]
+  if (b.type === 'document') return document(b)
   if (b.type === 'tool_use') return [{ toolUse: { toolUseId: b.id, name: b.name, input: b.input } }]
   if (b.type === 'thinking') return [{ reasoningContent: { reasoningText: { text: b.thinking, signature: b.signature } } }]
   if (b.type === 'redacted_thinking') return [{ reasoningContent: { redactedContent: b.data } }]
-  const content = b.content.flatMap(c => (c.type === 'text' ? text(c.text) : [image(c)]))
+  const content = b.content.flatMap(c => c.type === 'text' ? text(c.text) : c.type === 'image' ? [image(c)] : document(c))
   return [{ toolResult: { toolUseId: b.tool_use_id, content: content.length > 0 ? content : [{ text: '(no output)' }], ...(b.is_error ? { status: 'error' } : {}) } }]
 }
 

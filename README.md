@@ -6,15 +6,17 @@ its own tools, permissions, transcript, compaction and agents; the mod answers
 each routed request with a direct call to the provider you selected. It works
 inside the normal `claude` command through supported plugin hooks. Release
 0.11.0 removed every mod-owned agent type; Claude Code built-ins and user-supplied
-agent files remain native. Release 0.12.0 adds credential-free fetch-tier
-eligibility and configuration diagnostics to `/rice-models doctor` and
-`/rice-models status`. It registers no MCP tools and needs no launcher, proxy or
-gateway.
+agent files remain native. Release 0.12.0 added credential-free web-tier
+eligibility and configuration diagnostics. Release 0.13.0 preserves more document
+and image content across provider codecs and reports configured model capabilities,
+including tool coverage and web tiers, in setup, doctor and status. It registers no
+MCP tools and needs no launcher, proxy or gateway.
 
 **Each conversation stays on its own provider family.** A Codex session's
-subagents, skills, compaction, titles, permission judgments, web search and
-web fetch use Codex too. A subagent you deliberately put on another provider
-keeps that provider. See [Families](#families).
+routed subagents, skills, compaction, titles, permission judgments, web search
+and web fetch use Codex too. A subagent you deliberately put on another provider
+keeps that provider. Some engine-owned classifiers remain native Claude Code
+behavior, as listed in [Known limits](#known-limits). See [Families](#families).
 
 Providers:
 
@@ -53,9 +55,15 @@ inside the plugin cache. Then:
 4. Pick a model with `/model <id>`, for example `/model codex/gpt-6.1-sol`.
    `/rice-models models` lists every discovered id with its reported limits.
 
-`/rice-models status` shows the helper, discovery, context window and limits;
-`/rice-models doctor` is a read-only diagnosis. Discovery lists candidates; a
-real request is what establishes access and quota.
+`/rice-models setup`, `/rice-models status` and `/rice-models doctor` report the
+capability contract for every configured provider model. It covers the configured
+tool allowlist and provider cap, schema mapping, vision and document handling,
+known or unknown token bounds, parallel calls, effort, cache and web settings.
+The report describes this mod's configuration and request mapping, not a vendor
+certification or a guarantee that a model accepts every schema keyword. Unknown
+metadata stays unknown. A routed model offered fewer tools than the session has
+adds a coverage warning. Discovery lists candidates; a real request is what
+establishes access and quota.
 
 ## Families
 
@@ -107,6 +115,7 @@ parent's own model. Entries naming a model from another family are ignored.
 | `/compact` and automatic compaction | Claude Code's own summary prompt (with your `/compact` instructions in its slot) over the conversation as real messages, answered by the selected provider with its reported output bound; the engine's own summary message wording, citing the transcript file; a bounded tail of recent messages and their tool pairs kept verbatim; a failed or unreadable-prompt compaction keeps the original transcript |
 | Session titles | Selected provider, local fallback, manual names kept |
 | Auto-mode permission judgments | Selected provider receives your effective auto-mode policy; Claude Code's native classifier, rules, hooks and managed limits can still decide the action |
+| SubagentHandback admission classifier | Claude Code's native classifier; the public plugin API does not route this engine-owned decision |
 | WebFetch | Provider-native retrieval where supported, configured fetch services, Claude Code native WebFetch, then direct fetch with selected-provider extraction if native fallback is unavailable |
 | WebSearch | Selected provider's own search, then your saved search services, then Claude's native search with the session's account |
 | Stop / SubagentStop prompt hooks | Selected provider |
@@ -128,16 +137,18 @@ These come from what Claude Code exposes to plugins today:
   - The title hook receives the host's title event/result, not the internal title-generation request. The isolated title proof verifies selected-provider generation, persisted titles, manual titles, and failure fallback, but cannot capture Claude's native title prompt.
   - The permission hook receives the pending action and effective policy, not the host classifier's prompt. The isolated auto-mode proof verifies selected-provider judgments and actual native mode controls; it did not expose a stable native classifier prompt to the plugin.
   - Stop and SubagentStop system blocks matched across marker runs, but the full requests differed, so no independently stable byte-for-byte prompt was established. Prompt evaluators continue to route to the selected provider; agent-type evaluators remain native.
-  - The WebFetch proof verifies direct page retrieval, selected-provider extraction, and refusal on selected-provider failure. It does not capture Claude's internal extraction prompt, and the headless native extraction probe did not reach a successful extraction request.
+  - The WebFetch proof verifies the configured provider-native, saved-service, host-native and direct-fetch chain with selected-provider extraction, and refusal on selected-provider failure. It does not capture Claude's internal extraction prompt.
 
   No native auxiliary prompt was substituted without an independently verifiable capture. The plugin does not silently fall back from an unavailable native prompt capture to invented agent/tool text; routed built-in agent steps without a valid capture are refused with a visible diagnostic.
+- **Transcript content.** Text, images, inline PDF and plain-text documents, tool calls and results are retained or translated by each supported codec. Unsupported reasoning, source shapes and provider-specific blocks produce visible omission notes. Chat Completions accepts plain-text documents as text but cannot accept PDF document blocks; image and document URL sources are not fetched by the adapter.
+- **Host API gaps.** MCP input schemas, engine-owned inference hooks, compaction lifecycle callbacks, full evaluator-source provenance, Agent model choices and pinned teammate models need host support. The current behavior and specific API requests are documented in [Host limits](docs/host-limits.md).
 - **A long step shows a stale label.** After a compaction or a subagent spawn the engine's spinner keeps reading "Running SessionStart hooks..." for the whole next routed step, which can take minutes on a large context. The session is working; the label is the engine's.
-- **Native auto-mode classifier.** The selected-provider judgment does not replace
-  Claude Code's own classifier. In the isolated explicit child-auto proof on Claude
-  Code 2.1.306, the selected-provider judgment allowed the synthetic marker action,
-  but the host rejected `selected/main` as unrecognized and did not run the action.
-  Support for routed model ids in this host classifier is not documented or verified;
-  the mod does not bypass the check.
+- **Child permission modes.** On Claude Code 2.1.306, a child created with explicit
+  `permissionMode: 'auto'` under a plan-mode parent resolves to effective `plan`.
+  The version-aware proof checks the host's effective mode, and the permission gate
+  uses native `PreToolUse` mode evidence rather than inferring a child's mode from
+  its registration settings. The selected-provider judgment does not replace the
+  host classifier or bypass native permission checks.
 - **Auto-mode handoff review.** When a subagent finishes while its parent is in
   auto mode, Claude Code reviews the report with its own classifier, which uses
   Claude. If Claude is unavailable the report is still delivered, with a note.
@@ -503,11 +514,13 @@ WSL is outside this mod's scope.
   `test:permissions`, `test:permission-mode`, `test:search`, `test:evaluators` and
   `test:titles` proofs start the real `claude` with `--plugin-dir`, local stand-in
   providers and an Anthropic endpoint that refuses everything, and fail if any
-  routed request reaches it. `test:tools` also compares the tool definitions and agent
-  prompts the helper reads with an independent native run, byte for byte.
-- `bun run check` runs all of the above plus `git diff --check`. GitHub Actions
-  runs it on Linux for Claude Code 2.1.301, 2.1.302 and 2.1.306 and on native
-  Windows for 2.1.302.
+  routed request reaches it. `test:tools` checks installed and target engine versions,
+  compares shared tool input schemas and captured agent prompts with an independent
+  native run, verifies routed schemas against captured, native or fallback schemas, and
+  confirms the base's native plugin behavior remains intact.
+- `bun run check` runs all of the above plus `git diff --check`. GitHub Actions runs
+  it on Linux for Claude Code 2.1.301, 2.1.302 and 2.1.306 and on native Windows for
+  2.1.302.
 
 The proofs use local fixtures, never personal accounts; they establish routing and
 lifecycle behavior, not a provider's live entitlement or quota.

@@ -12,7 +12,7 @@ import type { Placed } from './history'
 
 const none = () => undefined
 
-test('thinking goes, other blocks are named, cache_control and unknown fields go, and orphan tool results are dropped', () => {
+test('unsupported thinking, document shapes, server tools and orphan results leave explicit notes', () => {
   const transcript: ApiMessage[] = [
     { role: 'user', content: [{ type: 'text', text: 'go', cache_control: { type: 'ephemeral' } }, { type: 'document', source: {} }] },
     {
@@ -35,13 +35,22 @@ test('thinking goes, other blocks are named, cache_control and unknown fields go
     },
   ]
   expect(normalize(transcript, true, none)).toEqual([
-    { role: 'user', content: [{ type: 'text', text: 'go' }, { type: 'text', text: '[document omitted]' }] },
-    { role: 'assistant', content: [{ type: 'text', text: 'ok' }, { type: 'tool_use', id: 't1', name: 'ToolSearch', input: { query: 'x' } }] },
+    { role: 'user', content: [{ type: 'text', text: 'go' }, { type: 'text', text: '[document omitted: unknown media type source is unsupported; only inline application/pdf and text/plain are replayed]' }] },
+    {
+      role: 'assistant',
+      content: [
+        { type: 'text', text: '[thinking omitted: provider-specific reasoning cannot be replayed without a held signature]' },
+        { type: 'text', text: 'ok' },
+        { type: 'text', text: '[server tool call web_search represented as text: this request exposes client tools only; the call was not reissued]' },
+        { type: 'tool_use', id: 't1', name: 'ToolSearch', input: { query: 'x' } },
+      ],
+    },
     {
       role: 'user',
       content: [
         { type: 'tool_result', tool_use_id: 't1', content: [{ type: 'text', text: '[tool loaded: mcp__a__b]' }, { type: 'text', text: 'loaded' }], is_error: false },
-        { type: 'text', text: '[web_search_tool_result block omitted]' },
+        { type: 'text', text: '[tool_result omitted: its matching tool_use is outside the normalized transcript window]' },
+        { type: 'text', text: '[web_search_tool_result omitted: the routed request has no matching Claude-hosted server tool result block]' },
       ],
     },
   ])

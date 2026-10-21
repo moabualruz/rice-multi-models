@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import ts from 'typescript'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -19,6 +20,19 @@ let child
 const textOf = content => typeof content === 'string' ? content : Array.isArray(content) ? content.map(block => block?.text ?? '').join('\n') : ''
 const byName = (tools, name) => tools.find(tool => tool.name === name)
 const lastBlock = body => Array.isArray(body.system) ? body.system.at(-1).text : String(body.system)
+const names = tools => tools.map(tool => tool.name).sort()
+function generatedSchemaInfo() {
+  const file = join(root, 'hooks/schemas.gen.ts')
+  const source = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true)
+  const declarations = source.statements.flatMap(statement => ts.isVariableStatement(statement) ? [...statement.declarationList.declarations] : [])
+  const stamp = declarations.find(each => ts.isIdentifier(each.name) && each.name.text === 'STAMP')
+  const schemas = declarations.find(each => ts.isIdentifier(each.name) && each.name.text === 'SCHEMAS')
+  assert.ok(stamp?.initializer && ts.isObjectLiteralExpression(stamp.initializer), 'generated built-in schema stamp exists')
+  assert.ok(schemas?.initializer && ts.isObjectLiteralExpression(schemas.initializer), 'generated built-in schema table exists')
+  const version = stamp.initializer.properties.find(property => ts.isPropertyAssignment(property) && property.name.getText(source) === 'engineVersion')?.initializer
+  assert.ok(version && ts.isStringLiteral(version), 'generated built-in schema version is a string')
+  return { version: version.text, schemas: JSON.parse(schemas.initializer.getText(source)) }
+}
 function terminate() {
   if (!child || child.exitCode !== null || child.signalCode !== null) return
   if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', timeout: 10_000 })
@@ -43,6 +57,14 @@ async function finish(label, limit = 60_000) {
 }
 
 try {
+  const versionResult = spawnSync(native, ['--version'], { encoding: 'utf8', timeout: 10_000 })
+  assert.equal(versionResult.status, 0, `installed Claude Code version query failed: ${(versionResult.stdout + versionResult.stderr).slice(-1000)}`)
+  const installedVersion = /^(\d+\.\d+\.\d+) \(Claude Code\)$/.exec(versionResult.stdout.trim())?.[1]
+  assert.ok(installedVersion, `unrecognized installed Claude Code version: ${versionResult.stdout.trim()}`)
+  if (process.env.CLAUDE_VERSION) assert.equal(installedVersion, process.env.CLAUDE_VERSION, 'installed Claude Code must match the CI target version')
+  const fallback = generatedSchemaInfo()
+  const fallbackSchemas = fallback.schemas
+
   // 1. An independent native run: the default tools, a custom agent file, and every built-in agent type the engine
   // lists, each started in the foreground and in the background by the stub's answer.
   const first = isolated('native')
@@ -91,17 +113,23 @@ try {
   server.closeAllConnections(); server.close()
   const nativeMain = requests.find(row => row.main)?.body
   assert.ok(nativeMain?.tools?.length, 'the native run sent its tools')
+  assert.ok(listed.length > 0, 'the installed engine lists its built-in agent types')
   assert.ok(listed.every(type => !type.startsWith('rice-multi-models:')), 'native agent definitions include no mod-owned type')
   const agentRequest = (type, background) => requests.find(row => row.type === type && row.background === background)?.body
-  assert.ok(agentRequest('Explore', false) && agentRequest('general-purpose', true), 'the native run started the built-in agents')
 
-  // 2. The helper captures prompts and stable schemas; live descriptions and offered tools can be session-scoped.
+  // 2. The shipped helper reads the installed engine's definitions in its own isolated run.
   const helper = spawnSync(process.execPath, [join(root, 'dist/helper.mjs'), 'capture-tools'], { input: JSON.stringify({ tools: nativeMain.tools.map(tool => tool.name) }), encoding: 'utf8', timeout: 120_000, env: first.env })
   const result = JSON.parse(helper.stdout)
   assert.equal(result.ok, true, result.error)
   const capture = result.capture
+  assert.equal(capture.version, installedVersion, 'tool capture must name the installed Claude Code build')
   assert.equal(typeof capture.prompts.Explore, 'string', 'the helper captures the routed Explore prompt')
   assert.ok(Array.isArray(capture.offered.Explore?.foreground), 'the helper captures the foreground Explore tool offer')
+  const independentlySent = new Map(nativeMain.tools.map(tool => [tool.name, tool]))
+  for (const tool of capture.tools) {
+    const independent = independentlySent.get(tool.name)
+    if (independent) assert.deepEqual(tool.input_schema, independent.input_schema, `${tool.name} input schema matches the independent native run`)
+  }
   for (const name of ['Agent', 'ListAgents']) {
     const nativeTool = byName(nativeMain.tools, name)
     const capturedTool = byName(capture.tools, name)
@@ -117,6 +145,11 @@ try {
       const own = custom ? AGENT_BODY : capture.prompts[type]
       assert.equal(typeof own, 'string', `the capture holds the ${type} prompt`)
       assert.equal(capture.agentHead + own + capture.agentTail, lastBlock(body), `the ${type} prompt equals the native run, byte for byte`)
+      const nativeAgentTools = new Map(body.tools.map(tool => [tool.name, tool]))
+      for (const tool of nativeAgentTools.values()) {
+        const capturedTool = independentlySent.get(tool.name)
+        if (capturedTool) assert.deepEqual(tool.input_schema, capturedTool.input_schema, `the ${type} ${tool.name} input schema matches the native capture`)
+      }
       compared.push(`${type}:${background ? 'background' : 'foreground'}`)
     }
   }
@@ -176,7 +209,18 @@ try {
   const wires = JSON.parse(readFileSync(evidence, 'utf8'))
   const main = wires.find(row => row.who === 'main'), custom = wires.find(row => row.who !== 'main')
   assert.ok(main && custom, 'the routed main and its custom agent were both sent')
+  const capturedByName = new Map(capture.tools.map(tool => [tool.name, tool]))
+  const looseSchema = { type: 'object', additionalProperties: true }
+  const assertRoutedSchemas = (tools, stage) => {
+    for (const tool of tools) {
+      const captured = capturedByName.get(tool.name) ?? independentlySent.get(tool.name)
+      const schema = captured?.input_schema ?? fallbackSchemas[tool.name] ?? looseSchema
+      assert.deepEqual(tool.schema, schema, `${stage} ${tool.name} input schema matches the capture, native request, or documented fallback`)
+      assert.equal(typeof tool.description, 'string', `${stage} ${tool.name} retains its session description`)
+    }
+  }
   for (const wire of [main, custom]) {
+    assertRoutedSchemas(wire.tools, wire.who)
     for (const name of ['Agent', 'ListAgents']) {
       const sent = byName(wire.tools, name)
       if (!sent) continue
@@ -193,7 +237,7 @@ try {
   assert.equal(custom.system, lastBlock(nativeCustom), 'the routed custom agent gets its captured native prompt, byte for byte')
   assert.deepEqual(JSON.parse(readFileSync(spawnEvidence, 'utf8')), { type: 'owned-proof-restricted-agent', requested: null, definitionModel: 'codex/owned-child', selected: 'codex/owned-child', reason: 'the agent definition names a routed model' }, 'the plugin routes exact model ids from custom frontmatter')
   assert.ok(!custom.system.includes('styx'))
-  console.log(JSON.stringify({ customAgentProof: true, customAgentType: 'owned-proof-restricted-agent', frontmatterModel: 'codex/owned-child', resolvedTarget: custom.target, loadedModAgentTypes: loadedAgents.filter(type => type.startsWith('rice-multi-models:')), nativeToolCaptureVersion: capture.version, capturedTools: capture.tools.length, comparedAgentPrompts: compared.length, routedSessionDescriptions: ['Agent', 'ListAgents'], routedRequests: wires.length }))
+  console.log(JSON.stringify({ publicTools: true, customAgentProof: true, customAgentType: 'owned-proof-restricted-agent', frontmatterModel: 'codex/owned-child', resolvedTarget: custom.target, loadedModAgentTypes: loadedAgents.filter(type => type.startsWith('rice-multi-models:')), nativeToolCaptureVersion: capture.version, capturedTools: capture.tools.length, comparedAgentPrompts: compared.length, routedSessionDescriptions: ['Agent', 'ListAgents'], routedRequests: wires.length, schemaTableVersion: fallback.version, schemaTableVersionMatchesInstalled: fallback.version === installedVersion }))
 } finally {
   terminate()
   rmSync(fixture, { recursive: true, force: true })

@@ -198,7 +198,7 @@ test('an HTTP connection reset before response headers retries', async () => {
 test('HTTP 503 and a truncated SSE response are transient', async () => {
   for (const reply of [{ status: 503, body: { error: { type: 'server_error' } } }, { events: [created] }] satisfies Reply[]) {
     const result = await fake([reply, {}])
-    expect(result.calls).toBe(2)
+    expect(result.calls, JSON.stringify({ calls: result.calls, events: result.events })).toBe(2)
     expect(result.events.some(event => event.type === 'stop')).toBe(true)
   }
 })
