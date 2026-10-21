@@ -152,9 +152,9 @@ test('public DNS is resolved once and the checked address is passed to the conne
 })
 
 test('a provider-native success is terminal and failure advances to configured fetch', async () => {
-  const configText = JSON.stringify({ providers: { selected: { kind: 'anthropic', baseUrl: 'https://api.anthropic.com', auth: 'none', models: { owned: {} } } } })
+  const configText = JSON.stringify({ providers: { selected: { kind: 'anthropic', baseUrl: 'https://api.anthropic.com', auth: 'none', models: { 'claude-sonnet-4-6': {} } } } })
   const parsed = parseConfig(configText); expect(parsed.errors).toEqual([]); if (!parsed.config) throw new Error('Invalid native fetch fixture')
-  const selected: StepWire = { ...wire, configText, approved: [fingerprint(parsed.config.providers.selected!)], req: { ...wire.req, target: 'selected/owned' } }
+  const selected: StepWire = { ...wire, configText, approved: [fingerprint(parsed.config.providers.selected!)], req: { ...wire.req, target: 'selected/claude-sonnet-4-6' } }
   let configured = 0, direct = 0
   const run = create({ request: async () => { direct++; return page() }, configured: async () => { configured++; throw new Error('Configured stage must not run') }, step: async function* (request) {
     expect(request.req.native?.webFetch).toMatchObject({ url, maxUses: 1 })
@@ -173,10 +173,24 @@ test('a provider-native success is terminal and failure advances to configured f
   expect(configured).toBe(1); expect(direct).toBe(0); expect(extractCalls).toBe(0)
 })
 
+test('valid empty hosted-provider results are terminal successes for Anthropic and Gemini', async () => {
+  const fixtures = [
+    { kind: 'anthropic', baseUrl: 'https://api.anthropic.com', model: 'claude-sonnet-4-6', result: { type: 'native_block', block: { type: 'web_fetch_tool_result', content: { type: 'web_fetch_result', url, content: { type: 'document', source: { type: 'text', media_type: 'text/plain', data: '' } } } } } },
+    { kind: 'gemini', baseUrl: 'https://generativelanguage.googleapis.com', model: 'gemini-2.5-flash', result: { type: 'native_block', block: { type: 'gemini_url_context_result', url_metadata: [{ retrieved_url: url, url_retrieval_status: 'URL_RETRIEVAL_STATUS_SUCCESS' }] } } },
+  ] as const
+  for (const fixture of fixtures) {
+    const configText = JSON.stringify({ providers: { selected: { kind: fixture.kind, baseUrl: fixture.baseUrl, auth: 'none', models: { [fixture.model]: {} } } } })
+    const parsed = parseConfig(configText); expect(parsed.errors).toEqual([]); if (!parsed.config) throw new Error('Invalid hosted empty-result fixture')
+    const selected: StepWire = { ...wire, configText, req: { ...wire.req, target: `selected/${fixture.model}` } }
+    const outcome = await create({ step: async function* () { yield fixture.result; yield { type: 'stop', reason: 'end_turn' } }, configured: async () => { throw new Error('Empty native success must not fall through') } })({ ...input, wire: selected }, signal())
+    expect(outcome).toMatchObject({ result: '', url })
+  }
+})
+
 test('Gemini URL Context is provider-native only on the official hosted GenerateContent endpoint', async () => {
-  const configText = JSON.stringify({ providers: { selected: { kind: 'gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta', auth: 'none', models: { owned: {} } } } })
+  const configText = JSON.stringify({ providers: { selected: { kind: 'gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta', auth: 'none', models: { 'gemini-2.5-flash': {} } } } })
   const parsed = parseConfig(configText); expect(parsed.errors).toEqual([]); if (!parsed.config) throw new Error('Invalid Gemini URL Context fixture')
-  const selected: StepWire = { ...wire, configText, req: { ...wire.req, target: 'selected/owned' } }
+  const selected: StepWire = { ...wire, configText, req: { ...wire.req, target: 'selected/gemini-2.5-flash' } }
   const run = create({ step: async function* (request) {
     expect(request.req.native?.webFetch).toMatchObject({ url, maxUses: 1 })
     yield { type: 'native_block', block: { type: 'gemini_url_context_result', url_metadata: [{ retrieved_url: url, url_retrieval_status: 'URL_RETRIEVAL_STATUS_SUCCESS' }] } }
@@ -195,10 +209,20 @@ test('Gemini URL Context is provider-native only on the official hosted Generate
   await expect(mismatched({ ...input, wire: selected }, signal())).resolves.toMatchObject({ kind: 'native-fallback', url })
 })
 
+test('unsupported Gemini model skips provider-native fetch before the provider call', async () => {
+  const configText = JSON.stringify({ providers: { selected: { kind: 'gemini', baseUrl: 'https://generativelanguage.googleapis.com', auth: 'none', models: { 'gemini-2.0-flash': {} } } } })
+  const parsed = parseConfig(configText); expect(parsed.errors).toEqual([]); if (!parsed.config) throw new Error('Invalid unsupported Gemini fixture')
+  const selected: StepWire = { ...wire, configText, req: { ...wire.req, target: 'selected/gemini-2.0-flash' } }
+  let providerCalls = 0
+  const outcome = await create({ step: async function* () { providerCalls++; throw new Error('unsupported model must skip provider fetch') }, configured: async () => { throw new Error('No configured fetch fixture.') } })({ ...input, wire: selected }, signal())
+  expect(outcome).toMatchObject({ kind: 'native-fallback', url, prompt })
+  expect(providerCalls).toBe(0)
+})
+
 test('provider-native partial output is terminal and does not switch to another tier', async () => {
-  const configText = JSON.stringify({ providers: { selected: { kind: 'anthropic', baseUrl: 'https://api.anthropic.com', auth: 'none', models: { owned: {} } } } })
+  const configText = JSON.stringify({ providers: { selected: { kind: 'anthropic', baseUrl: 'https://api.anthropic.com', auth: 'none', models: { 'claude-sonnet-4-6': {} } } } })
   const parsed = parseConfig(configText); expect(parsed.config).toBeDefined(); if (!parsed.config) throw new Error('Invalid hosted fetch fixture')
-  const selected: StepWire = { ...wire, configText, approved: [fingerprint(parsed.config.providers.selected!)], req: { ...wire.req, target: 'selected/owned' } }
+  const selected: StepWire = { ...wire, configText, approved: [fingerprint(parsed.config.providers.selected!)], req: { ...wire.req, target: 'selected/claude-sonnet-4-6' } }
   let configured = 0
   const run = create({ configured: async () => { configured++; throw new Error('Must not switch tiers after output begins') }, step: async function* () {
     yield { type: 'text', text: 'Partial provider response' }

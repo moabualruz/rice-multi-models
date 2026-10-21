@@ -5,9 +5,11 @@ servers as ordinary Claude Code session and subagent models. Claude Code keeps
 its own tools, permissions, transcript, compaction and agents; the mod answers
 each routed request with a direct call to the provider you selected. It works
 inside the normal `claude` command through supported plugin hooks. Release
-0.11.0 removes every mod-owned agent type; Claude Code built-ins and user-supplied
-agent files remain native. It registers no MCP tools and needs no launcher, proxy
-or gateway.
+0.11.0 removed every mod-owned agent type; Claude Code built-ins and user-supplied
+agent files remain native. Release 0.12.0 adds credential-free fetch-tier
+eligibility and configuration diagnostics to `/rice-models doctor` and
+`/rice-models status`. It registers no MCP tools and needs no launcher, proxy or
+gateway.
 
 **Each conversation stays on its own provider family.** A Codex session's
 subagents, skills, compaction, titles, permission judgments, web search and
@@ -30,8 +32,8 @@ companion [rice-session-accounts](https://github.com/moabualruz/rice-session-acc
 ## Install and start
 
 You need Claude Code 2.1.301 or newer and Node.js 22 or newer on the PATH
-Claude Code starts with. CI tests 2.1.301 and 2.1.302; focused native proofs also
-run on 2.1.306. Install from a terminal:
+Claude Code starts with. CI covers 2.1.301, 2.1.302 and 2.1.306 on Linux, plus
+2.1.302 on native Windows. Install from a terminal:
 
 ```sh
 claude plugin install rice-multi-models --marketplace moabualruz/rice-mods
@@ -201,7 +203,11 @@ terminal and does not trigger another service. `/rice-models doctor` and
 configured services in priority order, and whether the Claude fallback can be
 attempted. This metadata omits endpoint URLs and credential references; live
 Claude account access is verified only if that fallback is used. Safe debug
-messages identify the stage that answered. The same doctor/status object reserves `fetchTierState` for a pure fetch-state snapshot with ordered `tiers` containing `order`, `stage`, `eligible` and `reason`. Its assumed producer contract is `fetchTierState({ target, remote, configuredServices })`. Until the fetch implementation exposes that function, the field reports that fetch-tier diagnostics are unavailable; WebFetch itself is not disabled. See the [provider research](docs/research/provider-web-search-20261016.md).
+messages identify the stage that answered. The same doctor/status object now
+includes ordered fetch tiers, safe configured service names and priorities,
+configuration-read status, and readiness notes for Claude Code native WebFetch
+and direct retrieval with selected-model extraction. No endpoint URL or auth
+reference is returned. See the [provider research](docs/research/provider-web-search-20261016.md).
 
 ## WebFetch
 
@@ -213,6 +219,23 @@ WebFetch follows this order and stops at the first successful result:
 4. **`direct-selected-extraction`**, only after Claude Code native WebFetch is unavailable. The mod resolves the page destination, rejects non-public addresses, pins each connection to a checked address, manually follows and rechecks redirects, bounds the response, then asks the selected provider to extract from the fetched text. This is a recovery tier, not provider-native fetch: the mod itself retrieves the page.
 
 Claude Code's native permission processing still runs first. The hook gates the exact checked WebFetch input before replacing the engine implementation. A broad permission rule or a URL supplied by a caller does not skip that native gate. An unsafe or unresolved destination fails closed. Provider output that has started is not switched to another tier after a later provider error. Valid empty page content is a successful terminal result.
+
+Provider-native eligibility is checked before the provider request. Anthropic requires
+an `anthropic` model, a `claude-` model id and the exact HTTPS API origin. The encoder
+uses `web_fetch_20260318` for Claude 4.6+, Claude 5 and Mythos Preview; other Claude
+model ids use `web_fetch_20250910`. The official reference does not provide a complete
+model-by-model eligibility list for the basic tool, so local checks cannot prove that
+every Claude model or account accepts it. Doctor says when this remains provider-verified;
+a rejection before output begins advances to the configured-service tier.
+
+Gemini uses the GenerateContent `url_context` tool, not the newer Interactions API.
+Automatic eligibility is restricted to the documented model ids `gemini-4-argon`,
+`gemini-3.8-flash`, `gemini-3.6-flash`, `gemini-3.5-flash-lite`,
+`gemini-3.1-pro-preview`, `gemini-3.1-flash-lite`, `gemini-3-flash-preview`,
+`gemini-2.5-pro`, `gemini-2.5-flash` and `gemini-2.5-flash-lite` at the exact
+Google API origin. The provider can still reject a model/account request. Doctor and
+status report this local eligibility separately from whether the account has been
+verified.
 
 ### Configured fetch services
 
@@ -239,7 +262,7 @@ Save version 1 configuration in `<CLAUDE_CONFIG_DIR>/rice-multi-models/fetch.jso
 
 `auth` may reference an environment variable by name or an absolute credential-helper command. The referenced secret value is read only at request time, is sent only to that endpoint as a Bearer token, and is not returned by status state. Authenticated endpoints must use HTTPS. Do not put a credential value in the JSON file or URL. Endpoint priorities are nonnegative integers; ties retain file order. An empty `content` string is a valid success and prevents later services from being tried.
 
-The pure hook-side state interface is exported from `hooks/fetch-config.ts` as `fetchTierConfigState(config, providerNative)`. It accepts a parsed `FetchConfig` and a boolean indicating whether the selected provider has a verified hosted URL-fetch contract. It returns the runtime tier order, includes configured service names and priorities in sorted order, and excludes all credential references and values. When `providerNative` is false, the provider-native tier is omitted. The final two entries are always `native-fallback` and `direct-selected-extraction`.
+The pure hook-side state interface is exported from `hooks/fetch-config.ts` as `fetchTierConfigState(config, providerNative)`. It accepts endpoint metadata and a boolean indicating whether the selected route passes the local protocol eligibility checks. It always reports all four runtime tiers, with `eligible: false` and a skip reason for provider-native fetch when the route does not qualify. Configured service names and priorities are ordered without endpoint URLs, credential references or values. Provider/account model support is not claimed unless confirmed by the actual request. The final two entries are always `native-fallback` and `direct-selected-extraction`.
 
 Protocol support is intentionally narrow. Anthropic Messages has a hosted `web_fetch` server tool. Gemini URL Context retrieves supplied URLs and returns model-generated text with URL retrieval metadata, rather than raw page text. OpenAI Responses web search is not treated as arbitrary URL fetch. OpenCode's `webfetch` is an application tool, and Ollama's web fetch is a separate REST endpoint; neither is a provider-protocol tool in this chain. The current Bedrock Converse adapter has no hosted fetch contract. Bedrock Mantle Responses is a separate API surface.
 
@@ -451,8 +474,8 @@ ordinary `claude` command.
 
 ## Requirements and platform scope
 
-Claude Code 2.1.301 or newer and Node.js 22 or newer. CI tests Claude Code
-2.1.301 and 2.1.302; focused native proofs also run on 2.1.306. Provider CLIs,
+Claude Code 2.1.301 or newer and Node.js 22 or newer. CI covers Claude Code
+2.1.301, 2.1.302 and 2.1.306 on Linux, plus 2.1.302 on native Windows. Provider CLIs,
 accounts and keys depend on the providers you use; a declared local endpoint needs
 no Codex login. The compiled helper, its WebSocket library and the provider
 instruction asset are part of the plugin; nothing is installed at runtime.
@@ -483,8 +506,8 @@ WSL is outside this mod's scope.
   routed request reaches it. `test:tools` also compares the tool definitions and agent
   prompts the helper reads with an independent native run, byte for byte.
 - `bun run check` runs all of the above plus `git diff --check`. GitHub Actions
-  runs it on Ubuntu for Claude Code 2.1.301 and 2.1.302 and on native Windows for
-  2.1.302.
+  runs it on Linux for Claude Code 2.1.301, 2.1.302 and 2.1.306 and on native
+  Windows for 2.1.302.
 
 The proofs use local fixtures, never personal accounts; they establish routing and
 lifecycle behavior, not a provider's live entitlement or quota.

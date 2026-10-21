@@ -1,8 +1,8 @@
 import { readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { MAX_FETCH_CONFIG_BYTES, orderedFetchEndpoints, parseFetchConfig } from '../hooks/fetch-config.ts'
-import type { FetchEndpoint } from '../hooks/fetch-config.ts'
+import { emptyFetchConfig, MAX_FETCH_CONFIG_BYTES, orderedFetchEndpoints, parseFetchConfig } from '../hooks/fetch-config.ts'
+import type { FetchEndpoint, FetchConfigMetadata } from '../hooks/fetch-config.ts'
 import { runCommand } from './core/subprocess.ts'
 
 export type FetchedPage = { url: string; content: string; contentType: string; status: number }
@@ -22,6 +22,14 @@ export function fetchEndpoints(environment: NodeJS.ProcessEnv = process.env): Fe
   const parsed = parseFetchConfig(text)
   if (parsed.errors.length) throw new FetchServiceUnavailable('Invalid fetch configuration; check /rice-models fetch setup.')
   return orderedFetchEndpoints(parsed.config)
+}
+
+export type FetchConfigurationSnapshot = { ok: boolean; config: FetchConfigMetadata; error?: string }
+
+/** Local, read-only diagnostics; only service names and priorities leave this process. */
+export function fetchConfigurationSnapshot(environment: NodeJS.ProcessEnv = process.env): FetchConfigurationSnapshot {
+  try { return { ok: true, config: { endpoints: fetchEndpoints(environment).map(({ name, priority }) => ({ name, priority })) } } }
+  catch { return { ok: false, config: { endpoints: [] }, error: 'Fetch configuration is unreadable or invalid; check /rice-models fetch setup.' } }
 }
 
 async function readJson(response: Response): Promise<unknown> {

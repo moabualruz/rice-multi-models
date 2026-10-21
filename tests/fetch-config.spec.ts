@@ -26,14 +26,15 @@ test('bad schema, duplicate names, inline credentials and URL query values fail 
   ]) expect(parseFetchConfig(JSON.stringify({ version: 1, endpoints: [endpoint] })).config.endpoints).toEqual([])
 })
 
-test('tier state is pure, priority ordered and never reveals authentication references', () => {
+test('tier state is pure, priority ordered and never reveals endpoints or authentication references', () => {
   const parsed = parseFetchConfig(source)
-  expect(fetchTierConfigState(parsed.config, true)).toEqual([
-    { tier: 'provider-native' },
-    { tier: 'configured-service', services: [{ name: 'first', priority: 10 }, { name: 'second', priority: 20 }] },
-    { tier: 'native-fallback' },
-    { tier: 'direct-selected-extraction' },
-  ])
-  expect(JSON.stringify(fetchTierConfigState(parsed.config, true))).not.toContain('FETCH_SECOND_KEY')
-  expect(fetchTierConfigState(parsed.config, false)[0]).toEqual({ tier: 'configured-service', services: [{ name: 'first', priority: 10 }, { name: 'second', priority: 20 }] })
+  const state = fetchTierConfigState(parsed.config, true)
+  expect(state.tiers.map(tier => tier.stage)).toEqual(['provider-native', 'configured-service', 'native-fallback', 'direct-selected-extraction'])
+  expect(state.tiers[0]).toMatchObject({ order: 1, eligible: true })
+  expect(state.tiers[1]).toMatchObject({ order: 2, eligible: true, services: [{ name: 'first', priority: 10 }, { name: 'second', priority: 20 }] })
+  expect(state.tiers[2]).toMatchObject({ order: 3, eligible: true, readiness: expect.any(String) })
+  expect(state.tiers[3]).toMatchObject({ order: 4, eligible: true })
+  const safe = JSON.stringify(state)
+  for (const sensitive of ['FETCH_SECOND_KEY', '/usr/bin/credential-helper', 'fetch.example']) expect(safe).not.toContain(sensitive)
+  expect(fetchTierConfigState(parsed.config, false).tiers[0]).toMatchObject({ order: 1, stage: 'provider-native', eligible: false })
 })

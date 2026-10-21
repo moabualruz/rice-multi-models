@@ -1,5 +1,6 @@
 // Node 22+ helper entry point. Source imports are inert; the bundled file dispatches only when run.
 import { realpathSync } from 'node:fs'
+import { isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { StepWire } from '../hooks/protocol.ts'
 import { failedStep } from '../hooks/protocol.ts'
@@ -12,6 +13,7 @@ import { opencodeEntries, opencodeKey } from './opencode-auth.ts'
 import { discoverCodex } from './codex-catalog.ts'
 import { discover } from './discover.ts'
 import { searchConfiguration } from './search-config.ts'
+import { fetchConfigurationSnapshot } from './fetch-services.ts'
 import { runToolSearch } from './search/tool-search.ts'
 import { runDirectWebFetch, runWebFetch } from './web-fetch.ts'
 import { captureCompaction } from './native-compaction.ts'
@@ -87,6 +89,15 @@ export async function main(lifetime?: AbortSignal): Promise<void> {
     const result = await searchConfiguration(JSON.parse(await readStdin()))
     process.stdout.write(`${JSON.stringify(result)}\n`)
     if (!result.ok) process.exitCode = 1
+  } else if (mode === 'fetch-config-status') {
+    const input: unknown = JSON.parse(await readStdin())
+    const configDir = input && typeof input === 'object' && !Array.isArray(input) &&
+      Object.keys(input).every(key => key === 'configDir') && typeof (input as Record<string, unknown>).configDir === 'string'
+      ? (input as { configDir: string }).configDir : undefined
+    const result = configDir && isAbsolute(configDir) && !/[\0\r\n]/.test(configDir)
+      ? fetchConfigurationSnapshot({ ...process.env, CLAUDE_CONFIG_DIR: configDir })
+      : { ok: false, config: { endpoints: [] }, error: 'Fetch configuration status requires an absolute config directory.' }
+    process.stdout.write(`${JSON.stringify(result)}\n`)
   } else if (mode === 'web-fetch-check-destination') {
     const controller = new AbortController()
     const abort = () => controller.abort()

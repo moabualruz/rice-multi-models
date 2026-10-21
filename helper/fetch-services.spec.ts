@@ -1,6 +1,9 @@
 import { expect, test } from 'bun:test'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { FetchEndpoint } from '../hooks/fetch-config.ts'
-import { configuredFetch, fetchFromService, FetchServiceUnavailable } from './fetch-services.ts'
+import { configuredFetch, fetchConfigurationSnapshot, fetchFromService, FetchServiceUnavailable } from './fetch-services.ts'
 
 const pageUrl = 'https://docs.example/public'
 const endpoint = (name: string, auth?: FetchEndpoint['auth']): FetchEndpoint => ({ name, url: `https://fetch.example/${name}`, priority: 0, ...(auth ? { auth } : {}) })
@@ -50,4 +53,30 @@ test('cancellation is terminal and a service failure is explicitly reported when
   stop.abort(new Error('fixture cancellation'))
   await expect(fetchFromService(endpoint('cancel'), pageUrl, stop.signal, async () => { throw new Error('not reached') })).rejects.toThrow('fixture cancellation')
   await expect(configuredFetch(pageUrl, signal(), [endpoint('offline')], async () => new Response('down', { status: 503 }))).rejects.toBeInstanceOf(FetchServiceUnavailable)
+})
+
+test('fetch configuration status exports names and priorities only', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rice-fetch-status-'))
+  const fetchDir = join(dir, 'rice-multi-models')
+  mkdirSync(fetchDir)
+  try {
+    writeFileSync(join(fetchDir, 'fetch.json'), JSON.stringify({ version: 1, endpoints: [
+      { name: 'safe-name', url: 'https://fetch.example/private', priority: 7, auth: { env: 'FETCH_PRIVATE_KEY' } },
+    ] }))
+    const snapshot = fetchConfigurationSnapshot({ CLAUDE_CONFIG_DIR: dir })
+    expect(snapshot).toEqual({ ok: true, config: { endpoints: [{ name: 'safe-name', priority: 7 }] } })
+    expect(JSON.stringify(snapshot)).not.toMatch(/fetch\.example|FETCH_PRIVATE_KEY/)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('invalid fetch configuration reports a generic safe status', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rice-fetch-invalid-'))
+  const fetchDir = join(dir, 'rice-multi-models')
+  mkdirSync(fetchDir)
+  try {
+    writeFileSync(join(fetchDir, 'fetch.json'), '{')
+    expect(fetchConfigurationSnapshot({ CLAUDE_CONFIG_DIR: dir })).toEqual({
+      ok: false, config: { endpoints: [] }, error: 'Fetch configuration is unreadable or invalid; check /rice-models fetch setup.',
+    })
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })

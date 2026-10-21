@@ -49,6 +49,8 @@ import { commandText, detectRuntime as probeRuntime, helperFile, setupSummary, s
 import type { PickerResult, Runtime } from './setup'
 import { searchConfigurationCommand } from './search-config'
 import type { SearchConfigurationResult, SearchEdit } from './search-config'
+import { fetchProviderProtocol, fetchTierConfigState } from './fetch-config'
+import type { FetchConfigMetadata } from './fetch-config'
 import { webSearchStatus } from './web-search-status'
 import { DEFAULT_WEB_SEARCH_MAX_USES } from './web-search-tier'
 import { runNativeSearch } from './native-search'
@@ -67,7 +69,7 @@ import { createEvaluatorSources, registerEvaluatorSources } from './evaluator-so
 
 const PLUGIN = 'rice-multi-models'
 /** Who the requests to declared providers say they come from (OpenCode Go asks each client to name itself). */
-const USER_AGENT = 'rice-multi-models/0.11.0 (claude-code)'
+const USER_AGENT = 'rice-multi-models/0.12.0 (claude-code)'
 const PROVIDERS: Readonly<Record<string, string>> = { codex: 'OpenAI Codex (ChatGPT subscription)' }
 const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 const prefsAtom = atom({ plugin: 'rice-multi-models', key: 'prefs' } as const, { effort: null, transport: 'auto', helper: 'session' })
@@ -1030,11 +1032,37 @@ async function readSearchConfiguration($: EngineInterface, checked: Runtime, edi
   } catch { return { ok: false, error: 'Search configuration helper did not complete.' } }
 }
 
+type FetchConfigurationResult = { ok: boolean; config?: FetchConfigMetadata; error?: string }
+
+async function readFetchConfiguration($: EngineInterface, checked: Runtime): Promise<FetchConfigurationResult> {
+  if (checked.error || !checked.executable) return { ok: false, config: { endpoints: [] }, error: 'Fetch configuration could not be read.' }
+  const configDir = (await $.env.get('CLAUDE_CONFIG_DIR')) || `${checked.info?.home || (await $.env.get('USERPROFILE')) || (await $.env.get('HOME')) || ''}/.claude`
+  try {
+    const result = await $.process.run([checked.executable, helperFile($.plugin.root), 'fetch-config-status'], { stdin: JSON.stringify({ configDir }), timeoutMs: 10_000 })
+    const value: unknown = JSON.parse(result.stdout)
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false, config: { endpoints: [] }, error: 'Fetch configuration could not be read.' }
+    const parsed = value as FetchConfigurationResult
+    const endpoints = parsed.config?.endpoints
+    if (typeof parsed.ok !== 'boolean' || !Array.isArray(endpoints) || !endpoints.every(endpoint =>
+      endpoint && typeof endpoint.name === 'string' && Number.isSafeInteger(endpoint.priority))) return { ok: false, config: { endpoints: [] }, error: 'Fetch configuration could not be read.' }
+    return {
+      ok: parsed.ok,
+      config: { endpoints: endpoints.map(({ name, priority }) => ({ name, priority })) },
+      ...(parsed.ok ? {} : { error: 'Fetch configuration could not be read.' }),
+    }
+  } catch { return { ok: false, config: { endpoints: [] }, error: 'Fetch configuration could not be read.' } }
+}
+
 async function currentWebSearchStatus($: EngineInterface, checked: Runtime = runtime) {
   const model = await $.session.model()
+  const remote = remoteOf(loaded, model)
   const search = await readSearchConfiguration($, checked)
+  const fetch = await readFetchConfiguration($, checked)
   const config = search.config ?? { version: 1 as const, endpoints: [] }
-  return webSearchStatus(model, remoteOf(loaded, model), config, await $.env.get('RICE_MULTI_MODELS_SEARCH_URL'), search.ok)
+  const providerNative = remote !== undefined && fetchProviderProtocol(remote.model.kind, remote.provider.baseUrl, remote.modelId) !== undefined
+  const fetchTiers = fetchTierConfigState(fetch.config ?? { endpoints: [] }, providerNative)
+  return webSearchStatus(model, remote, config, await $.env.get('RICE_MULTI_MODELS_SEARCH_URL'), search.ok, fetchTiers,
+    { available: fetch.ok, error: fetch.error ?? null })
 }
 
 /** Pure diagnostics: no startup, settings write, install, network request, login or approval. */

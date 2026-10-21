@@ -5,6 +5,7 @@ import { Readable } from 'node:stream'
 import type { StepEvent, StepWire } from '../hooks/protocol.ts'
 import type { PublicWebFetchInput, PublicWebFetchResult } from '../hooks/web-fetch.ts'
 import { parseConfig } from '../hooks/config.ts'
+import { fetchProviderProtocol } from '../hooks/fetch-config.ts'
 import { resolve } from '../hooks/names.ts'
 import { runStep } from './run.ts'
 import { parseWebFetchContent } from './native/web-fetch.ts'
@@ -153,13 +154,16 @@ async function checkedProviderSource(value: string, signal: AbortSignal, resolve
   return source
 }
 
+function providerProtocol(configText: string, target: string): 'anthropic' | 'gemini' | undefined {
+  const parsed = parseConfig(configText)
+  const selected = parsed.config ? resolve(parsed.config, target) : undefined
+  if (selected?.kind !== 'remote') return undefined
+  const modelId = selected.target.slice(selected.provider.id.length + 1)
+  return fetchProviderProtocol(selected.model.kind, selected.provider.baseUrl, modelId)
+}
+
 async function providerFetch(input: PublicWebFetchInput, signal: AbortSignal, step: Ports['step'], resolver: Ports['resolve']): Promise<PublicWebFetchResult> {
-  const parsed = parseConfig(input.wire.configText)
-  const selected = parsed.config ? resolve(parsed.config, input.wire.req.target) : undefined
-  let origin: string | undefined
-  try { origin = selected?.kind === 'remote' ? new URL(selected.provider.baseUrl).origin : undefined } catch {}
-  const protocol = selected?.kind === 'remote' && selected.model.kind === 'anthropic' && origin === 'https://api.anthropic.com' ? 'anthropic'
-    : selected?.kind === 'remote' && selected.model.kind === 'gemini' && origin === 'https://generativelanguage.googleapis.com' ? 'gemini' : undefined
+  const protocol = providerProtocol(input.wire.configText, input.wire.req.target)
   if (!protocol) throw new WebFetchUnavailable('retrieval', 'Selected provider has no confirmed hosted WebFetch contract.')
   const attempt = AbortSignal.any([signal, AbortSignal.timeout(30_000)])
   const req: StepWire = { ...input.wire, req: { ...input.wire.req,
@@ -270,7 +274,7 @@ export function createWebFetch(ports: Partial<Ports> = {}) {
     const url = address(input.url), started = io.now(), lifetime = AbortSignal.any([signal, AbortSignal.timeout(120_000)])
     await resolveAndCheck(url, lifetime, io.resolve)
     const fallback = (): WebFetchOutcome => ({ kind: 'native-fallback', url: url.href, prompt: input.prompt, ...(input.offset === undefined ? {} : { offset: input.offset }) })
-    const nativeEligible = (() => { try { const parsed = parseConfig(input.wire.configText); const selected = parsed.config ? resolve(parsed.config, input.wire.req.target) : undefined; const origin = selected?.kind === 'remote' ? new URL(selected.provider.baseUrl).origin : ''; return selected?.kind === 'remote' && (selected.model.kind === 'anthropic' && origin === 'https://api.anthropic.com' || selected.model.kind === 'gemini' && origin === 'https://generativelanguage.googleapis.com') } catch { return false } })()
+    const nativeEligible = providerProtocol(input.wire.configText, input.wire.req.target) !== undefined
     if (nativeEligible) {
       try { const result = await providerFetch({ ...input, url: url.href }, lifetime, io.step, io.resolve); io.observe({ tier: 'provider-native', status: 'success' }); return { ...result, durationMs: Math.max(0, io.now() - started) } }
       catch (error) { lifetime.throwIfAborted(); if (error instanceof WebFetchUnavailable && error.terminal) throw error; io.observe({ tier: 'provider-native', status: 'unavailable' }) }

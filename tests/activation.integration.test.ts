@@ -28,6 +28,7 @@ function fixture() {
   const selection = { model: 'sonnet' }
   const discoveries: { configText: string; approved: string[] }[] = []
   const discovery: { catalogue: ModelCatalogue; unavailable: boolean } = { catalogue: { models: [], providers: [{ provider: 'codex', status: 'unavailable', source: 'fixture authenticated models endpoint', error: 'fixture-no-login' }] }, unavailable: false }
+  const fetchStatus: { result: unknown } = { result: { ok: true, config: { endpoints: [{ name: 'docs-fetch', priority: 4 }] } } }
   const info = { node: { executable: '/fixture/node', version: '22.20.0', supported: true }, platform: 'linux', home: '/empty-home', configDir: '/empty-home/.claude', codexHome: '/empty-home/.codex', opencodeAuthFile: '/empty-home/.local/share/opencode/auth.json', clis: {}, auth: { codex: false, opencode: false }, opencodeEntries: [] }
   const host: any = {
     env: {
@@ -52,6 +53,8 @@ function fixture() {
           discoveries.push(JSON.parse(options.stdin))
           return discovery.unavailable ? { exitCode: 1, stdout: '', stderr: 'fixture unavailable' } : { exitCode: 0, stdout: JSON.stringify(discovery.catalogue), stderr: '' }
         }
+        if (argv[2] === 'search-config') return { exitCode: 0, stdout: JSON.stringify({ ok: true, config: { version: 1, endpoints: [] } }), stderr: '' }
+        if (argv[2] === 'fetch-config-status') return { exitCode: 0, stdout: JSON.stringify(fetchStatus.result), stderr: '' }
         if (argv[2] === 'sync-picker') {
           const input = JSON.parse(options.stdin)
           syncs.push(input)
@@ -84,7 +87,7 @@ function fixture() {
     session: { id: async () => 'empty-session', model: async () => selection.model, usage: async () => ({ context: { window: Number(env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS') ?? 200000) } }), version: async () => ({ version: '2.1.296' }), isInteractive: async () => true },
   }
   return { host, files, calls, notices, commands, store, syncs, info, discoveries, discovery, env, envWrites, state, selection,
-    get contextWrites() { return envWrites.filter(write => write.key === 'CLAUDE_CODE_MAX_CONTEXT_TOKENS') },
+    get contextWrites() { return envWrites.filter(write => write.key === 'CLAUDE_CODE_MAX_CONTEXT_TOKENS') }, fetchStatus,
   }
 }
 
@@ -158,6 +161,33 @@ test('doctor is read-only and shipped-helper absence gives actionable reinstall 
   expect(missing.text).toContain('dist/helper.mjs is missing')
   expect(missing.text).toContain('Reinstall or update')
   expect(f.syncs).toEqual([])
+})
+
+test('fetch configuration read failures are reported generically without returned details', async () => {
+  const f = fixture()
+  f.fetchStatus.result = { ok: false, config: { endpoints: [], url: 'https://private.example/fetch' }, error: 'credential at https://private.example/?key=secret' }
+  const report = await callbacks.get('command.run')!(f.host, { args: 'doctor' })
+  const web = JSON.parse(report.text).integration.webSearch
+  expect(web.fetchConfiguration).toEqual({ available: false, error: 'Fetch configuration could not be read.' })
+  expect(JSON.stringify(web)).not.toMatch(/private\.example|key=secret|https?:/i)
+})
+
+test('doctor and status expose credential-free fetch tier diagnostics', async () => {
+  const f = fixture()
+  f.fetchStatus.result = { ok: true, config: { endpoints: [{ name: 'docs-fetch', priority: 4, url: 'https://private.example/fetch', auth: { env: 'FETCH_PRIVATE_KEY' } }] }, token: 'must-not-cross-status' }
+  const report = await callbacks.get('command.run')!(f.host, { args: 'doctor' })
+  const web = JSON.parse(report.text).integration.webSearch
+  expect(web.fetchConfiguration).toEqual({ available: true, error: null })
+  expect(web.fetchTierState.tiers.map((tier: { stage: string }) => tier.stage)).toEqual([
+    'provider-native', 'configured-service', 'native-fallback', 'direct-selected-extraction',
+  ])
+  expect(web.fetchTierState.tiers[1].services).toEqual([{ name: 'docs-fetch', priority: 4 }])
+  expect(JSON.stringify(web)).not.toMatch(/https?:|FETCH_PRIVATE_KEY|must-not-cross-status|credential-helper|api\.example/i)
+  await callbacks.get('session.start')!(f.host, { isInteractive: false }, async () => ({}))
+  const status = await callbacks.get('command.run')!(f.host, { args: 'status' })
+  expect(status.text).toContain('docs-fetch')
+  expect(status.text).toContain('direct-selected-extraction')
+  expect(f.calls.filter(argv => argv[2] === 'fetch-config-status')).toHaveLength(2)
 })
 
 test('freshly discovered Codex models and limits are shared by the picker and visible guide', async () => {

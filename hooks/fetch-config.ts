@@ -53,12 +53,47 @@ export function orderedFetchEndpoints(config: FetchConfig): FetchEndpoint[] {
   return config.endpoints.map((row, index) => ({ row, index })).sort((a, b) => a.row.priority - b.row.priority || a.index - b.index).map(({ row }) => row)
 }
 
+export type FetchProviderProtocol = 'anthropic' | 'gemini'
+const GEMINI_URL_CONTEXT_MODELS = new Set([
+  'gemini-4-argon', 'gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash-lite',
+  'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite', 'gemini-3-flash-preview',
+  'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite',
+])
+
+/** A route is native-fetch eligible only at the official API origin and for its documented protocol/model. */
+export function fetchProviderProtocol(modelKind: string | undefined, baseUrl: string | undefined, modelId?: string): FetchProviderProtocol | undefined {
+  let endpoint: URL
+  try { endpoint = new URL(baseUrl ?? '') } catch { return undefined }
+  if (endpoint.username || endpoint.password || endpoint.search || endpoint.hash) return undefined
+  const origin = endpoint.origin
+  if (modelKind === 'anthropic' && origin === 'https://api.anthropic.com' && modelId !== undefined && /^claude-[a-z0-9-]+$/i.test(modelId)) return 'anthropic'
+  if (modelKind === 'gemini' && origin === 'https://generativelanguage.googleapis.com' && modelId !== undefined && GEMINI_URL_CONTEXT_MODELS.has(modelId)) return 'gemini'
+  return undefined
+}
+
+export type FetchTierStage = 'provider-native' | 'configured-service' | 'native-fallback' | 'direct-selected-extraction'
+export type FetchTierConfigState = { tiers: Array<{
+  order: number
+  stage: FetchTierStage
+  eligible: boolean
+  reason: string
+  services?: Array<{ name: string; priority: number }>
+  readiness?: string
+}> }
+export type FetchConfigMetadata = { endpoints: Array<Pick<FetchEndpoint, 'name' | 'priority'>> }
+
 /** Pure, credential-free tier state for hook consumers and status surfaces. */
-export function fetchTierConfigState(config: FetchConfig, providerNative: boolean) {
-  return [
-    ...(providerNative ? [{ tier: 'provider-native' as const }] : []),
-    { tier: 'configured-service' as const, services: orderedFetchEndpoints(config).map(({ name, priority }) => ({ name, priority })) },
-    { tier: 'native-fallback' as const },
-    { tier: 'direct-selected-extraction' as const },
-  ]
+export function fetchTierConfigState(config: FetchConfigMetadata, providerNative: boolean): FetchTierConfigState {
+  const services = [...config.endpoints].sort((a, b) => a.priority - b.priority).map(({ name, priority }) => ({ name, priority }))
+  return { tiers: [
+    { order: 1, stage: 'provider-native', eligible: providerNative, reason: providerNative
+      ? 'The selected route passes local provider protocol checks; model or account support may still be rejected by the provider.'
+      : 'The selected route has no confirmed hosted fetch contract and is skipped before request.' },
+    { order: 2, stage: 'configured-service', eligible: services.length > 0, reason: services.length
+      ? 'Configured services are tried serially by ascending priority; reachability is not checked by status.'
+      : 'No configured fetch services are available.', services },
+    { order: 3, stage: 'native-fallback', eligible: true, reason: 'Claude Code native WebFetch is attempted before direct retrieval.',
+      readiness: 'Session authorization and account WebFetch support are checked only if this tier is used.' },
+    { order: 4, stage: 'direct-selected-extraction', eligible: true, reason: 'Final recovery retrieves the page directly, then extracts with the selected model.' },
+  ] }
 }

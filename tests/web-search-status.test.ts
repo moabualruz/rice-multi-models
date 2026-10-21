@@ -1,4 +1,6 @@
 import { expect, test } from 'bun:test'
+import { fetchProviderProtocol, fetchTierConfigState } from '../hooks/fetch-config'
+import type { FetchConfig } from '../hooks/fetch-config'
 import { webSearchStatus } from '../hooks/web-search-status'
 import type { SearchConfig } from '../hooks/search-config'
 import type { FetchTierState } from '../hooks/web-search-status'
@@ -22,7 +24,9 @@ test('doctor web-search metadata uses configured order and never returns endpoin
     { order: 4, name: 'legacy-environment', kind: 'searxng', priority: null },
   ])
   expect(status.claudeFallback).toMatchObject({ available: true })
-  expect(status.fetchTierState).toMatchObject({ available: false })
+  expect(status.fetchTierState.tiers.map(tier => tier.stage)).toEqual(['provider-native', 'configured-service', 'native-fallback', 'direct-selected-extraction'])
+  expect(status.fetchTierState.tiers[0]).toMatchObject({ eligible: false })
+  expect(status.fetchConfiguration).toEqual({ available: true, error: null })
   const safe = JSON.stringify(status)
   for (const secretDetail of ['search.example', 'SEARCH_SECRET_NAME', '/safe/credential-helper']) expect(safe).not.toContain(secretDetail)
 })
@@ -34,6 +38,35 @@ test('doctor accepts the documented pure fetch-tier state shape', () => {
   ] }
   const status = webSearchStatus('selected/main', undefined, { version: 1, endpoints: [] }, undefined, true, fetchState)
   expect(status.fetchTierState).toEqual(fetchState)
+})
+
+test('fetch diagnostics expose safe configured services and honest fallback readiness', () => {
+  const fetchConfig: FetchConfig = { version: 1, endpoints: [
+    { name: 'later', url: 'https://fetch.example/later', priority: 20, auth: { env: 'FETCH_SECRET_NAME' } },
+    { name: 'first', url: 'https://fetch.example/first', priority: 1 },
+  ] }
+  const state = fetchTierConfigState(fetchConfig, true)
+  const status = webSearchStatus('anthropic/selected', undefined, { version: 1, endpoints: [] }, undefined, true, state, { available: false, error: 'Fetch configuration could not be read.' })
+  expect(state.tiers).toEqual([
+    { order: 1, stage: 'provider-native', eligible: true, reason: 'The selected route passes local provider protocol checks; model or account support may still be rejected by the provider.' },
+    { order: 2, stage: 'configured-service', eligible: true, reason: 'Configured services are tried serially by ascending priority; reachability is not checked by status.', services: [{ name: 'first', priority: 1 }, { name: 'later', priority: 20 }] },
+    { order: 3, stage: 'native-fallback', eligible: true, reason: 'Claude Code native WebFetch is attempted before direct retrieval.', readiness: 'Session authorization and account WebFetch support are checked only if this tier is used.' },
+    { order: 4, stage: 'direct-selected-extraction', eligible: true, reason: 'Final recovery retrieves the page directly, then extracts with the selected model.' },
+  ])
+  expect(status.fetchConfiguration).toEqual({ available: false, error: 'Fetch configuration could not be read.' })
+  const safe = JSON.stringify(status)
+  for (const secretDetail of ['fetch.example', 'FETCH_SECRET_NAME']) expect(safe).not.toContain(secretDetail)
+})
+
+test('provider-native fetch eligibility is restricted to confirmed official contracts and supported Gemini models', () => {
+  expect(fetchProviderProtocol('anthropic', 'https://api.anthropic.com/v1', 'claude-sonnet-4-6')).toBe('anthropic')
+  expect(fetchProviderProtocol('anthropic', 'https://api.anthropic.com/v1', 'not-a-claude-model')).toBeUndefined()
+  expect(fetchProviderProtocol('gemini', 'https://generativelanguage.googleapis.com/v1beta', 'gemini-2.5-flash')).toBe('gemini')
+  expect(fetchProviderProtocol('gemini', 'https://generativelanguage.googleapis.com', 'gemini-2.0-flash')).toBeUndefined()
+  expect(fetchProviderProtocol('gemini', 'https://user@generativelanguage.googleapis.com', 'gemini-2.5-flash')).toBeUndefined()
+  expect(fetchProviderProtocol('gemini', 'https://generativelanguage.googleapis.com?proxy=1', 'gemini-2.5-flash')).toBeUndefined()
+  expect(fetchProviderProtocol('gemini', 'https://compatible.example', 'gemini-2.5-flash')).toBeUndefined()
+  expect(fetchProviderProtocol('openai', 'https://api.anthropic.com', 'claude-sonnet-4-6')).toBeUndefined()
 })
 
 test('doctor status recognizes native contracts and names disabling constraints', () => {

@@ -3716,6 +3716,7 @@ var require_websocket_server = __commonJS({
 
 // helper/main.ts
 import { realpathSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // hooks/protocol.ts
@@ -9017,6 +9018,177 @@ async function searchConfiguration(input) {
   }
 }
 
+// helper/fetch-services.ts
+import { readFileSync as readFileSync2, statSync } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { join as join2 } from "node:path";
+
+// hooks/fetch-config.ts
+var MAX_FETCH_CONFIG_BYTES = 64 * 1024;
+var NAME2 = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$/;
+var ENV2 = /^[A-Za-z_][A-Za-z0-9_]*$/;
+var object5 = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+var keys2 = (value, allowed) => Object.keys(value).every((key) => allowed.includes(key));
+var absoluteCommand2 = (value) => value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value) || /^\\\\[^\\]+\\[^\\]+/.test(value);
+var emptyFetchConfig = () => ({ version: 1, endpoints: [] });
+var fetchPriority = (value) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+function endpoint2(value) {
+  if (!object5(value) || !keys2(value, ["name", "url", "priority", "auth"]) || typeof value.name !== "string" || !NAME2.test(value.name) || typeof value.url !== "string" || !fetchPriority(value.priority)) return void 0;
+  try {
+    const url = new URL(value.url);
+    if (!/^https?:\/\//i.test(value.url) || !["http:", "https:"].includes(url.protocol) || !url.hostname || url.username || url.password || url.search || url.hash || value.url.trim() !== value.url || /[\\?#\0\r\n]/.test(value.url)) return void 0;
+  } catch {
+    return void 0;
+  }
+  let auth2;
+  if (value.auth !== void 0) {
+    if (!object5(value.auth)) return void 0;
+    if (keys2(value.auth, ["env"]) && typeof value.auth.env === "string" && ENV2.test(value.auth.env)) auth2 = { env: value.auth.env };
+    else if (keys2(value.auth, ["command"]) && Array.isArray(value.auth.command) && value.auth.command.length > 0 && value.auth.command.every((word) => typeof word === "string" && word.length > 0 && !/[\0\r\n]/.test(word)) && typeof value.auth.command[0] === "string" && absoluteCommand2(value.auth.command[0])) auth2 = { command: [...value.auth.command] };
+    else return void 0;
+    if (new URL(value.url).protocol !== "https:") return void 0;
+  }
+  return { name: value.name, url: value.url, priority: value.priority, ...auth2 ? { auth: auth2 } : {} };
+}
+function parseFetchConfig(text2) {
+  if (text2 === void 0) return { config: emptyFetchConfig(), errors: [] };
+  if (new TextEncoder().encode(text2).byteLength > MAX_FETCH_CONFIG_BYTES) return { config: emptyFetchConfig(), errors: ["Fetch configuration exceeds its size limit."] };
+  let value;
+  try {
+    value = JSON.parse(text2);
+  } catch {
+    return { config: emptyFetchConfig(), errors: ["Fetch configuration is not valid JSON."] };
+  }
+  if (!object5(value) || !keys2(value, ["version", "endpoints"]) || value.version !== 1 || !Array.isArray(value.endpoints)) return { config: emptyFetchConfig(), errors: ["Fetch configuration must contain version 1 and an endpoints array, with no secret fields."] };
+  const endpoints = [], names = /* @__PURE__ */ new Set(), errors = [];
+  for (const [index, raw] of value.endpoints.entries()) {
+    const row = endpoint2(raw);
+    if (!row) errors.push(`Fetch endpoint ${index + 1} is invalid. Use a unique name, full HTTP(S) URL without query or fragment, nonnegative integer priority, and an optional HTTPS credential reference.`);
+    else if (names.has(row.name)) errors.push(`Fetch endpoint ${index + 1} repeats a saved name.`);
+    else {
+      names.add(row.name);
+      endpoints.push(row);
+    }
+  }
+  return { config: errors.length ? emptyFetchConfig() : { version: 1, endpoints }, errors };
+}
+function orderedFetchEndpoints(config) {
+  return config.endpoints.map((row, index) => ({ row, index })).sort((a, b) => a.row.priority - b.row.priority || a.index - b.index).map(({ row }) => row);
+}
+var GEMINI_URL_CONTEXT_MODELS = /* @__PURE__ */ new Set([
+  "gemini-4-argon",
+  "gemini-3.8-flash",
+  "gemini-3.6-flash",
+  "gemini-3.5-flash-lite",
+  "gemini-3.1-pro-preview",
+  "gemini-3.1-flash-lite",
+  "gemini-3-flash-preview",
+  "gemini-2.5-pro",
+  "gemini-2.5-flash",
+  "gemini-2.5-flash-lite"
+]);
+function fetchProviderProtocol(modelKind2, baseUrl, modelId) {
+  let endpoint3;
+  try {
+    endpoint3 = new URL(baseUrl ?? "");
+  } catch {
+    return void 0;
+  }
+  if (endpoint3.username || endpoint3.password || endpoint3.search || endpoint3.hash) return void 0;
+  const origin = endpoint3.origin;
+  if (modelKind2 === "anthropic" && origin === "https://api.anthropic.com" && modelId !== void 0 && /^claude-[a-z0-9-]+$/i.test(modelId)) return "anthropic";
+  if (modelKind2 === "gemini" && origin === "https://generativelanguage.googleapis.com" && modelId !== void 0 && GEMINI_URL_CONTEXT_MODELS.has(modelId)) return "gemini";
+  return void 0;
+}
+
+// helper/fetch-services.ts
+var FetchServiceUnavailable = class extends Error {
+};
+function fetchEndpoints(environment = process.env) {
+  const file = join2(environment.CLAUDE_CONFIG_DIR ?? join2(homedir3(), ".claude"), "rice-multi-models/fetch.json");
+  let text2;
+  try {
+    if (statSync(file).size > MAX_FETCH_CONFIG_BYTES) throw new FetchServiceUnavailable("Fetch configuration exceeds its size limit.");
+    text2 = readFileSync2(file, "utf8");
+  } catch (error) {
+    if (error.code !== "ENOENT") throw new FetchServiceUnavailable("Cannot read fetch configuration; check /rice-models fetch setup.");
+  }
+  const parsed = parseFetchConfig(text2);
+  if (parsed.errors.length) throw new FetchServiceUnavailable("Invalid fetch configuration; check /rice-models fetch setup.");
+  return orderedFetchEndpoints(parsed.config);
+}
+function fetchConfigurationSnapshot(environment = process.env) {
+  try {
+    return { ok: true, config: { endpoints: fetchEndpoints(environment).map(({ name, priority }) => ({ name, priority })) } };
+  } catch {
+    return { ok: false, config: { endpoints: [] }, error: "Fetch configuration is unreadable or invalid; check /rice-models fetch setup." };
+  }
+}
+async function readJson2(response) {
+  const reader = response.body?.getReader();
+  if (!reader) throw new FetchServiceUnavailable("Fetch service returned no response body.");
+  const chunks = [];
+  let bytes = 0;
+  try {
+    while (true) {
+      const part2 = await reader.read();
+      if (part2.done) break;
+      bytes += part2.value.byteLength;
+      if (bytes > 2 * 1024 * 1024) throw new FetchServiceUnavailable("Fetch service response exceeds its size limit.");
+      chunks.push(part2.value);
+    }
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } finally {
+    await reader.cancel().catch(() => {
+    });
+  }
+}
+function page(value, requested, status) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new FetchServiceUnavailable("Fetch service returned an invalid page.");
+  const row = value;
+  if (Object.keys(row).some((key) => !["url", "content", "contentType"].includes(key)) || row.url !== requested || typeof row.content !== "string" || new TextEncoder().encode(row.content).byteLength > 10 * 1024 * 1024 || row.contentType !== void 0 && typeof row.contentType !== "string") throw new FetchServiceUnavailable("Fetch service returned an invalid or oversized page.");
+  return { url: requested, content: row.content, contentType: typeof row.contentType === "string" ? row.contentType.slice(0, 128).toLowerCase() : "text/plain", status };
+}
+async function fetchFromService(endpoint3, url, signal, request2 = fetch, environment = process.env) {
+  let key;
+  if (endpoint3.auth) {
+    if ("env" in endpoint3.auth) key = environment[endpoint3.auth.env];
+    else {
+      const helper = await runCommand(endpoint3.auth.command, 15e3);
+      if (helper.exitCode === 0 && helper.stdout.length <= 16 * 1024) key = helper.stdout.trim();
+    }
+    if (!key || /[\0\r\n]/.test(key)) throw new FetchServiceUnavailable("Fetch service credential is unavailable.");
+  }
+  const headers2 = new Headers({ accept: "application/json", "content-type": "application/json" });
+  if (key) headers2.set("authorization", `Bearer ${key}`);
+  let response;
+  try {
+    response = await request2(new URL(endpoint3.url), { method: "POST", headers: headers2, body: JSON.stringify({ url, maxBytes: 10 * 1024 * 1024 }), redirect: "error", signal: AbortSignal.any([signal, AbortSignal.timeout(15e3)]) });
+  } catch {
+    signal.throwIfAborted();
+    throw new FetchServiceUnavailable("Fetch service request failed.");
+  }
+  if (!response.ok) {
+    const status = response.status;
+    await response.body?.cancel();
+    throw Object.assign(new FetchServiceUnavailable(`Fetch service HTTP ${status}.`), { status });
+  }
+  return page(await readJson2(response), url, response.status);
+}
+async function configuredFetch(url, signal, endpoints = fetchEndpoints(), request2 = fetch, observe, environment = process.env) {
+  for (const endpoint3 of endpoints) {
+    try {
+      const result = await fetchFromService(endpoint3, url, signal, request2, environment);
+      observe?.({ name: endpoint3.name, status: "success", http: result.status });
+      return result;
+    } catch (error) {
+      signal.throwIfAborted();
+      observe?.({ name: endpoint3.name, status: "unavailable", ...error.status ? { http: error.status } : {} });
+    }
+  }
+  throw new FetchServiceUnavailable("No configured fetch service is available.");
+}
+
 // hooks/web-search.ts
 function webSearchPolicy(input) {
   if (typeof input.query !== "string" || !input.query.trim() || input.query.length > 2048) throw new TypeError("Invalid web search query.");
@@ -9108,17 +9280,17 @@ function nativeSearchDecision(target, remote, restrictions) {
 }
 
 // helper/search/endpoints.ts
-import { readFileSync as readFileSync2, statSync } from "node:fs";
-import { homedir as homedir3 } from "node:os";
-import { join as join2 } from "node:path";
+import { readFileSync as readFileSync3, statSync as statSync2 } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { join as join3 } from "node:path";
 var SearchUnavailable = class extends Error {
 };
 function searchEndpoints(environment = process.env) {
-  const file = join2(environment.CLAUDE_CONFIG_DIR ?? join2(homedir3(), ".claude"), "rice-multi-models/search.json");
+  const file = join3(environment.CLAUDE_CONFIG_DIR ?? join3(homedir4(), ".claude"), "rice-multi-models/search.json");
   let text2;
   try {
-    if (statSync(file).size > MAX_SEARCH_CONFIG_BYTES) throw new SearchUnavailable("Search configuration exceeds its size limit.");
-    text2 = readFileSync2(file, "utf8");
+    if (statSync2(file).size > MAX_SEARCH_CONFIG_BYTES) throw new SearchUnavailable("Search configuration exceeds its size limit.");
+    text2 = readFileSync3(file, "utf8");
   } catch (error) {
     if (error.code !== "ENOENT") throw new SearchUnavailable("Cannot read search configuration; run /rice-models search setup.");
   }
@@ -9151,11 +9323,11 @@ async function json(response) {
     await reader.cancel();
   }
 }
-var object5 = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
+var object6 = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
 function searchRecords(value, kind) {
-  const rows = object5(value) ? kind === "brave" ? object5(value.web) ? value.web.results : void 0 : value.results : void 0;
+  const rows = object6(value) ? kind === "brave" ? object6(value.web) ? value.web.results : void 0 : value.results : void 0;
   if (!Array.isArray(rows)) throw new SearchUnavailable("Search endpoint returned an invalid result list.");
-  const results = rows.filter(object5).flatMap((row) => {
+  const results = rows.filter(object6).flatMap((row) => {
     if (typeof row.url !== "string" || typeof row.title !== "string") return [];
     try {
       const url = new URL(row.url);
@@ -9222,12 +9394,12 @@ async function configuredSearch(query, signal, endpoints = searchEndpoints(), re
 }
 
 // helper/search/provider.ts
-var keys2 = createKeys(runCommand, Date.now);
+var keys3 = createKeys(runCommand, Date.now);
 function providerSearch(target, remote, restrictions) {
   return nativeSearchDecision(target, remote, restrictions).method;
 }
 async function ollamaSearch(wire, remote, query, signal) {
-  const credential = await keys2.get(remote.provider, new Set(wire.approved));
+  const credential = await keys3.get(remote.provider, new Set(wire.approved));
   if ("error" in credential || !credential.key) throw new SearchUnavailable("Selected Ollama cloud account has no search credential.");
   const response = await fetch("https://ollama.com/api/web_search", {
     method: "POST",
@@ -9400,145 +9572,6 @@ async function resolveAndCheck(url, signal, resolver = resolveAddresses) {
   return records[0];
 }
 
-// helper/fetch-services.ts
-import { readFileSync as readFileSync3, statSync as statSync2 } from "node:fs";
-import { homedir as homedir4 } from "node:os";
-import { join as join3 } from "node:path";
-
-// hooks/fetch-config.ts
-var MAX_FETCH_CONFIG_BYTES = 64 * 1024;
-var NAME2 = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$/;
-var ENV2 = /^[A-Za-z_][A-Za-z0-9_]*$/;
-var object6 = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
-var keys3 = (value, allowed) => Object.keys(value).every((key) => allowed.includes(key));
-var absoluteCommand2 = (value) => value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value) || /^\\\\[^\\]+\\[^\\]+/.test(value);
-var emptyFetchConfig = () => ({ version: 1, endpoints: [] });
-var fetchPriority = (value) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-function endpoint2(value) {
-  if (!object6(value) || !keys3(value, ["name", "url", "priority", "auth"]) || typeof value.name !== "string" || !NAME2.test(value.name) || typeof value.url !== "string" || !fetchPriority(value.priority)) return void 0;
-  try {
-    const url = new URL(value.url);
-    if (!/^https?:\/\//i.test(value.url) || !["http:", "https:"].includes(url.protocol) || !url.hostname || url.username || url.password || url.search || url.hash || value.url.trim() !== value.url || /[\\?#\0\r\n]/.test(value.url)) return void 0;
-  } catch {
-    return void 0;
-  }
-  let auth2;
-  if (value.auth !== void 0) {
-    if (!object6(value.auth)) return void 0;
-    if (keys3(value.auth, ["env"]) && typeof value.auth.env === "string" && ENV2.test(value.auth.env)) auth2 = { env: value.auth.env };
-    else if (keys3(value.auth, ["command"]) && Array.isArray(value.auth.command) && value.auth.command.length > 0 && value.auth.command.every((word) => typeof word === "string" && word.length > 0 && !/[\0\r\n]/.test(word)) && typeof value.auth.command[0] === "string" && absoluteCommand2(value.auth.command[0])) auth2 = { command: [...value.auth.command] };
-    else return void 0;
-    if (new URL(value.url).protocol !== "https:") return void 0;
-  }
-  return { name: value.name, url: value.url, priority: value.priority, ...auth2 ? { auth: auth2 } : {} };
-}
-function parseFetchConfig(text2) {
-  if (text2 === void 0) return { config: emptyFetchConfig(), errors: [] };
-  if (new TextEncoder().encode(text2).byteLength > MAX_FETCH_CONFIG_BYTES) return { config: emptyFetchConfig(), errors: ["Fetch configuration exceeds its size limit."] };
-  let value;
-  try {
-    value = JSON.parse(text2);
-  } catch {
-    return { config: emptyFetchConfig(), errors: ["Fetch configuration is not valid JSON."] };
-  }
-  if (!object6(value) || !keys3(value, ["version", "endpoints"]) || value.version !== 1 || !Array.isArray(value.endpoints)) return { config: emptyFetchConfig(), errors: ["Fetch configuration must contain version 1 and an endpoints array, with no secret fields."] };
-  const endpoints = [], names = /* @__PURE__ */ new Set(), errors = [];
-  for (const [index, raw] of value.endpoints.entries()) {
-    const row = endpoint2(raw);
-    if (!row) errors.push(`Fetch endpoint ${index + 1} is invalid. Use a unique name, full HTTP(S) URL without query or fragment, nonnegative integer priority, and an optional HTTPS credential reference.`);
-    else if (names.has(row.name)) errors.push(`Fetch endpoint ${index + 1} repeats a saved name.`);
-    else {
-      names.add(row.name);
-      endpoints.push(row);
-    }
-  }
-  return { config: errors.length ? emptyFetchConfig() : { version: 1, endpoints }, errors };
-}
-function orderedFetchEndpoints(config) {
-  return config.endpoints.map((row, index) => ({ row, index })).sort((a, b) => a.row.priority - b.row.priority || a.index - b.index).map(({ row }) => row);
-}
-
-// helper/fetch-services.ts
-var FetchServiceUnavailable = class extends Error {
-};
-function fetchEndpoints(environment = process.env) {
-  const file = join3(environment.CLAUDE_CONFIG_DIR ?? join3(homedir4(), ".claude"), "rice-multi-models/fetch.json");
-  let text2;
-  try {
-    if (statSync2(file).size > MAX_FETCH_CONFIG_BYTES) throw new FetchServiceUnavailable("Fetch configuration exceeds its size limit.");
-    text2 = readFileSync3(file, "utf8");
-  } catch (error) {
-    if (error.code !== "ENOENT") throw new FetchServiceUnavailable("Cannot read fetch configuration; check /rice-models fetch setup.");
-  }
-  const parsed = parseFetchConfig(text2);
-  if (parsed.errors.length) throw new FetchServiceUnavailable("Invalid fetch configuration; check /rice-models fetch setup.");
-  return orderedFetchEndpoints(parsed.config);
-}
-async function readJson2(response) {
-  const reader = response.body?.getReader();
-  if (!reader) throw new FetchServiceUnavailable("Fetch service returned no response body.");
-  const chunks = [];
-  let bytes = 0;
-  try {
-    while (true) {
-      const part2 = await reader.read();
-      if (part2.done) break;
-      bytes += part2.value.byteLength;
-      if (bytes > 2 * 1024 * 1024) throw new FetchServiceUnavailable("Fetch service response exceeds its size limit.");
-      chunks.push(part2.value);
-    }
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
-  } finally {
-    await reader.cancel().catch(() => {
-    });
-  }
-}
-function page(value, requested, status) {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new FetchServiceUnavailable("Fetch service returned an invalid page.");
-  const row = value;
-  if (Object.keys(row).some((key) => !["url", "content", "contentType"].includes(key)) || row.url !== requested || typeof row.content !== "string" || new TextEncoder().encode(row.content).byteLength > 10 * 1024 * 1024 || row.contentType !== void 0 && typeof row.contentType !== "string") throw new FetchServiceUnavailable("Fetch service returned an invalid or oversized page.");
-  return { url: requested, content: row.content, contentType: typeof row.contentType === "string" ? row.contentType.slice(0, 128).toLowerCase() : "text/plain", status };
-}
-async function fetchFromService(endpoint3, url, signal, request2 = fetch, environment = process.env) {
-  let key;
-  if (endpoint3.auth) {
-    if ("env" in endpoint3.auth) key = environment[endpoint3.auth.env];
-    else {
-      const helper = await runCommand(endpoint3.auth.command, 15e3);
-      if (helper.exitCode === 0 && helper.stdout.length <= 16 * 1024) key = helper.stdout.trim();
-    }
-    if (!key || /[\0\r\n]/.test(key)) throw new FetchServiceUnavailable("Fetch service credential is unavailable.");
-  }
-  const headers2 = new Headers({ accept: "application/json", "content-type": "application/json" });
-  if (key) headers2.set("authorization", `Bearer ${key}`);
-  let response;
-  try {
-    response = await request2(new URL(endpoint3.url), { method: "POST", headers: headers2, body: JSON.stringify({ url, maxBytes: 10 * 1024 * 1024 }), redirect: "error", signal: AbortSignal.any([signal, AbortSignal.timeout(15e3)]) });
-  } catch {
-    signal.throwIfAborted();
-    throw new FetchServiceUnavailable("Fetch service request failed.");
-  }
-  if (!response.ok) {
-    const status = response.status;
-    await response.body?.cancel();
-    throw Object.assign(new FetchServiceUnavailable(`Fetch service HTTP ${status}.`), { status });
-  }
-  return page(await readJson2(response), url, response.status);
-}
-async function configuredFetch(url, signal, endpoints = fetchEndpoints(), request2 = fetch, observe, environment = process.env) {
-  for (const endpoint3 of endpoints) {
-    try {
-      const result = await fetchFromService(endpoint3, url, signal, request2, environment);
-      observe?.({ name: endpoint3.name, status: "success", http: result.status });
-      return result;
-    } catch (error) {
-      signal.throwIfAborted();
-      observe?.({ name: endpoint3.name, status: "unavailable", ...error.status ? { http: error.status } : {} });
-    }
-  }
-  throw new FetchServiceUnavailable("No configured fetch service is available.");
-}
-
 // helper/web-fetch.ts
 var MAX_BYTES2 = 10 * 1024 * 1024;
 var HTML_CHARACTERS = 1024 * 1024;
@@ -9682,15 +9715,15 @@ async function checkedProviderSource(value, signal, resolver) {
   await resolveAndCheck2(source, signal, resolver);
   return source;
 }
+function providerProtocol(configText, target) {
+  const parsed = parseConfig(configText);
+  const selected = parsed.config ? resolve(parsed.config, target) : void 0;
+  if (selected?.kind !== "remote") return void 0;
+  const modelId = selected.target.slice(selected.provider.id.length + 1);
+  return fetchProviderProtocol(selected.model.kind, selected.provider.baseUrl, modelId);
+}
 async function providerFetch(input, signal, step, resolver) {
-  const parsed = parseConfig(input.wire.configText);
-  const selected = parsed.config ? resolve(parsed.config, input.wire.req.target) : void 0;
-  let origin;
-  try {
-    origin = selected?.kind === "remote" ? new URL(selected.provider.baseUrl).origin : void 0;
-  } catch {
-  }
-  const protocol = selected?.kind === "remote" && selected.model.kind === "anthropic" && origin === "https://api.anthropic.com" ? "anthropic" : selected?.kind === "remote" && selected.model.kind === "gemini" && origin === "https://generativelanguage.googleapis.com" ? "gemini" : void 0;
+  const protocol = providerProtocol(input.wire.configText, input.wire.req.target);
   if (!protocol) throw new WebFetchUnavailable("retrieval", "Selected provider has no confirmed hosted WebFetch contract.");
   const attempt = AbortSignal.any([signal, AbortSignal.timeout(3e4)]);
   const req = { ...input.wire, req: {
@@ -9822,16 +9855,7 @@ function createWebFetch(ports = {}) {
     const url = address(input.url), started = io.now(), lifetime = AbortSignal.any([signal, AbortSignal.timeout(12e4)]);
     await resolveAndCheck2(url, lifetime, io.resolve);
     const fallback = () => ({ kind: "native-fallback", url: url.href, prompt: input.prompt, ...input.offset === void 0 ? {} : { offset: input.offset } });
-    const nativeEligible = (() => {
-      try {
-        const parsed = parseConfig(input.wire.configText);
-        const selected = parsed.config ? resolve(parsed.config, input.wire.req.target) : void 0;
-        const origin = selected?.kind === "remote" ? new URL(selected.provider.baseUrl).origin : "";
-        return selected?.kind === "remote" && (selected.model.kind === "anthropic" && origin === "https://api.anthropic.com" || selected.model.kind === "gemini" && origin === "https://generativelanguage.googleapis.com");
-      } catch {
-        return false;
-      }
-    })();
+    const nativeEligible = providerProtocol(input.wire.configText, input.wire.req.target) !== void 0;
     if (nativeEligible) {
       try {
         const result = await providerFetch({ ...input, url: url.href }, lifetime, io.step, io.resolve);
@@ -10354,6 +10378,12 @@ async function main(lifetime) {
     process.stdout.write(`${JSON.stringify(result)}
 `);
     if (!result.ok) process.exitCode = 1;
+  } else if (mode === "fetch-config-status") {
+    const input = JSON.parse(await readStdin());
+    const configDir = input && typeof input === "object" && !Array.isArray(input) && Object.keys(input).every((key) => key === "configDir") && typeof input.configDir === "string" ? input.configDir : void 0;
+    const result = configDir && isAbsolute(configDir) && !/[\0\r\n]/.test(configDir) ? fetchConfigurationSnapshot({ ...process.env, CLAUDE_CONFIG_DIR: configDir }) : { ok: false, config: { endpoints: [] }, error: "Fetch configuration status requires an absolute config directory." };
+    process.stdout.write(`${JSON.stringify(result)}
+`);
   } else if (mode === "web-fetch-check-destination") {
     const controller = new AbortController();
     const abort = () => controller.abort();
