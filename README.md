@@ -74,7 +74,8 @@ Anthropic's native models.
 | --- | --- |
 | `/model codex/...` and ask for a subagent | The subagent runs on the same Codex model |
 | Agent tool `model: haiku`, `sonnet`, `opus` or `fable` in a routed session | That tier inside the session's family (see `tiers` below), not Claude |
-| Agent tool `model` argument with an exact provider id | Rejected by Claude Code before hooks; it accepts only `haiku`, `sonnet`, `opus` or `fable` |
+| Agent tool `model` argument with an exact discovered id, such as `codex/gpt-6.1-sol` (see below) | Exactly that model, with no tier mapping |
+| Agent tool `model` argument with an id nothing discovered | Refused with the list of valid ids; no subagent starts |
 | Built-in agents with their own default (Explore uses haiku) | The session's family |
 | A custom agent file with `model: openrouter/some-model` | Exactly that model |
 | A skill with `model: haiku` (or another alias) or `context: fork` | The family of the conversation that runs it |
@@ -88,10 +89,46 @@ native Claude model keeps Claude Code's normal resolution.
 
 To route a custom agent to an exact model, put its full id in the agent
 frontmatter, for example `model: codex/gpt-6.1-sol`. That id reaches the engine
-unchanged and `agent.spawn` routes the resulting step. The Agent tool argument
-itself accepts only `haiku`, `sonnet`, `opus`, or `fable`, not an exact provider
-id. The main prompt gets a short section listing discovered families and
-models; no tools are added.
+unchanged and `agent.spawn` routes the resulting step. Frontmatter works in every
+session, routed or native. The main prompt gets a short section listing discovered
+families and models; no tools are added.
+
+### Exact ids in the Agent tool
+
+`Agent({ model: '<provider>/<model>' })` runs the subagent on exactly that id. The
+id is any model the mod discovers (a Codex model, a declared provider's model, OpenCode,
+a local model) or a declared alias, spelled as `/rice-models models` lists it. There is
+no tier mapping, wrapper agent or proxy: the engine's own Agent tool starts the subagent
+on the id.
+
+- **What the model sees.** In a routed session the Agent tool's `model` schema is the
+  engine's own enum plus every accepted id (with more than 200 ids the enum is dropped for a
+  plain string), and the tool description gets one separated line, derived
+  from discovery at runtime, naming the accepted ids. The engine's own description text is
+  kept as it is. A Claude-native parent sees the same description line, but the API schema
+  it receives is the engine's, so exact ids through `Agent.model` are meant for routed
+  sessions. Use frontmatter anywhere else.
+- **How it works.** The engine checks `model` against four values, but only after the
+  mod's `tool.call` hook has seen the raw call. The hook records the exact id under the
+  call's `tool_use_id` (in host session state, so a hot reload keeps it), passes the
+  engine a valid value (`haiku`) and marks the call's description with two invisible
+  characters. `agent.spawn` takes the id back, removes the mark and runs the subagent on
+  the id. Each parallel call has its own record; a record is removed when its spawn takes
+  it, and when its call ends for any reason.
+- **How failure looks.** An id nothing discovered or declared is refused before the engine
+  runs the call: `rice-multi-models: Agent model "<id>" is not a model this session can
+  run, so no subagent was started. Valid values: haiku, sonnet, opus, fable, <ids>.` A
+  marked spawn whose record is missing is refused, not run as `haiku`: `this Agent call's
+  exact model could not be recovered (no record for it), so it was not run as haiku`. An
+  exact id on a fork is refused, because a fork runs on its parent's model. A resumed
+  agent and a workflow agent keep their own model.
+- **The honest limit.** This relies on the engine calling `tool.call` hooks before it
+  checks the arguments, which no documentation promises (verified on Claude Code 2.1.302
+  and 2.1.307). If a later engine checks first, an exact id fails in the engine's own
+  validation with its message, and nothing runs on the wrong model. The Agent permission
+  prompt and the session transcript show the carrier value (`haiku`) for the call. Upstream
+  requests: let `tool.describe` override input-schema fields that are not pinned, or let
+  `Agent.model` accept any string that `agent.spawn` resolves or denies.
 
 Map tiers to specific models per family in `rice-multi-models.json`:
 

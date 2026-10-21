@@ -44,11 +44,11 @@ This document lists public Claude Code plugin API gaps that prevent a mod from c
 
 ## Agent model choices
 
-**Missing host extension:** The native Agent tool's `model` schema is limited to the four aliases `fable`, `haiku`, `opus` and `sonnet`; plugins cannot extend the accepted model choices with configured provider targets.
+**Missing host extension:** The native Agent tool's `model` schema is limited to the four aliases `fable`, `haiku`, `opus` and `sonnet`, and `tool.describe` cannot widen it: it changes the description only, and a `tool.call` rewrite is checked again against the same four values.
 
-**Current mod behavior:** Those aliases can be mapped to the current provider family. The mod does not claim that arbitrary `<provider>/<model>` values can be selected through the native Agent tool schema.
+**Current mod behavior:** The mod widens the choice for routed sessions with a carrier on public hooks. `tool.call` sees the raw `model` before the engine checks it, records an exact discovered or declared `<provider>/<model>` id under the call's `tool_use_id`, and hands the engine a valid value; `agent.spawn` restores the id and the subagent runs on exactly that id. The schema and description shown to routed models list the accepted ids. An unknown id, a lost record and an id on a fork are refused with a visible message; none runs on the carrier value. The Claude-native API schema stays the engine's, so exact ids through `Agent.model` are for routed sessions; agent frontmatter `model: <provider>/<model>` works everywhere. The carrier relies on the engine running `tool.call` hooks before it checks arguments, which is undocumented (verified on Claude Code 2.1.302 and 2.1.307), and the permission prompt shows the carrier value. Aliases (`haiku`, `sonnet`, `opus`, `fable`) still map to the current provider family.
 
-**Requested host change:** Expose a supported model-registry extension point for Agent choices, or accept validated provider/model identifiers through the Agent tool while preserving the host's access and permission checks.
+**Requested host change:** Let `tool.describe` override input-schema fields that are not pinned, or let `Agent.model` accept any string that `agent.spawn` resolves or denies, preserving the host's access and permission checks. Either removes the carrier.
 
 ## Child permission modes
 
