@@ -44,6 +44,7 @@ export type Decoded =
   | { t: 'thinking'; text: string }
   | { t: 'sealed'; block: Thinking }
   | { t: 'tool'; id?: string; name: string; args: string | Json }
+  | { t: 'native_block'; block: Json }
   | { t: 'search_sources'; sources: SearchSource[]; searched: boolean }
   | ({ t: 'usage' } & Usage)
   | { t: 'finish'; reason: string }

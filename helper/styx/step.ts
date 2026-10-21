@@ -63,6 +63,7 @@ export function assembler(codec: Codec, provider: string, ids: ReturnType<typeof
           inText = d.t === 'text'
           out.push({ type: d.t, text: d.text })
         } else if (d.t === 'sealed') turn.blocks.push({ at: before, block: d.block })
+        else if (d.t === 'native_block') out.push({ type: 'native_block', block: d.block })
         else if (d.t === 'search_sources') out.push({ type: 'search_sources', sources: d.sources, searched: d.searched })
         else if (d.t === 'usage') usage = { in: d.in, out: d.out, cacheRead: d.cacheRead, cacheWrite: d.cacheWrite, ...(d.reasoning === undefined ? {} : { reasoning: d.reasoning }) }
         else if (d.t === 'finish') finish = finishToken(d.reason)

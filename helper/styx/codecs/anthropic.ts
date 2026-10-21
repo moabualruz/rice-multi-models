@@ -41,6 +41,7 @@ function decoder() {
   const usage = { in: 0, out: 0, cacheRead: 0, cacheWrite: 0 }
   let finished = false
   const searchBlocks = new Map<unknown, Json>()
+  const fetchBlocks = new Set<unknown>()
   const searchSources: unknown[] = []
   let searched = false
 
@@ -52,6 +53,12 @@ function decoder() {
     if (content.some(value => !isObject(value) || value['type'] !== 'web_search_result' || typeof value['url'] !== 'string' || typeof value['title'] !== 'string')) { s.fail('Anthropic web search result is malformed'); return true }
     searched = true
     searchSources.push(...content.map(value => ({ title: value['title'], url: value['url'] })))
+    return true
+  }
+
+  function fetchResult(s: Sink, block: Json): boolean {
+    if (block['type'] !== 'web_fetch_tool_result') return false
+    s.out.push({ t: 'native_block', block })
     return true
   }
 
@@ -70,6 +77,7 @@ function decoder() {
       case 'message_start':
         return take(obj(obj(ev['message'])['usage']))
       case 'content_block_start':
+        if (block['type'] === 'web_fetch_tool_result') { fetchBlocks.add(ev['index']); fetchResult(s, block); return }
         if (block['type'] === 'web_search_tool_result') { searchBlocks.set(ev['index'], block); searchResult(s, block); return }
         if (block['type'] === 'tool_use') held.set(ev['index'], { ...(typeof block['id'] === 'string' ? { id: block['id'] } : {}), name: typeof block['name'] === 'string' ? block['name'] : '', json: '', input: block['input'] })
         else if (block['type'] === 'thinking') thinking.add(ev['index'], { text: str(block['thinking']), signature: str(block['signature']) })
@@ -89,6 +97,7 @@ function decoder() {
         return
       }
       case 'content_block_stop': {
+        if (fetchBlocks.has(ev['index'])) { fetchBlocks.delete(ev['index']); return }
         if (searchBlocks.has(ev['index'])) { searchBlocks.delete(ev['index']); return }
         const block = thinking.seal(ev['index'])
         if (block !== undefined) return void out.push({ t: 'sealed', block })
@@ -109,7 +118,8 @@ function decoder() {
     }
   }
   return decoderOver(sseReader(), event, ({ fail }) => {
-    if (searchBlocks.size > 0) fail('the stream ended inside a web search result')
+    if (fetchBlocks.size > 0) fail('the stream ended inside a web fetch result')
+    else if (searchBlocks.size > 0) fail('the stream ended inside a web search result')
     else if (held.size > 0) fail('the stream ended inside a tool call')
     else if (!finished) fail('the stream ended with no stop reason')
   })
