@@ -88,12 +88,12 @@ try {
   writeFileSync(cli, "import {readFileSync} from 'node:fs'; import {runToolSearch} from './tool-search.mjs'; const abort=new AbortController(); process.once('SIGTERM',()=>abort.abort()); const answer=await runToolSearch(JSON.parse(readFileSync(0,'utf8')),abort.signal); process.stdout.write(JSON.stringify(answer));\n")
   writeFileSync(join(config, 'rice-multi-models/search.json'), JSON.stringify({ version: 1, endpoints: [{ name: 'owned', kind: 'searxng', url: `${base}/search`, priority: 0 }] }))
   writeFileSync(join(config, 'settings.json'), '{}'); writeFileSync(join(fixture, '.claude.json'), JSON.stringify({ hasCompletedOnboarding: true }))
-  const hookFailure = join(fixture, 'hook-failure.json'), httpReceipt = join(fixture, 'public-native-http.json'), authorizationReceipt = join(fixture, 'authorization.json')
-  const hook = `import {runNativeSearch} from './native-fallback.mjs';export const register=on=>{on('tool.call',{tool:'WebSearch'},async($,e,next)=>{
+  const hookFailure = join(fixture, 'hook-failure.json'), httpReceipt = join(fixture, 'public-native-http.json'), authorizationReceipt = join(fixture, 'authorization.json'), stageReceipt = join(fixture, 'search-stages.json')
+  const hook = `import {runNativeSearch} from './native-fallback.mjs';export const register=on=>{const stages=[];on('tool.call',{tool:'WebSearch'},async($,e,next)=>{
     const run=await $.process.run([${JSON.stringify(process.execPath)},${JSON.stringify(cli)}],{stdin:JSON.stringify({wire:${JSON.stringify(wire)},query:e.query,allowed_domains:e.allowed_domains,blocked_domains:e.blocked_domains}),timeoutMs:65000});
     if(run.exitCode!==0){await $.fs.write(${JSON.stringify(hookFailure)},JSON.stringify({phase:'helper-exit',exit:run.exitCode,error:run.stderr.match(/(?:Error|ERR_[A-Z_]+)[^\\n]{0,240}/g)?.slice(-3)}));throw new Error('Owned public search helper failed');}
-    const result=JSON.parse(run.stdout);if(result.kind==='answered')return{result:result.result};
-    let handle;return{result:await runNativeSearch(result.request,{authorize:async()=>{const a=await $.session.authorize();handle=a?.handle;await $.fs.write(${JSON.stringify(authorizationReceipt)},JSON.stringify({kind:a?.kind,handlePresent:!!handle}));return a;},fetch:async(url,init)=>{if(!handle||init.auth!==handle)throw new Error('Owned fallback handle mismatch');return $.http.fetch(url,init);}},next.signal)};
+    const result=JSON.parse(run.stdout);if(result.kind==='answered'){stages.push({query:e.query,stage:result.stage});await $.fs.write(${JSON.stringify(stageReceipt)},JSON.stringify(stages));return{result:result.result};}
+    stages.push({query:e.query,stage:result.stage});await $.fs.write(${JSON.stringify(stageReceipt)},JSON.stringify(stages));let handle;return{result:await runNativeSearch(result.request,{authorize:async()=>{const a=await $.session.authorize();handle=a?.handle;await $.fs.write(${JSON.stringify(authorizationReceipt)},JSON.stringify({kind:a?.kind,handlePresent:!!handle}));return a;},fetch:async(url,init)=>{if(!handle||init.auth!==handle)throw new Error('Owned fallback handle mismatch');return $.http.fetch(url,init);}},next.signal)};
   }).catch(async($,e,next)=>{if(!next.called){if(!await $.fs.exists(${JSON.stringify(hookFailure)}))await $.fs.write(${JSON.stringify(hookFailure)},JSON.stringify({phase:'hook-pre-dispatch',kind:next.error.kind,message:next.error.message.slice(0,240)}));return{deny:'Owned search fixture preparation failed'};}throw new Error('Owned search fixture continuation failed');});};`
   const caller = `export const register=on=>{on('turn.step',async function*($,e){const outcomes=[];
     for(const query of ${JSON.stringify(queries)}){const result=await $.tool.call({tool:'WebSearch',query,allowed_domains:['docs.example']});outcomes.push({query,isError:result.isError===true,denied:!!result.deny,sourceUrls:result.result?.results?.flatMap(group=>typeof group==='string'?[]:group.content.map(source=>source.url))??[]});}
@@ -127,14 +127,17 @@ try {
   const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve) }); clearTimeout(timer)
   let output; try { output = JSON.parse(stdout) } catch {}
   if (typeof output?.result === 'string' && output.result.startsWith('OWNED_PUBLIC_SEARCH ')) outcomes.push(...JSON.parse(output.result.slice('OWNED_PUBLIC_SEARCH '.length)))
-  let failure, nativeOperations, authorization
+  let failure, nativeOperations, authorization, stages
   try { failure = JSON.parse(readFileSync(hookFailure, 'utf8')) } catch {}
   try { nativeOperations = JSON.parse(readFileSync(httpReceipt, 'utf8')) } catch {}
   try { authorization = JSON.parse(readFileSync(authorizationReceipt, 'utf8')) } catch {}
-  const receipt = { scope: 'ordinary native CLI, public tool.call, production routing and native fallback; actual session.authorize with synthetic API key; first-party HTTP operation responses are owned public hooks, host credential injection and live entitlement are not exercised', code, timedOut, observations, outcomes, nativeOperations, authorization, stderrPresent: stderr.length > 0, ...(failure ? { failure } : {}) }
+  try { stages = JSON.parse(readFileSync(stageReceipt, 'utf8')) } catch {}
+  const receipt = { scope: 'ordinary native CLI, public tool.call, production routing and native fallback; actual session.authorize with synthetic API key; first-party HTTP operation responses are owned public hooks, host credential injection and live entitlement are not exercised', code, timedOut, observations, outcomes, stages, nativeOperations, authorization, stderrPresent: stderr.length > 0, ...(failure ? { failure } : {}) }
   process.stdout.write(`${JSON.stringify(receipt)}\n`)
   assert.equal(code, 0, 'ordinary native public search process exits successfully'); assert.equal(timedOut, false); assert.equal(outcomes.length, 3)
   assert.deepEqual(outcomes.map(outcome => outcome.sourceUrls), [[providerSource.url], [serviceSource.url], [nativeSource.url]], 'provider, configured service and public native fallback each return their own sources')
+  assert.deepEqual(stages.map(row => row.stage), ['provider-native', 'configured-service', 'claude-native'], 'each registered public call records the stage that answered')
+  assert.deepEqual(stages.map(row => row.query), queries)
   assert.ok(outcomes.every(outcome => !outcome.isError && !outcome.denied), 'native tool accepts every public result')
   assert.equal(observations.filter(row => row.stage === 'provider').length, 3)
   assert.equal(observations.filter(row => row.stage === 'configured').length, 2)

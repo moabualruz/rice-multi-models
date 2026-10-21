@@ -76,6 +76,7 @@ function decoder() {
   let calls = 0
   let searched = false
   const searchSources: unknown[] = []
+  const fetchSources = new Map<string, string>()
 
   function chunk(s: Sink, data: string) {
     const c = parseJson(data)
@@ -86,6 +87,14 @@ function decoder() {
     if (typeof blocked === 'string') finish = 'safety'
     const candidate = Array.isArray(c['candidates']) ? c['candidates'][0] : undefined
     if (!isObject(candidate)) return
+    const fetched = candidate['url_context_metadata']
+    if (fetched !== undefined) {
+      if (!isObject(fetched) || !Array.isArray(fetched['url_metadata']) || fetched['url_metadata'].length > 20) return s.fail('Gemini URL Context metadata is malformed')
+      for (const row of fetched['url_metadata']) {
+        if (!isObject(row) || typeof row['retrieved_url'] !== 'string' || typeof row['url_retrieval_status'] !== 'string') return s.fail('Gemini URL Context metadata is malformed')
+        fetchSources.set(row['retrieved_url'], row['url_retrieval_status'])
+      }
+    }
     const grounding = candidate['groundingMetadata']
     if (isObject(grounding)) {
       const queries = grounding['webSearchQueries']
@@ -124,6 +133,7 @@ function decoder() {
       s.out.push({ t: 'usage', in: Math.max(0, input - cached), out: count(usage['candidatesTokenCount']) + thoughts, cacheRead: cached, cacheWrite: 0, ...(thoughts > 0 ? { reasoning: thoughts } : {}) })
     }
     if (searched) s.out.push({ t: 'search_sources', sources: uniqueSearchSources(searchSources), searched: true })
+    if (fetchSources.size > 0) s.out.push({ t: 'native_block', block: { type: 'gemini_url_context_result', url_metadata: [...fetchSources].map(([retrieved_url, url_retrieval_status]) => ({ retrieved_url, url_retrieval_status })) } })
     s.out.push({ t: 'finish', reason: finish === 'stop' && calls > 0 ? 'tool_calls' : finish })
   }
   return decoderOver(sseReader(), chunk, end)

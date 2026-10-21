@@ -1,5 +1,4 @@
 import type { SearchSource, StepEvent, StepWire } from '../../hooks/protocol.ts'
-import { splitTarget } from '../../hooks/protocol.ts'
 import { parseConfig } from '../../hooks/config.ts'
 import { resolve } from '../../hooks/names.ts'
 import type { SearchEndpoint } from '../../hooks/search-config.ts'
@@ -12,8 +11,8 @@ import { configuredSearch, searchEndpoints, SearchUnavailable } from './endpoint
 export type ToolSearchInput = PublicWebSearchInput & {
   wire: StepWire
 }
-export type ToolSearchOutcome = { kind: 'answered'; result: PublicWebSearchResult }
-  | { kind: 'native-fallback'; reason: string; request: PublicWebSearchInput }
+export type ToolSearchOutcome = { kind: 'answered'; stage: 'provider-native' | 'configured-service'; result: PublicWebSearchResult }
+  | { kind: 'native-fallback'; stage: 'claude-native'; reason: string; request: PublicWebSearchInput }
 
 type Ports = {
   step: (wire: StepWire, signal: AbortSignal) => AsyncIterable<StepEvent>
@@ -55,7 +54,7 @@ export function createToolSearch(ports: Partial<Ports> = {}) {
     const selected = parsed?.config ? resolve(parsed.config, wire.req.target) : undefined
     const remote = selected?.kind === 'remote' ? selected : undefined
     const method = providerSearch(wire.req.target, remote, policy)
-    const answer = (sources: SearchSource[], calls?: number): ToolSearchOutcome => ({ kind: 'answered', result: publicWebSearchResult(query, sources, policy, (io.now() - started) / 1000, calls) })
+    const answer = (stage: 'provider-native' | 'configured-service', sources: SearchSource[], calls?: number): ToolSearchOutcome => ({ kind: 'answered', stage, result: publicWebSearchResult(query, sources, policy, (io.now() - started) / 1000, calls) })
     if (method) {
       try {
         const attempt = AbortSignal.any([signal, AbortSignal.timeout(30_000)])
@@ -63,18 +62,16 @@ export function createToolSearch(ports: Partial<Ports> = {}) {
           tools: [], transcript: [{ role: 'user', content: query }], native: { maxTokens: Math.min(wire.req.native?.maxTokens ?? 4096, 4096), webSearch: policy } } }
         const events = method === 'ollama' && remote ? await io.cloud(searchWire, remote, query, attempt) : io.step(searchWire, attempt)
         const found = await completedSearch(events, attempt)
-        if (!remote && splitTarget(wire.req.target)?.provider === 'codex' && policy.maxUses !== undefined
-          && (found.complete !== true || !Number.isSafeInteger(found.calls) || Number(found.calls) < 1 || Number(found.calls) > policy.maxUses)) throw new SearchUnavailable('Selected provider search cannot satisfy the use bound.')
-        return answer(found.sources, method === 'ollama' ? 1 : found.calls)
+        return answer('provider-native', found.sources, method === 'ollama' ? 1 : found.calls)
       } catch { signal.throwIfAborted() }
     }
     try {
       const attempt = AbortSignal.any([signal, AbortSignal.timeout(30_000)])
       const results = await io.configured(query, attempt, io.endpoints())
       signal.throwIfAborted()
-      return answer(results, 1)
+      return answer('configured-service', results, 1)
     } catch { signal.throwIfAborted() }
-    return { kind: 'native-fallback', reason: 'Selected-provider and configured web search are unavailable.', request: {
+    return { kind: 'native-fallback', stage: 'claude-native', reason: 'Selected-provider and configured web search are unavailable.', request: {
       query, ...(policy.allowedDomains ? { allowed_domains: policy.allowedDomains } : {}), ...(policy.blockedDomains ? { blocked_domains: policy.blockedDomains } : {}), ...(policy.maxUses === undefined ? {} : { maxUses: policy.maxUses }),
     } }
   }

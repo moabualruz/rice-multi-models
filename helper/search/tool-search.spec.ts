@@ -34,7 +34,10 @@ test('selected provider preserves child/account routing and receives only the ex
   })
   const result = await search({ wire: input, query }, signal())
   expect(result.kind).toBe('answered')
-  if (result.kind === 'answered') expect(result.result).toMatchObject({ query, results: [{ content: [{ title: source.title, url: source.url, snippet: source.content }] }] })
+  if (result.kind === 'answered') {
+    expect(result.stage).toBe('provider-native')
+    expect(result.result).toMatchObject({ query, results: [{ content: [{ title: source.title, url: source.url, snippet: source.content }] }] })
+  }
   expect(calls).toBe(1); expect(services).toBe(0); expect(JSON.stringify(input)).toBe(before)
 })
 
@@ -47,7 +50,7 @@ test('partial provider output and errors are discarded before configured service
   })
   const result = await search({ wire: wire(), query }, signal())
   expect(order).toEqual(['provider', 'configured']); expect(JSON.stringify(result)).not.toContain('Unverified')
-  expect(result.kind).toBe('answered')
+  expect(result).toMatchObject({ kind: 'answered', stage: 'configured-service' })
 })
 
 test('unknown search capability skips inference and valid empty retrieval succeeds', async () => {
@@ -77,7 +80,7 @@ test('domain policy, safe source URLs, duplicates and result bounds apply before
 
 test('provider failure plus unavailable configured services returns a safe original-tool fallback', async () => {
   const search = createToolSearch({ step: async function* () { yield { type: 'error', kind: 'request', text: 'Do not expose credentials or query' } }, endpoints: () => endpoints, configured: async () => { throw new Error('owned unavailable') } })
-  expect(await search({ wire: wire(), query }, signal())).toEqual({ kind: 'native-fallback', reason: 'Selected-provider and configured web search are unavailable.', request: { query } })
+  expect(await search({ wire: wire(), query }, signal())).toEqual({ kind: 'native-fallback', stage: 'claude-native', reason: 'Selected-provider and configured web search are unavailable.', request: { query } })
 })
 
 test('invalid requests never invoke a provider or a configured service', async () => {
@@ -96,12 +99,13 @@ test('cancellation rejects after buffered output without invoking another search
   expect(configured).toBe(0)
 })
 
-test('Codex use bounds require complete identified accounting before the provider result is accepted', async () => {
-  for (const accounting of [{ calls: 1, complete: true }, { calls: 9, complete: true }, { complete: false }]) {
-    let services = 0
-    const search = createToolSearch({ step: async function* () { yield { type: 'search_sources', sources: [source], searched: true, ...accounting }; yield { type: 'stop', reason: 'end_turn' } }, endpoints: () => endpoints, configured: async () => { services++; return [] } })
-    const result = await search({ wire: { ...wire('codex/owned'), configText: '' }, query, maxUses: 8 }, signal())
-    expect(result.kind).toBe('answered'); expect(services).toBe(accounting.complete && accounting.calls! <= 8 ? 0 : 1)
+test('Codex skips native search before spending a call when maxUses or blocked-domain filtering is requested', async () => {
+  for (const restriction of [{ maxUses: 8 }, { blocked_domains: ['blocked.example'] }]) {
+    let provider = 0, services = 0
+    const search = createToolSearch({ step: async function* () { provider++; yield* completed() }, endpoints: () => endpoints, configured: async (_query, _signal, priority) => { services++; expect(priority).toEqual(endpoints); return [] } })
+    const result = await search({ wire: { ...wire('codex/owned'), configText: '' }, query, ...restriction }, signal())
+    expect(result).toMatchObject({ kind: 'answered', stage: 'configured-service' })
+    expect(provider).toBe(0); expect(services).toBe(1)
   }
 })
 
