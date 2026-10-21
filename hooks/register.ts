@@ -50,10 +50,12 @@ import type { PickerResult, Runtime } from './setup'
 import { searchConfigurationCommand } from './search-config'
 import type { SearchConfigurationResult, SearchEdit } from './search-config'
 import { runNativeSearch } from './native-search'
+import { NativeFetchUnavailable, runNativeFetch } from './native-fetch'
 import type { ToolSearchOutcome } from '../helper/search/tool-search'
+import type { WebFetchOutcome } from '../helper/web-fetch'
 import { createToolGate } from './tool-gate'
 import type { PublicWebSearchInput } from './web-search'
-import type { PublicWebFetchInput, PublicWebFetchResult } from './web-fetch'
+import type { PublicWebFetchInput } from './web-fetch'
 import { CLASSIFIER_ONLY_TOOLS, eligiblePermission, permissionAnswer, permissionRequest, resolvePermissionPolicy } from './permission'
 import { consumePermissionContext } from './permission-context'
 import { fallbackTitle, titleAnswer, titleRequest } from './titles'
@@ -1454,7 +1456,26 @@ export const register: Register = on => {
       })
       next.signal.throwIfAborted()
       if (run.exitCode !== 0 || run.isStdoutTruncated) return { deny: `${PLUGIN}: ${e.tool} did not complete with the selected provider; inspect /rice-models doctor` }
-      if (mode === 'web-fetch') return { result: JSON.parse(run.stdout) as PublicWebFetchResult }
+      if (mode === 'web-fetch') {
+        const outcome = JSON.parse(run.stdout) as WebFetchOutcome
+        if (!outcome || typeof outcome !== 'object') return { deny: `${PLUGIN}: invalid WebFetch helper response` }
+        if (!('kind' in outcome)) return { result: outcome }
+        if (outcome.kind !== 'native-fallback' || typeof outcome.url !== 'string' || typeof outcome.prompt !== 'string') return { deny: `${PLUGIN}: invalid WebFetch fallback request` }
+        try {
+          return { result: await runNativeFetch({ url: outcome.url, prompt: outcome.prompt, ...(outcome.offset === undefined ? {} : { offset: outcome.offset }) }, { authorize: () => $.session.authorize(), fetch: (url, init) => $.http.fetch(url, init) }, next.signal) }
+        } catch (error) {
+          next.signal.throwIfAborted()
+          if (!(error instanceof NativeFetchUnavailable)) throw error
+          if (error.code === 'security') return { deny: `${PLUGIN}: native WebFetch returned an unsafe or unverifiable destination; no result was returned` }
+          const fetchInput = gate.input as Omit<PublicWebFetchInput, 'wire'>
+          const direct = await $.process.run([runtime.executable, helperFile($.plugin.root), 'web-fetch-direct'], { stdin: JSON.stringify({ ...fetchInput, wire }), timeoutMs: 120_000 })
+          next.signal.throwIfAborted()
+          if (direct.exitCode !== 0 || direct.isStdoutTruncated) return { deny: `${PLUGIN}: native and direct WebFetch tiers were unavailable; no result was returned` }
+          const directOutcome = JSON.parse(direct.stdout) as WebFetchOutcome
+          if (!directOutcome || typeof directOutcome !== 'object' || 'kind' in directOutcome || typeof directOutcome.result !== 'string') return { deny: `${PLUGIN}: invalid direct WebFetch result` }
+          return { result: directOutcome }
+        }
+      }
       const outcome = JSON.parse(run.stdout) as ToolSearchOutcome
       if (outcome.kind === 'answered') return { result: outcome.result }
       if (outcome.kind !== 'native-fallback' || !outcome.request) return { deny: `${PLUGIN}: invalid web search helper response` }

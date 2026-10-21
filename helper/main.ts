@@ -13,7 +13,7 @@ import { discoverCodex } from './codex-catalog.ts'
 import { discover } from './discover.ts'
 import { searchConfiguration } from './search-config.ts'
 import { runToolSearch } from './search/tool-search.ts'
-import { runWebFetch } from './web-fetch.ts'
+import { runDirectWebFetch, runWebFetch } from './web-fetch.ts'
 import { captureCompaction } from './native-compaction.ts'
 import { captureTools } from './native-tools.ts'
 
@@ -86,7 +86,7 @@ export async function main(lifetime?: AbortSignal): Promise<void> {
     const result = await searchConfiguration(JSON.parse(await readStdin()))
     process.stdout.write(`${JSON.stringify(result)}\n`)
     if (!result.ok) process.exitCode = 1
-  } else if (mode === 'tool-search' || mode === 'web-fetch') {
+  } else if (mode === 'tool-search' || mode === 'web-fetch' || mode === 'web-fetch-direct') {
     const controller = new AbortController()
     const abort = () => controller.abort()
     for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.on(signal, abort)
@@ -94,7 +94,7 @@ export async function main(lifetime?: AbortSignal): Promise<void> {
     if (lifetime?.aborted) abort()
     try {
       const input = JSON.parse(await readStdin())
-      const result = mode === 'tool-search' ? await runToolSearch(input, controller.signal) : await runWebFetch(input, controller.signal)
+      const result = mode === 'tool-search' ? await runToolSearch(input, controller.signal) : mode === 'web-fetch' ? await runWebFetch(input, controller.signal) : await runDirectWebFetch(input, controller.signal)
       process.stdout.write(`${JSON.stringify(result)}\n`)
     } finally {
       lifetime?.removeEventListener('abort', abort)

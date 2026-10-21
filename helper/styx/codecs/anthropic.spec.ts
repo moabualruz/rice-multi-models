@@ -390,3 +390,12 @@ test('an in-stream error is recorded at most 4 KiB long, and a line past 16 MiB 
   const long = read('data: ', ...Array.from({ length: 17 }, () => 'a'.repeat(1 << 20)))
   expect(long.fed.flat()).toEqual([{ t: 'error', message: 'the stream sent a line over 16 MiB' }])
 })
+
+test('hosted WebFetch result blocks are retained whole and an interrupted result fails closed', () => {
+  const result = { type: 'web_fetch_tool_result', tool_use_id: 'srvtoolu_fixture_fetch', content: { type: 'web_fetch_result', url: 'https://docs.example/page', content: { type: 'document', source: { type: 'text', media_type: 'text/plain', data: 'Fetched evidence.' } } } }
+  const complete = read(sse(START, block(4, result), stop(4), ...END('end_turn')))
+  expect(complete.fed[0]?.[0]).toEqual({ t: 'native_block', block: result })
+  expect(complete.end).toEqual([])
+  const interrupted = read(sse(START, block(4, result)))
+  expect(interrupted.end).toEqual([{ t: 'error', message: 'the stream ended inside a web fetch result' }])
+})

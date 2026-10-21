@@ -35,3 +35,18 @@ test('native caps, named choice and structured output follow each direct protoco
     }
   }
 })
+
+test('hosted WebFetch uses the model-supported Anthropic version and Google URL Context request', () => {
+  const config = parseConfig(JSON.stringify({ providers: { owned: { kind: 'anthropic', baseUrl: 'https://owned.example', auth: 'none', models: { main: {} } } } })).config!
+  const base = config.providers.owned!.models.main!
+  for (const [id, type] of [['claude-sonnet-4-5', 'web_fetch_20250910'], ['claude-sonnet-4-6', 'web_fetch_20260318'], ['claude-haiku-5-5', 'web_fetch_20260318']] as const) {
+    const body = nativeConstraints('{}', { ...base, id }, { webFetch: { url: 'https://www.google.com/page', maxUses: 1, maxContentTokens: 8192 } })
+    expect(JSON.parse(body).tools).toEqual([{ type, name: 'web_fetch', max_uses: 1, max_content_tokens: 8192 }])
+  }
+  const gemini = parseConfig(JSON.stringify({ providers: { owned: { kind: 'gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta', auth: 'none', models: { main: {} } } } })).config!
+  expect(JSON.parse(nativeConstraints('{}', gemini.providers.owned!.models.main!, { webFetch: { url: 'https://www.google.com/page', maxUses: 1, maxContentTokens: 8192 } })).tools).toEqual([{ url_context: {} }])
+  for (const kind of ['openai', 'responses', 'bedrock'] as const) {
+    const unsupported = parseConfig(JSON.stringify({ providers: { owned: { kind, baseUrl: 'https://owned.example', auth: kind === 'bedrock' ? { command: ['/owned-key'] } : 'none', models: { main: {} } } } })).config!
+    expect(() => nativeConstraints('{}', unsupported.providers.owned!.models.main!, { webFetch: { url: 'https://www.google.com/page', maxUses: 1, maxContentTokens: 8192 } })).toThrow('no supported hosted fetch contract')
+  }
+})

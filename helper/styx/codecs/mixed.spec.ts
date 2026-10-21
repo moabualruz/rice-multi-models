@@ -133,6 +133,14 @@ test('gemini: the request carries its system text, tools as JSON schema, and the
   ])
 })
 
+test('gemini: URL Context retrieval metadata is retained as a native result block', () => {
+  const decoder = gemini.decoder()
+  const stream = sse({ candidates: [{ content: { role: 'model', parts: [{ text: 'Page summary.' }] }, url_context_metadata: { url_metadata: [{ retrieved_url: 'https://www.google.com/page', url_retrieval_status: 'URL_RETRIEVAL_STATUS_SUCCESS' }] }, finishReason: 'STOP' }] })
+  const events = [...decoder.feed(new TextEncoder().encode(stream)), ...decoder.end()]
+  expect(events).toContainEqual({ t: 'native_block', block: { type: 'gemini_url_context_result', url_metadata: [{ retrieved_url: 'https://www.google.com/page', url_retrieval_status: 'URL_RETRIEVAL_STATUS_SUCCESS' }] } })
+  expect(events).toContainEqual({ t: 'text', text: 'Page summary.' })
+})
+
 test('gemini: a call whose signature is not held (another model wrote it, or the helper restarted) goes back with the skip', () => {
   const { p, m } = target('gemini-3.8-flash')
   const messages = normalize(

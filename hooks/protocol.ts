@@ -16,6 +16,7 @@ export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 export type Transport = 'auto' | 'ws' | 'sse'
 export type WebSearch = { allowedDomains?: string[]; blockedDomains?: string[]; maxUses?: number; location?: Record<string, unknown> }
+export type WebFetch = { url: string; maxUses: 1; maxContentTokens: number }
 export type SearchSource = { title: string; url: string; content?: string }
 /** `complete` certifies reported call accounting, separately from answer completion. */
 export type SearchEvidence = { sources: SearchSource[]; searched: boolean; calls?: number; complete?: boolean }
@@ -48,6 +49,8 @@ export type StepRequest = {
     outputSchema?: Record<string, unknown>
     /** Dedicated hosted search. Only the selected provider's search tool is offered. */
     webSearch?: WebSearch
+    /** Dedicated hosted fetch. Only the selected provider's fetch tool is offered. */
+    webFetch?: WebFetch
   }
 }
 

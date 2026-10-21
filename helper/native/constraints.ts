@@ -1,6 +1,7 @@
 import type { ModelConfig } from '../../hooks/config.ts'
 import type { StepRequest } from '../../hooks/protocol.ts'
 import { record } from './ownership.ts'
+import { webFetchToolType } from './web-fetch.ts'
 
 const object = (value: unknown): Record<string, unknown> => record(value) ? value : {}
 
@@ -49,6 +50,22 @@ export function nativeConstraints(body: string, model: ModelConfig, native: Step
     if (choice && choice.type !== 'none') sent.toolConfig = { ...object(sent.toolConfig), toolChoice: choice.type === 'tool' ? { tool: { name: choice.name } } : { [choice.type]: {} } }
     if (choice?.type === 'none') delete sent.toolConfig
     if (native.outputSchema) sent.outputConfig = { textFormat: { type: 'json_schema', structure: { jsonSchema: { schema: JSON.stringify(native.outputSchema) } } } }
+  }
+  if (native.webFetch) {
+    if (!/^https:\/\//i.test(native.webFetch.url) || native.webFetch.maxUses !== 1
+      || !Number.isSafeInteger(native.webFetch.maxContentTokens) || native.webFetch.maxContentTokens < 1 || native.webFetch.maxContentTokens > 100_000) throw new Error('Invalid hosted fetch request')
+    if (model.kind === 'anthropic') {
+      sent.tools = [{ type: webFetchToolType(model.id), name: 'web_fetch', max_uses: 1, max_content_tokens: native.webFetch.maxContentTokens }]
+      sent.tool_choice = { type: 'auto' }
+      delete sent.thinking
+      const output = { ...object(sent.output_config) }
+      delete output.format
+      if (Object.keys(output).length) sent.output_config = output
+      else delete sent.output_config
+    } else if (model.kind === 'gemini') {
+      sent.tools = [{ url_context: {} }]
+      delete sent.toolConfig
+    } else throw new Error('This provider protocol has no supported hosted fetch contract')
   }
   if (native.webSearch) {
     const search = native.webSearch
