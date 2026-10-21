@@ -1523,15 +1523,19 @@ export const register: Register = on => {
 
   on('agent.spawn', async ($, e, next) => {
     if (e.resume || e.workflow) return next(e)
+    const picked = pickRequested(await takeCarried($, e.tool_use_id), e.model, e.fork)
+    if ('deny' in picked) return { deny: picked.deny }
     const definition = e.fork ? undefined : registered.get(e.subagentType) ?? await definitionOf(promptsPort($), memory, e.subagentType)
     // The engine reports a parent's own model, which for a remapped loop (an
     // Explore haiku default, a forked skill alias) is a Claude alias.
     const parentModel = e.parentAgentId === undefined
       ? stepModel(e.parentModel, await $.session.model(), false, tiers(), familyPorts)
       : agentModels.get(e.parentAgentId) ?? e.parentModel
-    const decision = spawnDecision({ parentModel, requested: e.model, definitionModel: definition?.model, fork: e.fork }, tiers(), familyPorts)
+    const decision = spawnDecision({ parentModel, requested: picked.requested, definitionModel: definition?.model, fork: e.fork }, tiers(), familyPorts)
     $.ui.log(`${PLUGIN}: spawn ${e.subagentType} from ${parentModel}: ${decision.model ?? 'native resolution'} (${decision.reason})`, { to: 'debug' })
+    if (picked.exact !== undefined && decision.model !== picked.exact) return { deny: `${PLUGIN}: Agent model ${picked.exact} cannot be run by this session (${decision.reason}); no subagent was started` }
     const result = await next(decision.model !== undefined && decision.model !== e.model ? { ...e, model: decision.model } : e)
+    if (picked.exact !== undefined && result.model !== picked.exact) $.ui.log(`${PLUGIN}: Agent model ${picked.exact} was requested but the subagent started on ${result.model}`, { to: 'transcript' })
     if (result.agentId) {
       setCapped(spawnDecisions, result.agentId, decision)
       setCapped(spawnBackground, result.agentId, e.background)
@@ -1543,7 +1547,7 @@ export const register: Register = on => {
     const answer = await next(e)
     described.set(e.tool, { description: answer.description, isDeferred: answer.isDeferred ?? e.isDeferred })
 
-    return answer
+    return e.tool === AGENT_TOOL ? { ...answer, description: withDescriptionSuffix(answer.description, exactModelIds(catalogue, loaded)) } : answer
   })
 
   on('turn.step', async function* ($, e, next) {
