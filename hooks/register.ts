@@ -5,6 +5,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, ModelCompleteResult, ModelUsage, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
+import { AGENT_TOOL, CARRIER_VALUE, classifyCall, emptyCarrier, entryOf, exactModelIds, forgetEntry, pickRequested, recordEntry, withDescriptionSuffix } from './agent-model'
 import { BUILTIN_AGENTS, HANDBACK_TOOL, identityLine, isFork, toolFilter } from './agents'
 import type { AgentDef } from './agents'
 import { anchoredEstimate, reportedInput } from './budget'
@@ -70,10 +71,12 @@ import { createEvaluatorSources, registerEvaluatorSources } from './evaluator-so
 
 const PLUGIN = 'rice-multi-models'
 /** Who the requests to declared providers say they come from (OpenCode Go asks each client to name itself). */
-const USER_AGENT = 'rice-multi-models/0.13.0 (claude-code)'
+const USER_AGENT = 'rice-multi-models/0.14.0 (claude-code)'
 const PROVIDERS: Readonly<Record<string, string>> = { codex: 'OpenAI Codex (ChatGPT subscription)' }
 const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 const prefsAtom = atom({ plugin: 'rice-multi-models', key: 'prefs' } as const, { effort: null, transport: 'auto', helper: 'session' })
+/** Exact Agent model ids carried from a call's tool.call to its agent.spawn (see agent-model.ts), by tool_use_id; host state, so a hot reload keeps it. */
+const carrierAtom = atom({ plugin: 'rice-multi-models', key: 'agent-model-carrier' } as const, emptyCarrier)
 /** The main transcript's file, as the engine's classic hooks name it; a compaction cites it in its summary message. */
 const transcriptAtom = atom({ plugin: 'rice-multi-models', key: 'transcript' } as const, { path: null })
 
@@ -517,7 +520,7 @@ async function buildRequest($: EngineInterface, e: TurnStepInput, transcript: re
     allow = tool => allowed(tool) && only.includes(tool)
   }
   messages = withCarry(withIdentity(messages, target.model, provider), carryFor(who))
-  const candidates: RemoteTool[] = remoteTools(modelInfos, described, allow, {}, native === undefined || native instanceof Error ? undefined : toolTable(native))
+  const candidates: RemoteTool[] = remoteTools(modelInfos, described, allow, {}, native === undefined || native instanceof Error ? undefined : toolTable(native), exactModelIds(catalogue, loaded))
   if (handback) candidates.push({ name: HANDBACK_TOOL.name, description: HANDBACK_TOOL.description, schema: { ...HANDBACK_TOOL.schema } })
   const tools = target.remote ? selectTools(candidates, target.remote.provider, target.remote.model) : candidates
   if (target.remote) {
@@ -577,6 +580,34 @@ async function stepOwnerModel($: EngineInterface, e: TurnStepInput): Promise<str
     owner = (parent === undefined ? undefined : agentModels.get(parent)) ?? await $.session.model()
   }
   return stepModel(e.model, owner, explicitClaude, tiers(), familyPorts)
+}
+
+type AgentCallInput = { tool_use_id: string; model?: unknown }
+
+/**
+ * An Agent call's `model`, seen before the engine checks it: an exact id this session can run is recorded under the
+ * call's tool_use_id and the engine gets its own carrier value; agent.spawn takes the id back (see agent-model.ts).
+ * An id nothing here can run is refused with the valid ones. The record goes when the call ends, however it ends.
+ */
+async function agentCall<E extends AgentCallInput, R>($: EngineInterface, e: E, next: (input: E) => Promise<R>): Promise<R | { deny: string }> {
+  const verdict = classifyCall(e.model, exactModelIds(catalogue, loaded))
+  if (verdict.kind === 'deny') return { deny: verdict.reason }
+  if (verdict.kind === 'pass') return next(e)
+  if (!e.tool_use_id) return { deny: `${PLUGIN}: this Agent call carries no tool_use_id, so its model cannot be carried to the spawn; no subagent was started` }
+  const entry = { toolUseId: e.tool_use_id, kind: verdict.kind === 'carry' ? 'exact' as const : 'engine' as const, at: Date.now(), ...(verdict.kind === 'carry' ? { id: verdict.id } : {}) }
+  await update($, carrierAtom, state => recordEntry(state, entry))
+  try {
+    return await next(verdict.kind === 'carry' ? { ...e, model: CARRIER_VALUE } : e)
+  } finally {
+    await update($, carrierAtom, state => forgetEntry(state, e.tool_use_id))
+  }
+}
+
+/** The record an Agent call left for its spawn; taking it removes it. */
+async function takeCarried($: EngineInterface, toolUseId: string) {
+  const entry = entryOf(await read($, carrierAtom), toolUseId)
+  if (entry) await update($, carrierAtom, state => forgetEntry(state, toolUseId))
+  return entry
 }
 
 /**
@@ -1382,6 +1413,7 @@ export const register: Register = on => {
   // Let native rules and PreToolUse hooks decide the exact action first. A
   // one-shot refusal stops its old implementation before provider extraction.
   on('tool.call', async ($, e, next) => {
+    if (e.tool === AGENT_TOOL) return agentCall($, e, next).finally(() => { toolModes.delete(e.tool_use_id) })
     if (e.tool !== 'WebSearch' && e.tool !== 'WebFetch') return next(e).finally(() => { toolModes.delete(e.tool_use_id) })
     const initialModel = e.agentId === undefined ? await $.session.model() : agentModels.get(e.agentId)
     if (initialModel === undefined) return { deny: `${PLUGIN}: web tool conversation model is unknown; retry after its next observed turn` }
@@ -1449,7 +1481,7 @@ export const register: Register = on => {
       $.ui.log(`${PLUGIN}: WebSearch answered via ${outcome.stage}`, { to: 'debug' })
       return { result }
     } finally { webToolGate.end(ticket); toolModes.delete(e.tool_use_id) }
-  }).catch(() => ({ deny: `${PLUGIN}: the web tool failed; no action was approved or replayed automatically` }))
+  }).catch((_host, e) => ({ deny: e.tool === AGENT_TOOL ? `${PLUGIN}: the Agent model could not be resolved; no subagent was started` : `${PLUGIN}: the web tool failed; no action was approved or replayed automatically` }))
 
   on('tool.check', async ($, e, next) => {
     let verdict = await next(e)

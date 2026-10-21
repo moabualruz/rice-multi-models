@@ -5,6 +5,7 @@
 // translator sends it once the transcript has loaded it. Pure.
 import type { NativeTool } from './native-tools'
 import type { RemoteTool } from './protocol'
+import { AGENT_TOOL, widenAgentSchema, withDescriptionSuffix } from './agent-model'
 import { SCHEMAS } from './schemas.gen'
 import { own } from './util'
 
@@ -19,6 +20,8 @@ export function remoteTools(
   allow: (name: string) => boolean,
   mcpSchemas: Readonly<Record<string, Readonly<Record<string, unknown>>>> = {},
   native: ReadonlyMap<string, NativeTool> = new Map(),
+  /** The exact model ids the Agent tool accepts in this session (see agent-model.ts). */
+  exactModels: readonly string[] = [],
 ): RemoteTool[] {
   return infos
     .filter(info => allow(info.name))
@@ -27,11 +30,14 @@ export function remoteTools(
       const captured = info.mcp ? undefined : native.get(info.name)
       // These descriptions can vary with the live session, unlike a fresh CLI capture.
       const sessionScopedDescription = info.name === 'Agent' || info.name === 'ListAgents'
+      const description = seen?.description ?? (sessionScopedDescription ? info.description : captured?.description ?? info.description)
+      const schema = { ...(captured?.input_schema ?? own(SCHEMAS, info.name) ?? own(mcpSchemas, info.name) ?? LOOSE) }
+      const agent = info.name === AGENT_TOOL && !info.mcp
 
       return {
         name: info.name,
-        description: seen?.description ?? (sessionScopedDescription ? info.description : captured?.description ?? info.description),
-        schema: { ...(captured?.input_schema ?? own(SCHEMAS, info.name) ?? own(mcpSchemas, info.name) ?? LOOSE) },
+        description: agent ? withDescriptionSuffix(description, exactModels) : description,
+        schema: agent ? widenAgentSchema(schema, exactModels) : schema,
         deferred: seen?.isDeferred ?? info.mcp,
       }
     })
