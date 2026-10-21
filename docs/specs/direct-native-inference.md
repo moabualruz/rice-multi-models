@@ -1,7 +1,8 @@
 # Direct inference inside ordinary Claude
 
-Status: implemented in the 0.9 releases against Claude Code 2.1.301 and 2.1.302. Named host
-residuals are listed at the end; they are documented, not hidden.
+Status: implementation for 0.11.0. This release removes mod-owned agent types while
+keeping Claude Code built-ins and user-supplied agent files native. Named host residuals
+and current verification limits are listed below; unverified native text is not replaced.
 
 ## Required outcome
 
@@ -105,10 +106,27 @@ without an anchor, after a model change or after compaction.
 
 ## Verification
 
-`bun run check` runs the unit suites, typechecks against the installed build's
-generated API, the bundle check and the native proofs: compaction, permissions,
-permission mode, search, evaluators, titles and the routing phases of
-`npm run test:phases` (children with and without persistence, family, built-in
-tools, compaction, classifier, skills, budget, partial failure, prompt evaluators,
-all five protocols, automatic compaction and a throwing `turn.step` hook). CI runs
-it on Linux for Claude Code 2.1.301 and 2.1.302 and on native Windows for 2.1.302.
+`bun run check` is the full gate. It runs the unit suites, typechecks against the
+installed build's generated API, the bundle check and the native proofs: compaction,
+permissions, permission mode, search, evaluators, titles and the routing phases of
+`npm run test:phases` (children with and without persistence, family, built-in tools,
+compaction, classifier, skills, budget, partial failure, prompt evaluators, all five
+protocols, automatic compaction and a throwing `turn.step` hook). The last recorded
+CI matrix used Linux with Claude Code 2.1.301 and 2.1.302, plus native Windows with
+2.1.302.
+
+Focused evidence on Claude Code 2.1.306:
+
+- `npm run test:tools` passed with 14 compared agent prompts, 12 captured tools, 3
+  routed requests and no strict parity failures. The custom restricted agent proof
+  resolved its exact frontmatter model `codex/owned-child`.
+- `npm run test:permission-mode` remains red. The first three of four cases passed.
+  In the explicit child-auto case, the native definition was unambiguous and the
+  frontmatter and selected-provider path both recorded `auto`; the selected Bash
+  judgment returned allow. The native host then issued two local security-monitor
+  requests, including model `selected/main`, and logged `unrecognized_model`. The
+  action was not approved and the marker was not written. The fixture did not use
+  external inference or bypass the host classifier. This is not a passing permission
+  proof; support for routed model ids in the host classifier is not documented here.
+
+The full `bun run check` gate has not passed for this 0.11.0 lane.

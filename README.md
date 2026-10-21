@@ -103,7 +103,7 @@ parent's own model. Entries naming a model from another family are ignored.
 | Main and subagent turns | Selected provider, with Claude Code's tools and permissions; each built-in tool with the description and input schema the installed `claude` sends, and a subagent with the system prompt and tools the engine gives its agent type (see Known limits) |
 | `/compact` and automatic compaction | Claude Code's own summary prompt (with your `/compact` instructions in its slot) over the conversation as real messages, answered by the selected provider with its reported output bound; the engine's own summary message wording, citing the transcript file; a bounded tail of recent messages and their tool pairs kept verbatim; a failed or unreadable-prompt compaction keeps the original transcript |
 | Session titles | Selected provider, local fallback, manual names kept |
-| Auto-mode permission judgments | Selected provider with your effective auto-mode policy; native rules, hooks and managed limits still decide first |
+| Auto-mode permission judgments | Selected provider receives your effective auto-mode policy; Claude Code's native classifier, rules, hooks and managed limits can still decide the action |
 | WebFetch | Page fetched directly, extracted by the selected provider |
 | WebSearch | Selected provider's own search, then your saved search services, then Claude's native search with the session's account |
 | Stop / SubagentStop prompt hooks | Selected provider |
@@ -123,6 +123,12 @@ These come from what Claude Code exposes to plugins today:
   - A headless foreground subagent is offered a few more tools than a background one, and an interactive session's subagents get the background set; the mod follows that.
 - **Auxiliary prompt text.** Session titles, auto-mode permission judgments, WebFetch extraction, and Stop or SubagentStop prompt evaluators still use text written by this mod. The headless probes did not expose the native title or permission-judge prompts. Stop and SubagentStop system blocks matched across marker runs, but the complete requests differed and no independent byte-for-byte verification succeeded. The WebFetch probe did not reach a successful page extraction request. No native prompt was substituted without that proof.
 - **A long step shows a stale label.** After a compaction or a subagent spawn the engine's spinner keeps reading "Running SessionStart hooks..." for the whole next routed step, which can take minutes on a large context. The session is working; the label is the engine's.
+- **Native auto-mode classifier.** The selected-provider judgment does not replace
+  Claude Code's own classifier. In the isolated explicit child-auto proof on Claude
+  Code 2.1.306, the selected-provider judgment allowed the synthetic marker action,
+  but the host rejected `selected/main` as unrecognized and did not run the action.
+  Support for routed model ids in this host classifier is not documented or verified;
+  the mod does not bypass the check.
 - **Auto-mode handoff review.** When a subagent finishes while its parent is in
   auto mode, Claude Code reviews the report with its own classifier, which uses
   Claude. If Claude is unavailable the report is still delivered, with a note.
