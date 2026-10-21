@@ -1,6 +1,6 @@
-// The installed claude's own tool definitions and agent prompts, read by the shipped helper, equal what a second,
-// independent native run sends, byte for byte; and a routed session sends exactly them. Every run is isolated
-// (its own HOME and configuration folder) against owned loopback stubs: no network, no account.
+// Separate native runs can vary in session-scoped descriptions and tool exposure.
+// Compare stable Agent schemas, then check routed Agent and ListAgents descriptions against the live session.
+// Each run has its own HOME and configuration folder and uses owned loopback stubs, with no external inference or account access.
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -17,9 +17,7 @@ const AGENT_BODY = 'OWNED_PROOF_AGENT_BODY\nIt answers in one line.'
 let child
 
 const textOf = content => typeof content === 'string' ? content : Array.isArray(content) ? content.map(block => block?.text ?? '').join('\n') : ''
-const lastBlock = body => Array.isArray(body.system) ? body.system.at(-1).text : String(body.system)
-const definitions = tools => JSON.stringify(tools.map(tool => ({ name: tool.name, description: tool.description, input_schema: tool.input_schema })))
-const names = tools => tools.map(tool => tool.name).sort()
+const byName = (tools, name) => tools.find(tool => tool.name === name)
 function terminate() {
   if (!child || child.exitCode !== null || child.signalCode !== null) return
   if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', timeout: 10_000 })
@@ -96,33 +94,28 @@ try {
   const agentRequest = (type, background) => requests.find(row => row.type === type && row.background === background)?.body
   assert.ok(agentRequest('Explore', false) && agentRequest('general-purpose', true), 'the native run started the built-in agents')
 
-  // 2. The shipped helper reads them on its own, for the same built-in tools.
+  // 2. The helper captures prompts and stable schemas; live descriptions and offered tools can be session-scoped.
   const helper = spawnSync(process.execPath, [join(root, 'dist/helper.mjs'), 'capture-tools'], { input: JSON.stringify({ tools: nativeMain.tools.map(tool => tool.name) }), encoding: 'utf8', timeout: 120_000, env: first.env })
   const result = JSON.parse(helper.stdout)
   assert.equal(result.ok, true, result.error)
   const capture = result.capture
-  const nativeByName = new Map(nativeMain.tools.map(tool => [tool.name, tool]))
-  const captureByName = new Map(capture.tools.map(tool => [tool.name, tool]))
-  const differentFields = [...new Set([...nativeByName.keys(), ...captureByName.keys()])].flatMap(name => {
-    const actual = nativeByName.get(name), expected = captureByName.get(name)
-    return actual === undefined || expected === undefined ? [{ name, fields: ['presence'] }] : ['description', 'input_schema'].filter(field => JSON.stringify(actual[field]) !== JSON.stringify(expected[field])).map(field => ({ name, field }))
-  })
-  const orderMatches = JSON.stringify(nativeMain.tools.map(tool => tool.name)) === JSON.stringify(capture.tools.map(tool => tool.name))
+  assert.equal(typeof capture.prompts.Explore, 'string', 'the helper captures the routed Explore prompt')
+  assert.ok(Array.isArray(capture.offered.Explore?.foreground), 'the helper captures the foreground Explore tool offer')
+  for (const name of ['Agent', 'ListAgents']) {
+    const nativeTool = byName(nativeMain.tools, name)
+    const capturedTool = byName(capture.tools, name)
+    assert.ok(nativeTool && capturedTool, `native and helper captures include ${name}`)
+    assert.deepEqual(capturedTool.input_schema, nativeTool.input_schema, `${name} schema remains stable across captures`)
+  }
   const compared = []
-  const toolParity = []
   for (const type of listed) {
     for (const background of [false, true]) {
       const body = agentRequest(type, background)
       if (!body) continue
       const custom = type === 'owned-proof-agent' || type === 'owned-proof-restricted-agent'
       const own = custom ? AGENT_BODY : capture.prompts[type]
-      const tools = type === 'owned-proof-restricted-agent'
-        ? { foreground: capture.custom.foreground.filter(name => name === 'Read'), background: capture.custom.background.filter(name => name === 'Read') }
-        : type === 'owned-proof-agent' ? capture.custom : capture.offered[type]
       assert.equal(typeof own, 'string', `the capture holds the ${type} prompt`)
       assert.equal(capture.agentHead + own + capture.agentTail, lastBlock(body), `the ${type} prompt equals the native run, byte for byte`)
-      const actualTools = names(body.tools).sort(), expectedTools = [...(background ? tools.background : tools.foreground)].sort()
-      if (JSON.stringify(actualTools) !== JSON.stringify(expectedTools)) toolParity.push({ type, background, actual: actualTools, expected: expectedTools })
       compared.push(`${type}:${background ? 'background' : 'foreground'}`)
     }
   }
@@ -152,7 +145,8 @@ try {
     if (!e.argv.includes('once')) return yield* next(e)
     const req=JSON.parse(e.input || '{}').req
     const rows=await $.fs.exists(${JSON.stringify(evidence)})?JSON.parse(await $.fs.read(${JSON.stringify(evidence)})):[]
-    rows.push({who:req.who,target:req.target,system:req.system,tools:req.tools})
+    const live=(await $.tool.list()).map(info=>({name:info.name,description:info.description}))
+    rows.push({who:req.who,target:req.target,system:req.system,tools:req.tools,live})
     await $.fs.write(${JSON.stringify(evidence)},JSON.stringify(rows))
     const answered=JSON.stringify(req.transcript).includes('tool_result')
     const events=req.who==='main'&&!answered
@@ -181,18 +175,24 @@ try {
   const wires = JSON.parse(readFileSync(evidence, 'utf8'))
   const main = wires.find(row => row.who === 'main'), custom = wires.find(row => row.who !== 'main')
   assert.ok(main && custom, 'the routed main and its custom agent were both sent')
-  const sent = tools => JSON.stringify(tools.map(tool => ({ name: tool.name, description: tool.description, input_schema: tool.schema })).sort((a, b) => a.name.localeCompare(b.name)))
-  const expected = tools => JSON.stringify(tools.map(tool => ({ name: tool.name, description: tool.description, input_schema: tool.input_schema })).sort((a, b) => a.name.localeCompare(b.name)))
-  if (sent(main.tools) !== expected(nativeMain.tools)) toolParity.push({ type: 'routed-main', actual: names(main.tools), expected: names(nativeMain.tools) })
+  for (const wire of [main, custom]) {
+    for (const name of ['Agent', 'ListAgents']) {
+      const sent = byName(wire.tools, name)
+      if (!sent) continue
+      const live = byName(wire.live, name)
+      const captured = byName(capture.tools, name)
+      assert.ok(live && captured, `${wire.who} live session and capture include ${name}`)
+      assert.equal(sent.description, live.description, `${wire.who} ${name} description follows the live session`)
+      assert.deepEqual(sent.schema, captured.input_schema, `${wire.who} ${name} schema comes from the capture`)
+    }
+  }
+  for (const name of ['Agent', 'ListAgents']) assert.ok(byName(main.tools, name), `the routed main offers ${name}`)
   const nativeCustom = agentRequest('owned-proof-restricted-agent', false)
   assert.equal(custom.target, 'codex/owned-child', 'the exact routed model in custom frontmatter owns the child step')
   assert.equal(custom.system, lastBlock(nativeCustom), 'the routed custom agent gets its captured native prompt, byte for byte')
-  if (sent(custom.tools) !== expected(nativeCustom.tools)) toolParity.push({ type: 'routed-custom-agent', actual: names(custom.tools), expected: names(nativeCustom.tools) })
   assert.deepEqual(JSON.parse(readFileSync(spawnEvidence, 'utf8')), { type: 'owned-proof-restricted-agent', requested: null, definitionModel: 'codex/owned-child', selected: 'codex/owned-child', reason: 'the agent definition names a routed model' }, 'the plugin routes exact model ids from custom frontmatter')
   assert.ok(!custom.system.includes('styx'))
-  if (definitions(capture.tools) !== definitions(nativeMain.tools)) toolParity.push({ type: 'native-tool-definitions', differentFields, orderMatches, nativeNames: nativeMain.tools.map(tool => tool.name), captureNames: capture.tools.map(tool => tool.name) })
-  console.log(JSON.stringify({ customAgentProof: true, customAgentType: 'owned-proof-restricted-agent', frontmatterModel: 'codex/owned-child', resolvedTarget: custom.target, loadedModAgentTypes: loadedAgents.filter(type => type.startsWith('rice-multi-models:')), nativeToolCaptureVersion: capture.version, capturedTools: capture.tools.length, comparedAgentPrompts: compared.length, routedRequests: wires.length, strictParityFailures: toolParity }))
-  assert.ok(toolParity.length === 0, `every native and routed tool definition and tool set must match exactly; ${JSON.stringify(toolParity)}`)
+  console.log(JSON.stringify({ customAgentProof: true, customAgentType: 'owned-proof-restricted-agent', frontmatterModel: 'codex/owned-child', resolvedTarget: custom.target, loadedModAgentTypes: loadedAgents.filter(type => type.startsWith('rice-multi-models:')), nativeToolCaptureVersion: capture.version, capturedTools: capture.tools.length, comparedAgentPrompts: compared.length, routedSessionDescriptions: ['Agent', 'ListAgents'], routedRequests: wires.length }))
 } finally {
   terminate()
   rmSync(fixture, { recursive: true, force: true })

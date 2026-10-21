@@ -25,10 +25,12 @@ export function remoteTools(
     .map(info => {
       const seen = described.get(info.name)
       const captured = info.mcp ? undefined : native.get(info.name)
+      // These descriptions can vary with the live session, unlike a fresh CLI capture.
+      const sessionScopedDescription = info.name === 'Agent' || info.name === 'ListAgents'
 
       return {
         name: info.name,
-        description: seen?.description ?? captured?.description ?? info.description,
+        description: seen?.description ?? (sessionScopedDescription ? info.description : captured?.description ?? info.description),
         schema: { ...(captured?.input_schema ?? own(SCHEMAS, info.name) ?? own(mcpSchemas, info.name) ?? LOOSE) },
         deferred: seen?.isDeferred ?? info.mcp,
       }

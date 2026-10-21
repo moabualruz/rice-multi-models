@@ -68,17 +68,21 @@ test('the tools offered follow the agent type and whether it runs in the backgro
 test('routed tools carry the captured definitions; MCP tools and tools the capture did not show keep their fallbacks', () => {
   const derived = deriveCapture(capture)
   const infos = [
+    { name: 'Agent', description: 'Current session Agent guidance', mcp: false },
+    { name: 'ListAgents', description: 'Current session agent list', mcp: false },
     { name: 'Read', description: 'Read a f', mcp: false },
     { name: 'AskUserQuestion', description: 'Ask the', mcp: false },
     { name: 'mcp__server__lookup', description: 'Lookup', mcp: true },
   ]
-  const [read, ask, mcp] = remoteTools(infos, new Map(), () => true, {}, toolTable(derived))
+  const [agent, listAgents, read, ask, mcp] = remoteTools(infos, new Map(), () => true, {}, toolTable(derived))
+  expect(agent).toEqual({ name: 'Agent', description: 'Current session Agent guidance', schema: tool('Agent').input_schema, deferred: false })
+  expect(listAgents).toEqual({ name: 'ListAgents', description: 'Current session agent list', schema: tool('ListAgents').input_schema, deferred: false })
   expect(read).toEqual({ name: 'Read', description: tool('Read').description, schema: tool('Read').input_schema, deferred: false })
   expect(ask?.description).toBe('Ask the')
   expect((ask?.schema.properties as Record<string, unknown>).questions).toBeDefined()
   expect(mcp).toEqual({ name: 'mcp__server__lookup', description: 'Lookup', schema: { type: 'object', additionalProperties: true }, deferred: true })
   // What the engine described to this session itself still wins.
-  expect(remoteTools(infos.slice(0, 1), new Map([['Read', { description: 'Live text' }]]), () => true, {}, toolTable(derived))[0]?.description).toBe('Live text')
+  expect(remoteTools(infos.filter(info => info.name === 'Read'), new Map([['Read', { description: 'Live text' }]]), () => true, {}, toolTable(derived))[0]?.description).toBe('Live text')
 })
 
 test('a capture that is not what the engine is expected to produce is refused, not guessed', () => {
