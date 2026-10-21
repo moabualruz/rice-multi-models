@@ -7753,7 +7753,7 @@ function thinkingStore() {
 var record2 = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 var UNOWNED = Object.freeze({ unowned: true });
 
-// helper/native/web-fetch.ts
+// hooks/native-web-fetch.ts
 var WEB_FETCH_BASIC = "web_fetch_20250910";
 var WEB_FETCH_DYNAMIC = "web_fetch_20260318";
 function parseWebFetchContent(value) {
