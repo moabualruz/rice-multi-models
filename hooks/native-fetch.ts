@@ -1,5 +1,5 @@
 import type { PublicWebFetchInput, PublicWebFetchResult } from './web-fetch.ts'
-import { parseWebFetchContent, webFetchToolType } from '../helper/native/web-fetch.ts'
+import { parseWebFetchContent, webFetchToolType } from './native-web-fetch.ts'
 
 /** Native Claude operations stay on the host authorization and HTTP handles. */
 export type NativeFetchContext = {
