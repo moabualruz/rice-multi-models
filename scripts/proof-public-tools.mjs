@@ -18,6 +18,7 @@ let child
 
 const textOf = content => typeof content === 'string' ? content : Array.isArray(content) ? content.map(block => block?.text ?? '').join('\n') : ''
 const byName = (tools, name) => tools.find(tool => tool.name === name)
+const lastBlock = body => Array.isArray(body.system) ? body.system.at(-1).text : String(body.system)
 function terminate() {
   if (!child || child.exitCode !== null || child.signalCode !== null) return
   if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', timeout: 10_000 })
