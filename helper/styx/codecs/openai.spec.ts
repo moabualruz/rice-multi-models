@@ -207,7 +207,7 @@ test('tools: false omits tools; parallelToolCalls: false sends parallel_tool_cal
   expect('parallel_tool_calls' in body({ model: { parallelToolCalls: false } })).toBe(false)
 })
 
-test('tool results come first as tool messages, flattened, with Error: on errors and images moved to a user message', () => {
+test('tool results come first as tool messages, flattened, with omission notes and images moved to a user message', () => {
   const { m } = cfg()
   const img = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } }
   const out = oa(
@@ -226,7 +226,7 @@ test('tool results come first as tool messages, flattened, with Error: on errors
     m,
   )
   expect(out.slice(2)).toEqual([
-    { role: 'assistant', content: null, tool_calls: [expect.objectContaining({ id: 't1' }), expect.objectContaining({ id: 't2' })] },
+    { role: 'assistant', content: '[thinking omitted: provider-specific reasoning cannot be replayed without a held signature]', tool_calls: [expect.objectContaining({ id: 't1' }), expect.objectContaining({ id: 't2' })] },
     { role: 'tool', tool_call_id: 't1', content: 'a\nb' },
     { role: 'tool', tool_call_id: 't2', content: 'Error: boom' },
     { role: 'user', content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } }, { type: 'text', text: 'after' }] },
@@ -234,16 +234,16 @@ test('tool results come first as tool messages, flattened, with Error: on errors
   expect(JSON.stringify(out)).not.toContain('secret')
 })
 
-test('images respect vision, URL images pass through, documents are named, and orphan tool results are dropped', () => {
+test('images respect vision, URL images pass through, and unsupported documents and orphan results are noted', () => {
   const img = { type: 'image', source: { type: 'url', url: 'https://img.invalid/a.png' } }
   const msgs: ApiMessage[] = [
     { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'gone', content: 'orphan' }, img, { type: 'document', source: {} }] },
   ]
   expect(oa(msgs, cfg().m).slice(1)).toEqual([
-    { role: 'user', content: [{ type: 'image_url', image_url: { url: 'https://img.invalid/a.png' } }, { type: 'text', text: '[document omitted]' }] },
+    { role: 'user', content: [{ type: 'text', text: '[tool_result omitted: its matching tool_use is outside the normalized transcript window]' }, { type: 'image_url', image_url: { url: 'https://img.invalid/a.png' } }, { type: 'text', text: '[document omitted: unknown media type source is unsupported; only inline application/pdf and text/plain are replayed]' }] },
   ])
   expect(oa(msgs, cfg({ vision: false }).m).slice(1)).toEqual([
-    { role: 'user', content: '[image omitted: model has no vision]\n\n[document omitted]' },
+    { role: 'user', content: '[tool_result omitted: its matching tool_use is outside the normalized transcript window]\n\n[image omitted: model has no vision]\n\n[document omitted: unknown media type source is unsupported; only inline application/pdf and text/plain are replayed]' },
   ])
 })
 
@@ -381,7 +381,7 @@ test('minted ids are 35 characters of [A-Za-z0-9_-], unique across 10,000 mints'
 })
 
 test('deltas of one block in one stdout piece are yielded as one chunk; pieces, blocks and kinds stay apart', () => {
-  const words = ['Styx ', 'currently ', 'routes ', 'to ', 'acme/model-b', ' — ', 'naïve ✓ 日本', '.']
+  const words = ['Styx ', 'currently ', 'routes ', 'to ', 'acme/model-b', '  -  ', 'naïve ✓ 日本', '.']
   const one = parse([sse(...words.map(w => delta({ content: w })), FINISH('stop'))])
   expect(one.fed[0]).toEqual([{ kind: 'text', index: 0, text: words.join('') }])
   const split = parse([sse(...words.slice(0, 3).map(w => delta({ content: w }))), sse(...words.slice(3).map(w => delta({ content: w })), FINISH('stop'))])

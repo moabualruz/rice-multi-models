@@ -39,6 +39,7 @@ import type { PromptsPort } from './prompts'
 import { splitTarget } from './protocol'
 import type { ApiMessage, Effort, Limits, RemoteTool, StepRequest, StepWire, Transport } from './protocol'
 import { fingerprint } from './config'
+import { capabilityContracts, formatCapabilityContracts, selectTools, toolCoverageWarning } from './capability-contract'
 import { STAMP } from './schemas.gen'
 import { createAssembler } from './step'
 import { setCapped } from './util'
@@ -69,7 +70,7 @@ import { createEvaluatorSources, registerEvaluatorSources } from './evaluator-so
 
 const PLUGIN = 'rice-multi-models'
 /** Who the requests to declared providers say they come from (OpenCode Go asks each client to name itself). */
-const USER_AGENT = 'rice-multi-models/0.12.0 (claude-code)'
+const USER_AGENT = 'rice-multi-models/0.13.0 (claude-code)'
 const PROVIDERS: Readonly<Record<string, string>> = { codex: 'OpenAI Codex (ChatGPT subscription)' }
 const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 const prefsAtom = atom({ plugin: 'rice-multi-models', key: 'prefs' } as const, { effort: null, transport: 'auto', helper: 'session' })
@@ -270,12 +271,12 @@ async function syncPicker($: EngineInterface, current: Runtime, rows: PickerRow[
   return synchronizePicker({ helper: helperFile($.plugin.root), run: (argv, options) => $.process.run(argv, options) }, current, rows)
 }
 
-async function startupNotice($: EngineInterface, interactive: boolean, current: Runtime, picker: PickerResult | undefined, rows: PickerRow[], defaultModel: string | undefined): Promise<void> {
+async function startupNotice($: EngineInterface, interactive: boolean, current: Runtime, picker: PickerResult | undefined, rows: PickerRow[], defaultModel: string | undefined, catalogueSummary?: string, capabilities?: string): Promise<void> {
   return publishNotice({
     get: key => $.store.get(key),
     set: (key, value) => $.store.set(key, value),
     log: text => $.ui.log(text, { to: 'transcript' }),
-  }, interactive, current, picker, rows, defaultModel, catalogue.providers.map(provider => `${provider.provider}: ${provider.status}${provider.error ? ` (${provider.error})` : ''}`).join('; '))
+  }, interactive, current, picker, rows, defaultModel, catalogueSummary ?? catalogue.providers.map(provider => `${provider.provider}: ${provider.status}${provider.error ? ` (${provider.error})` : ''}`).join('; '), capabilities)
 }
 
 /** Whether a model name is answered here: a Codex id, or a declared provider's model or alias. */
@@ -516,8 +517,16 @@ async function buildRequest($: EngineInterface, e: TurnStepInput, transcript: re
     allow = tool => allowed(tool) && only.includes(tool)
   }
   messages = withCarry(withIdentity(messages, target.model, provider), carryFor(who))
-  const tools: RemoteTool[] = remoteTools(modelInfos, described, allow, {}, native === undefined || native instanceof Error ? undefined : toolTable(native))
-  if (handback) tools.push({ name: HANDBACK_TOOL.name, description: HANDBACK_TOOL.description, schema: { ...HANDBACK_TOOL.schema } })
+  const candidates: RemoteTool[] = remoteTools(modelInfos, described, allow, {}, native === undefined || native instanceof Error ? undefined : toolTable(native))
+  if (handback) candidates.push({ name: HANDBACK_TOOL.name, description: HANDBACK_TOOL.description, schema: { ...HANDBACK_TOOL.schema } })
+  const tools = target.remote ? selectTools(candidates, target.remote.provider, target.remote.model) : candidates
+  if (target.remote) {
+    const warning = toolCoverageWarning(target.remote.target, names.length, tools.length)
+    if (warning && !memory.notes.includes(warning)) {
+      memory.notes.push(warning)
+      $.ui.toast(warning)
+    }
+  }
   const prefs = await read($, prefsAtom)
   const isCodex = target.provider === 'codex' && !target.remote
   const effort: Effort | number | undefined = e.effort ?? prefs.effort ?? (isCodex ? codexDefaults.effort : undefined)
@@ -891,6 +900,32 @@ async function nativeContextStatus($: EngineInterface) {
   }
 }
 
+async function configuredCapabilities($: EngineInterface, checked: Runtime = runtime) {
+  if (!loaded.config) return []
+  const reports = capabilityContracts(loaded.config)
+  const search = await readSearchConfiguration($, checked)
+  const fetch = await readFetchConfiguration($, checked)
+  const legacyUrl = await $.env.get('RICE_MULTI_MODELS_SEARCH_URL')
+  const searchConfig = search.config ?? { version: 1 as const, endpoints: [] }
+  const fetchConfig = fetch.config ?? { endpoints: [] }
+  const web: Record<string, { search: string; fetch: string }> = {}
+  for (const report of reports) {
+    const remote = remoteOf(loaded, report.target)
+    const providerNative = remote !== undefined && fetchProviderProtocol(remote.model.kind, remote.provider.baseUrl, remote.modelId) !== undefined
+    const status = webSearchStatus(report.target, remote, searchConfig, legacyUrl, search.ok,
+      fetchTierConfigState(fetchConfig, providerNative), { available: fetch.ok, error: fetch.error ?? null })
+    web[report.target] = {
+      search: JSON.stringify({ policy: remote?.model.webSearch ?? 'auto', providerNative: status.providerNative, configuredServices: status.configuredServices, configuredServicesAvailable: status.configuredServicesAvailable, claudeFallback: status.claudeFallback }),
+      fetch: JSON.stringify({ configuration: status.fetchConfiguration, tiers: status.fetchTierState.tiers }),
+    }
+  }
+  return capabilityContracts(loaded.config, web)
+}
+
+async function capabilitySummary($: EngineInterface): Promise<string> {
+  return formatCapabilityContracts(await configuredCapabilities($))
+}
+
 async function statusText($: EngineInterface): Promise<string> {
   const prefs = await read($, prefsAtom)
   const version = await $.session.version()
@@ -903,6 +938,7 @@ async function statusText($: EngineInterface): Promise<string> {
     `effort: ${prefs.effort ?? (codexDefaults.effort ? `${codexDefaults.effort} (configured Codex policy)` : 'unset; provider chooses')}${prefs.effort ? ' (set here)' : ''}, unless the session sets one`,
     `Codex session candidate: ${defaultModel('codex') ?? 'none discovered'}`,
     `Discovery: ${catalogue.providers.map(provider => `${provider.provider}: ${provider.status}${provider.error ? ` (${provider.error})` : ''}`).join('; ')}`,
+    await capabilitySummary($),
     `Primary context (${context.model}): active context ${context.activeContextWindow ?? 'unknown'}, maximum context ${context.maxContextWindow ?? 'unknown'}, reported input ${context.inputTokenLimit ?? 'unknown'}, effective input bound ${context.effectiveInputBound ?? 'unknown'}, native window ${context.nativeWindow}; override ${context.override}.`,
     `Native context scope: ${context.scope}. Numeric per-model registration is unsupported.`,
     'Compaction: the supported session.compact hook sends Claude Code\'s own summary prompt (read from the installed claude) over the conversation to the selected provider and writes the engine\'s own summary message. Failed or incomplete summaries retain the original transcript.',
@@ -984,6 +1020,7 @@ async function discoveryStatus($: EngineInterface): Promise<Record<string, unkno
     toolSchemaVersion: STAMP.engineVersion,
     toolDefinitions: await toolDefinitionsState($),
     webSearch: await currentWebSearchStatus($),
+    modelCapabilities: await configuredCapabilities($),
     currentEngineVersion: version.version,
     limits: limitsReport(limits, limitsObservedAt),
     lastStep: lastStep ? { model: lastStep.model, who: lastStep.who, durationMs: lastStep.ms, transport: lastStep.transport } : null,
@@ -1003,7 +1040,7 @@ async function setupCommand($: EngineInterface, action: string | undefined): Pro
   runtime = await detectRuntime($)
   if (runtime.error) {
     await syncNativeContext($, true)
-    return setupSummary(runtime)
+    return setupSummary(runtime, undefined, 0, undefined, undefined, await capabilitySummary($))
   }
   if (action === 'codex') {
     try {
@@ -1019,7 +1056,7 @@ async function setupCommand($: EngineInterface, action: string | undefined): Pro
   await refreshCatalogue($)
   await ensureHelper($)
   const rows = routedRows()
-  return setupSummary(runtime, await syncPicker($, runtime, rows), rows.length, defaultModel('codex'))
+  return setupSummary(runtime, await syncPicker($, runtime, rows), rows.length, defaultModel('codex'), undefined, await capabilitySummary($))
 }
 
 async function readSearchConfiguration($: EngineInterface, checked: Runtime, edit?: SearchEdit): Promise<SearchConfigurationResult> {
@@ -1070,6 +1107,7 @@ async function doctorCommand($: EngineInterface): Promise<string> {
   const checked = await detectRuntime($)
   return JSON.stringify({ runtime: checked.info || { node: { executable: checked.executable, version: checked.version } }, error: checked.error || null,
     integration: { kind: 'public plugin hooks', start: 'claude', compaction: 'session.compact', toolDefinitions: await toolDefinitionsState($), webSearch: await currentWebSearchStatus($, checked) },
+    modelCapabilities: await configuredCapabilities($),
     actions: checked.error ? ['/rice-models setup repair'] : ['/rice-models setup repair', ...(!checked.info?.auth.codex ? ['codex login', ...(!checked.info?.clis.codex ? ['/rice-models setup codex'] : [])] : [])] }, null, 2)
 }
 
@@ -1264,7 +1302,7 @@ export const register: Register = on => {
     await ensureHelper($)
     const rows = routedRows()
     const picker = runtime.error ? undefined : await syncPicker($, runtime, rows)
-    await startupNotice($, e.isInteractive, runtime, picker, rows, defaultModel('codex'))
+    await startupNotice($, e.isInteractive, runtime, picker, rows, defaultModel('codex'), undefined, await capabilitySummary($))
 
     return started
   })

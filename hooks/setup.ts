@@ -57,8 +57,8 @@ export function loginCommand(runtime: Runtime): string {
   const cli = runtime.info?.clis.codex
   return cli ? commandText(cli.endsWith('.js') ? [runtime.executable || 'node', cli, 'login'] : [cli, 'login'], runtime.info?.platform) : 'codex login'
 }
-export function setupSummary(runtime: Runtime, picker?: PickerResult, count = 0, defaultModel?: string, catalogueSummary?: string): string {
-  if (runtime.error) return `rice-multi-models setup: ${runtime.error}\n/rice-models doctor checks local setup without changing it.`
+export function setupSummary(runtime: Runtime, picker?: PickerResult, count = 0, defaultModel?: string, catalogueSummary?: string, capabilities?: string): string {
+  if (runtime.error) return [`rice-multi-models setup: ${runtime.error}\n/rice-models doctor checks local setup without changing it.`, capabilities].filter(Boolean).join('\n')
   const info = runtime.info!
   const lines = [
     `rice-multi-models setup: Node.js ${runtime.version}; ${count} freshly discovered model candidates (not proof that inference will succeed).`,
@@ -67,16 +67,17 @@ export function setupSummary(runtime: Runtime, picker?: PickerResult, count = 0,
     info.auth.codex ? 'Codex login file is present; entitlement is checked on your first request.' : `Codex login is needed: run ${loginCommand(runtime)} in your terminal.`,
   ]
   if (!info.clis.codex && !info.auth.codex) lines.push('Codex CLI is missing: /rice-models setup codex explicitly installs the pinned official CLI into plugin-owned state (not globally), then shows the login command.')
-  lines.push(defaultModel ? `Use /model ${defaultModel} or /rice-models models.` : 'No Codex model was discovered; /rice-models models reports source failures and /rice-models refresh retries discovery.', 'Unknown metadata stays unknown. Reported limits constrain mod requests. The main routed native-provider model synchronizes the native context meter and automatic compaction threshold through the supported process-local CLAUDE_CODE_MAX_CONTEXT_TOKENS override from fresh exact active contextWindow ?? maxContextWindow metadata. An existing explicit owner override remains authoritative; unknown routes, discovery failure and session.end restore the value owned by the mod, with ownership state preserved across hot reload. Numeric per-model registration is still unsupported. The process-global override does not establish independent custom-subagent windows; mixed custom models and restoration on plugin unload remain limitations.', 'Start the normal claude command. The supported session.compact hook compacts routed history with the selected provider, using Claude Code\'s own summary prompt and format (read from the installed claude), and retains the original transcript on failure. Model switches exceeding fresh exact routed destination input/context bounds are denied; unknown bounds are not inferred.', 'Declared providers still require your approval.', '/rice-models setup repair refreshes discovery and repairs the picker; /rice-models doctor is read-only.')
+  lines.push(defaultModel ? `Use /model ${defaultModel} or /rice-models models.` : 'No Codex model was discovered; /rice-models models reports source failures and /rice-models refresh retries discovery.', 'Unknown metadata stays unknown. Reported limits constrain mod requests. The main routed native-provider model synchronizes the native context meter and automatic compaction threshold through the supported process-local CLAUDE_CODE_MAX_CONTEXT_TOKENS override from fresh exact active contextWindow ?? maxContextWindow metadata. An existing explicit owner override remains authoritative; unknown routes, discovery failure and session.end restore the value owned by the mod, with ownership state preserved across hot reload. Numeric per-model registration is still unsupported. The process-global override does not establish independent custom-subagent windows; mixed custom models and restoration on plugin unload remain limitations.', 'Start the normal claude command. The supported session.compact hook compacts routed history with the selected provider, using Claude Code\'s own summary prompt and format (read from the installed claude), and retains the original transcript on failure. Model switches exceeding fresh exact routed destination input/context bounds are denied; unknown bounds are not inferred.', 'Declared providers still require your approval; optional agy/grok CLIs are never installed automatically.', '/rice-models setup repair refreshes discovery and repairs the picker; /rice-models doctor is read-only.')
+  if (capabilities) lines.push(capabilities)
   return lines.join('\n')
 }
 
 /** Headless startup never consumes the first interactive notice and never opens a dialog. */
-export async function startupNotice(io: NoticePort, interactive: boolean, runtime: Runtime, picker: PickerResult | undefined, rows: PickerRow[], defaultModel?: string, catalogueSummary?: string): Promise<void> {
+export async function startupNotice(io: NoticePort, interactive: boolean, runtime: Runtime, picker: PickerResult | undefined, rows: PickerRow[], defaultModel?: string, catalogueSummary?: string, capabilities?: string): Promise<void> {
   if (!interactive) return
   const key = 'setup-notice-v2'
-  const signature = JSON.stringify({ error: runtime.error, node: runtime.version, info: runtime.info, rows, defaultModel, catalogueSummary, picker: picker ? { ok: picker.ok, error: picker.error, path: picker.path, preserved: picker.preserved } : undefined })
+  const signature = JSON.stringify({ error: runtime.error, node: runtime.version, info: runtime.info, rows, defaultModel, catalogueSummary, capabilities, picker: picker ? { ok: picker.ok, error: picker.error, path: picker.path, preserved: picker.preserved } : undefined })
   if (await io.get(key) === signature) return
-  io.log(setupSummary(runtime, picker, rows.length, defaultModel, catalogueSummary).replace(/\n/g, ' '))
+  io.log(setupSummary(runtime, picker, rows.length, defaultModel, catalogueSummary, capabilities).replace(/\n/g, ' '))
   await io.set(key, signature)
 }

@@ -1,38 +1,61 @@
 // Copied from Trosfy/claude-styx styxd/history.ts at 5072384
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
 // Modified by Mo Abualruz: import paths for this layout; Effort comes from hooks/protocol.
-// The engine's transcript as every codec reads it: Messages-shaped, holding text, image, tool_use and
-// tool_result blocks only. The engine's thinking is dropped, and the signed thinking blocks styxd kept for
-// an assistant turn's tool calls are put back where they came in that turn; a tool_reference, document or
-// other block is named as text; a tool_result whose tool_use the window does not hold is dropped;
-// cache_control and every other field go; an image is a text note for a model without vision. Pure.
+// The engine transcript as every codec reads it. Supported text, images, documents, tool calls and results
+// are retained or translated by a codec. Unsupported blocks, reasoning, malformed documents and orphaned
+// tool results become explicit text notes. Signed reasoning held for a routed turn is reinserted only for
+// its owning model; cache metadata and unrelated fields are not replayed. Pure.
 import { isObject } from '../../hooks/config'
 import type { ApiMessage } from '../../hooks/protocol'
 import { blocksOf, str } from '../../hooks/transcript'
 
 export type Text = { type: 'text'; text: string }
 export type Image = { type: 'image'; source: { type: 'url'; url: string } | { type: 'base64'; media_type: string; data: string } }
+export type Document = { type: 'document'; title?: string; source: { type: 'base64'; media_type: 'application/pdf'; data: string } | { type: 'text'; media_type: 'text/plain'; data: string } }
 type ToolUse = { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
-type ToolResult = { type: 'tool_result'; tool_use_id: string; content: (Text | Image)[]; is_error: boolean }
+type ToolResult = { type: 'tool_result'; tool_use_id: string; content: (Text | Image | Document)[]; is_error: boolean }
 // A thinking block as the model sent it, to be sent back whole: its text and signature, or the data of a
 // redacted one.
 export type Thinking = { type: 'thinking'; thinking: string; signature: string } | { type: 'redacted_thinking'; data: string }
 // A thinking block and its place in its turn: how many of the turn's text and tool_use blocks came before it.
 export type Placed = { at: number; block: Thinking }
 // `unsealed` marks an assistant turn with tool calls whose thinking blocks were asked for and not held.
-export type Message = { role: 'user' | 'assistant'; content: (Text | Image | ToolUse | ToolResult | Thinking)[]; unsealed?: true }
+export type Message = { role: 'user' | 'assistant'; content: (Text | Image | Document | ToolUse | ToolResult | Thinking)[]; unsealed?: true }
 
-// A text, image or other block as text or image; anything but text and an image (with vision) is named.
-function part(b: Record<string, unknown>, vision: boolean): Text | Image {
-  if (b['type'] === 'text') return { type: 'text', text: str(b['text']) }
-  if (b['type'] === 'image') {
+// A block with a safe transcript representation. Documents support inline PDF and text only; every other
+// source is named with the exact unsupported shape, without copying its URL, id or payload into the note.
+function part(b: Record<string, unknown>, vision: boolean): Text | Image | Document {
+  const type = str(b['type']) || 'unknown'
+  if (type === 'text') {
+    if (typeof b['text'] !== 'string') return { type: 'text', text: '[text block omitted: its text field is not a string]' }
+    const text = b['text']
+    return { type: 'text', text: Array.isArray(b['citations']) && b['citations'].length > 0 ? `${text}\n[citation metadata omitted: provider-specific annotations are not replayed]` : text }
+  }
+  if (type === 'image') {
     if (!vision) return { type: 'text', text: '[image omitted: model has no vision]' }
     const s = isObject(b['source']) ? b['source'] : {}
-    return { type: 'image', source: s['type'] === 'url' ? { type: 'url', url: str(s['url']) } : { type: 'base64', media_type: str(s['media_type']), data: str(s['data']) } }
+    if (s['type'] === 'url' && typeof s['url'] === 'string' && s['url'] !== '') return { type: 'image', source: { type: 'url', url: s['url'] } }
+    if (s['type'] === 'base64' && typeof s['media_type'] === 'string' && typeof s['data'] === 'string' && s['data'] !== '') return { type: 'image', source: { type: 'base64', media_type: s['media_type'], data: s['data'] } }
+    return { type: 'text', text: '[image omitted: source must contain a URL or inline base64 data with a media type]' }
   }
-  if (b['type'] === 'document') return { type: 'text', text: '[document omitted]' }
-  if (b['type'] === 'tool_reference') return { type: 'text', text: `[tool loaded: ${str(b['tool_name'])}]` }
-  return { type: 'text', text: `[${str(b['type'])} block omitted]` }
+  if (type === 'document') {
+    const source = isObject(b['source']) ? b['source'] : {}
+    const title = typeof b['title'] === 'string' ? b['title'] : undefined
+    if (source['type'] === 'base64' && source['media_type'] === 'application/pdf' && typeof source['data'] === 'string' && source['data'] !== '') {
+      return { type: 'document', ...(title === undefined ? {} : { title }), source: { type: 'base64', media_type: 'application/pdf', data: source['data'] } }
+    }
+    if (source['type'] === 'text' && source['media_type'] === 'text/plain' && typeof source['data'] === 'string' && source['data'] !== '') {
+      return { type: 'document', ...(title === undefined ? {} : { title }), source: { type: 'text', media_type: 'text/plain', data: source['data'] } }
+    }
+    if (source['type'] === 'url') return { type: 'text', text: '[document omitted: remote URL sources are not fetched by this adapter]' }
+    if (source['type'] === 'file') return { type: 'text', text: '[document omitted: provider-scoped file identifiers cannot be replayed across routes]' }
+    const mediaType = typeof source['media_type'] === 'string' ? source['media_type'] : 'unknown media type'
+    return { type: 'text', text: `[document omitted: ${mediaType} source is unsupported; only inline application/pdf and text/plain are replayed]` }
+  }
+  if (type === 'tool_reference') return { type: 'text', text: `[tool loaded: ${str(b['tool_name']) || 'unknown'}]` }
+  if (type === 'server_tool_use') return { type: 'text', text: `[server tool call ${str(b['name']) || 'unknown'} represented as text: this request exposes client tools only; the call was not reissued]` }
+  if (type === 'web_search_tool_result') return { type: 'text', text: '[web_search_tool_result omitted: the routed request has no matching Claude-hosted server tool result block]' }
+  return { type: 'text', text: `[${type} block omitted: no safe representation is defined for this routed provider request]` }
 }
 
 // `content` with each thinking block placed after the blocks it came after; one placed past the end goes last.
@@ -50,26 +73,42 @@ export function normalize(messages: readonly ApiMessage[], vision: boolean, remo
   for (const msg of messages) {
     const content: Message['content'] = []
     let call: string | undefined
+    let omittedThinking = false
     for (const b of blocksOf(msg)) {
       const type = b['type']
-      if (type === 'thinking' || type === 'redacted_thinking') continue
-      if (msg.role === 'assistant') {
-        if (type === 'text') content.push({ type: 'text', text: str(b['text']) })
-        else if (type === 'tool_use') {
-          const id = str(b['id'])
-          seen.add(id)
-          call ??= id
-          content.push({ type: 'tool_use', id: remoteId(id) ?? id, name: str(b['name']), input: isObject(b['input']) ? b['input'] : {} })
+      if (type === 'thinking' || type === 'redacted_thinking') {
+        omittedThinking = true
+      } else if (msg.role === 'assistant' && type === 'tool_use') {
+        const id = str(b['id'])
+        const name = str(b['name'])
+        if (id === '' || name === '' || !isObject(b['input'])) {
+          content.push({ type: 'text', text: '[tool_use omitted: call id, name and object input are required for replay]' })
+          continue
         }
-      } else if (type === 'tool_result') {
+        seen.add(id)
+        call ??= id
+        content.push({ type: 'tool_use', id: remoteId(id) ?? id, name, input: b['input'] })
+      } else if (msg.role === 'user' && type === 'tool_result') {
         const id = str(b['tool_use_id'])
-        if (!seen.has(id)) continue
+        if (!seen.has(id)) {
+          content.push({ type: 'text', text: '[tool_result omitted: its matching tool_use is outside the normalized transcript window]' })
+          continue
+        }
         const raw = b['content']
-        const parts = (typeof raw === 'string' ? [{ type: 'text', text: raw }] : Array.isArray(raw) ? raw : []).filter(isObject).map(c => part(c, vision))
+        const parts: (Text | Image | Document)[] = typeof raw === 'string'
+          ? [{ type: 'text', text: raw }]
+          : Array.isArray(raw)
+            ? raw.filter(isObject).map(c => part(c, vision))
+            : []
+        if (Array.isArray(raw) && raw.some(c => !isObject(c))) parts.push({ type: 'text', text: '[tool result content item omitted: content items must be objects]' })
+        else if (raw !== undefined && (raw === null || typeof raw !== 'string' && !Array.isArray(raw))) parts.push({ type: 'text', text: '[tool result content omitted: content must be text or an array of content blocks]' })
         content.push({ type: 'tool_result', tool_use_id: remoteId(id) ?? id, content: parts, is_error: b['is_error'] === true })
       } else content.push(part(b, vision))
     }
     const blocks = call === undefined ? undefined : sealed?.(call)
+    if (omittedThinking && (blocks === undefined || blocks.length === 0)) {
+      content.unshift({ type: 'text', text: '[thinking omitted: provider-specific reasoning cannot be replayed without a held signature]' })
+    }
     if (content.length > 0) out.push({ role: msg.role, content: blocks === undefined ? content : interleave(content, blocks), ...(call !== undefined && sealed !== undefined && blocks === undefined ? { unsealed: true as const } : {}) })
   }
   return out

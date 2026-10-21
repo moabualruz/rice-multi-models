@@ -170,6 +170,9 @@ const CHECK = process.argv.includes('--check')
 function emitBuiltins(from: string, schemas: Record<string, Schema>, version: string) {
   const out = join(ROOT, 'hooks', 'schemas.gen.ts')
   const table = JSON.stringify(byName(schemas), null, 2)
+    // Escape upstream typography in the generated source without changing runtime strings.
+    .replace(/\u2013/g, '\\u2013')
+    .replace(/\u2014/g, '\\u2014')
   const names = Object.keys(schemas).length
   const tableHash = createHash('sha256').update(table).digest('hex').slice(0, 16)
   const text =

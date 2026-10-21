@@ -8,6 +8,7 @@ import { isObject } from '../../../hooks/config'
 import type { ModelConfig } from '../../../hooks/config'
 import { decoderOver, isIndex, params, parseJson, sseReader } from '../codec'
 import type { Codec, Neutral, Sink } from '../codec'
+import type { Document, Image } from '../history'
 import { uniqueSearchSources } from '../../core/search.ts'
 
 type Json = Record<string, unknown>
@@ -24,8 +25,20 @@ export const sealSignature = (signature: string) => `${SEAL}${signature}`
 // The models that refuse a function call replayed without its turn's signature.
 const signs = (m: Pick<ModelConfig, 'id'>) => /gemini-(?:[3-9]|\d{2,})/.test(m.id)
 
+const documentText = (b: Document): string => b.source.type === 'text'
+  ? `${b.title ? `Document: ${b.title}\n` : ''}${b.source.data}`
+  : '[document omitted: PDF was present in a tool result and cannot be part of Gemini functionResponse text]'
+
+const imagePart = (b: Image): Part => b.source.type === 'base64'
+  ? { inlineData: { mimeType: b.source.media_type, data: b.source.data } }
+  : { text: '[image omitted: Gemini inlineData requires image bytes; URL images are not fetched]' }
+
+const documentPart = (b: Document): Part => b.source.type === 'text'
+  ? { text: documentText(b) }
+  : { inlineData: { mimeType: b.source.media_type, data: b.source.data } }
+
 // The request's contents. A model turn's first call carries the signature held before it, else the skip; a
-// text part carries one held before it. A tool result answers by its call's name, with its images after it.
+// text part carries one held before it. A tool result answers by its call's name, with images and PDF documents after it.
 export function toContents(n: Neutral, m: Pick<ModelConfig, 'id'>): Content[] {
   const names = new Map<string, string>()
   const out: Content[] = []
@@ -53,12 +66,16 @@ export function toContents(n: Neutral, m: Pick<ModelConfig, 'id'>): Content[] {
     const images: Part[] = []
     for (const b of msg.content) {
       if (b.type === 'tool_result') {
-        const body = b.content.flatMap(c => (c.type === 'text' ? [c.text] : [])).join('\n')
+        const body = b.content.flatMap(c => (c.type === 'text' ? [c.text] : c.type === 'document' && c.source.type === 'text' ? [documentText(c)] : [])).join('\n')
         const name = names.get(b.tool_use_id) ?? 'tool'
         parts.push({ functionResponse: { name, response: { name, content: b.is_error ? `Error: ${body}` : body || 'Tool executed successfully.' } } })
-        for (const c of b.content) if (c.type === 'image') images.push(c.source.type === 'base64' ? { inlineData: { mimeType: c.source.media_type, data: c.source.data } } : { text: `[image: ${c.source.url}]` })
+        for (const c of b.content) {
+          if (c.type === 'image') images.push(imagePart(c))
+          else if (c.type === 'document' && c.source.type === 'base64') images.push(documentPart(c))
+        }
       } else if (b.type === 'text') parts.push({ text: b.text })
-      else if (b.type === 'image') parts.push(b.source.type === 'base64' ? { inlineData: { mimeType: b.source.media_type, data: b.source.data } } : { text: `[image: ${b.source.url}]` })
+      else if (b.type === 'image') parts.push(imagePart(b))
+      else if (b.type === 'document') parts.push(documentPart(b))
     }
     const all = [...parts.filter(p => 'functionResponse' in p), ...images, ...parts.filter(p => !('functionResponse' in p))]
     if (all.length > 0) out.push({ role: 'user', parts: all })
