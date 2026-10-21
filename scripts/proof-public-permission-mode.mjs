@@ -303,7 +303,9 @@ const proofFingerprints: unknown[] = []`)
     writeFileSync(join(directory, 'receipt.json'), JSON.stringify(run, null, 2))
     assert.equal(interrupted, false, 'proof was not interrupted'); assert.equal(timedOut, false, 'bounded native deadline'); assert.equal(terminal.code, 0, stderr.slice(-2000))
     assert.equal(context.captureFailure, undefined, 'bounded native output'); assert.equal(context.providerFailure, undefined, 'owned provider contract'); assert.ok(observed, 'native driver finishes'); assert.equal(observed.failure, undefined, 'native fixture prerequisites')
-    const expectedNativeChildMode = version.startsWith('2.1.306') ? 'plan' : 'auto'
+    // 2.1.306 and every later build resolve an explicit auto child of a plan parent to plan (verified on 2.1.306 and 2.1.307).
+    const [major, minor, patch] = version.match(/^(\d+)\.(\d+)\.(\d+)/).slice(1).map(Number)
+    const expectedNativeChildMode = major > 2 || (major === 2 && (minor > 1 || (minor === 1 && patch >= 306))) ? 'plan' : 'auto'
     if (test.explicitAuto) {
       assert.equal(spawnMode?.permissionMode, 'auto', 'native agent frontmatter defines the child mode')
       assert.equal(spawnMode?.contested, false, 'the child agent definition is unambiguous')
