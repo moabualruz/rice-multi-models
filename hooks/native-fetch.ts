@@ -117,5 +117,5 @@ export async function runNativeFetch(input: Omit<PublicWebFetchInput, 'wire'>, c
     throw new NativeFetchUnavailable('security', 'Native Claude WebFetch returned an unverifiable source URL.')
   }
   const result = text.trim() || document.text
-  return { bytes: Buffer.byteLength(document.text), code: 200, codeText: 'OK', result, durationMs: Math.max(0, Date.now() - started), url: document.url }
+  return { bytes: new TextEncoder().encode(document.text).byteLength, code: 200, codeText: 'OK', result, durationMs: Math.max(0, Date.now() - started), url: document.url }
 }
