@@ -597,7 +597,7 @@ async function agentCall<E extends AgentCallInput, R>($: EngineInterface, e: E, 
   const entry = { toolUseId: e.tool_use_id, kind: 'exact' as const, at: Date.now(), id: verdict.id }
   await update($, carrierAtom, state => recordEntry(state, entry))
   try {
-    return await next({ ...e, model: CARRIER_VALUE, description: markDescription(e.description) })
+    return await next({ ...e, model: CARRIER_VALUE, description: markDescription(e.description, verdict.id) })
   } finally {
     await update($, carrierAtom, state => forgetEntry(state, e.tool_use_id))
   }
@@ -1515,7 +1515,9 @@ export const register: Register = on => {
       if (revision !== permissionRevision) return { decision: 'deny', reason: `${PLUGIN}: permission policy or loaded constraints changed during the judgment; retry the action` }
       verdict = permissionAnswer(judged)
     }
-    return webToolGate.check(e, verdict)
+    const checked = webToolGate.check(e, verdict)
+    const carried = e.tool === AGENT_TOOL && e.tool_use_id && checked.decision === 'ask' ? entryOf(await read($, carrierAtom), e.tool_use_id) : undefined
+    return carried ? { ...checked, reason: `${checked.reason ? `${checked.reason} ` : ''}${PLUGIN}: this Agent will run on exact model ${JSON.stringify(carried.id)}; ${CARRIER_VALUE} is validation only.` } : checked
   }).catch(($, _e, next) => {
     $.ui.log(`${PLUGIN}: permission judgment ${next.error.kind}: ${(next.error.message ?? 'no message').slice(0, 300)}`, { to: 'debug' })
     return { decision: 'deny', reason: `${PLUGIN}: the selected-provider permission judgment failed; the action was not approved` }
@@ -1543,7 +1545,7 @@ export const register: Register = on => {
       setCapped(spawnBackground, result.agentId, e.background)
     }
     return result
-  })
+  }).catch((_host, e, next) => next.called ? next(e) : { deny: `${PLUGIN}: the Agent model could not be resolved; no subagent was started` })
 
   on('tool.describe', async ($, e, next) => {
     const answer = await next(e)

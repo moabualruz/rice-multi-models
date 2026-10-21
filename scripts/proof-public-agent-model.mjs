@@ -45,6 +45,9 @@ try {
   const env = Object.fromEntries(KEPT.filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]))
   Object.assign(env, { HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: config, CODEX_HOME: join(home, '.codex'), ANTHROPIC_API_KEY: 'owned-no-network', ANTHROPIC_BASE_URL: 'http://127.0.0.1:1', DISABLE_AUTOUPDATER: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' })
 
+  // A configured subagent default must not override an explicit built-in Agent model.
+  // The host's forced-model precedence over hook rewrites is specific to workflow agents.
+  env.CLAUDE_CODE_SUBAGENT_MODEL = 'codex/owned-other'
   const plugin = join(fixture, 'plugin'), evidence = join(fixture, 'wires')
   mkdirSync(evidence)
   for (const directory of ['.claude-plugin', 'hooks', 'types', 'dist', 'scripts']) cpSync(join(root, directory), join(plugin, directory), { recursive: true })
@@ -115,6 +118,15 @@ try {
   assert.ok(refusal, 'the unknown id was refused in a visible tool result')
   for (const id of ['haiku', 'sonnet', 'opus', 'fable', ...DISCOVERED]) assert.ok(refusal.includes(id), `the refusal lists ${id}`)
   assert.equal(children.length, 3, 'exactly the three valid calls started a subagent')
+  const parentText = answered.transcript
+  assert.equal([...parentText].some(character => [0x2062, 0x2063].includes(character.codePointAt(0))), false, 'no invisible carrier marks reach the provider transcript')
+  const toolCalls = events.filter(event => event.type === 'assistant').flatMap(event => event.message?.content ?? []).filter(block => block.type === 'tool_use' && block.name === 'Agent')
+  const exactCalls = toolCalls.filter(call => ['toolu_owned_a', 'toolu_owned_b'].includes(call.id))
+  assert.equal(exactCalls.length, 2, 'both exact calls are observable in the emitted transcript')
+  for (const call of exactCalls) {
+    const exact = call.id === 'toolu_owned_a' ? 'codex/owned-child' : 'codex/owned-other'
+    assert.ok(call.input.model === exact || call.input.description.includes(`exact Agent model ${JSON.stringify(exact)}`), 'the emitted transcript identifies the exact model, never an unexplained carrier')
+  }
   console.log(JSON.stringify({ publicAgentModel: true, claude: installedVersion, targets: { A: targetOf('A'), B: targetOf('B'), C: targetOf('C'), D: targetOf('D') }, refusal }))
 } finally {
   terminate()

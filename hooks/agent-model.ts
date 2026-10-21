@@ -3,7 +3,7 @@
 // The engine accepts only `fable`, `haiku`, `opus` and `sonnet` there, and checks the argument after the plugin's
 // `tool.call` hook ran. The hook sees the raw argument first, so a call naming an exact id this session can run
 // is carried: `tool.call` records the id under the call's tool_use_id and hands the engine a valid value
-// (CARRIER_VALUE) and marks the description with an invisible suffix; `agent.spawn` takes the id back, removes the
+// (CARRIER_VALUE) and adds a visible exact-model note to the description; `agent.spawn` takes the id back, removes the
 // mark and the subagent runs on exactly that id. A marked spawn with no record is refused, never run as the carrier's
 // tier (an unmarked `haiku` is the engine's own request and passes). Pure: state in and out.
 import type { ModelCatalogue } from './catalogue'
@@ -14,11 +14,13 @@ export const AGENT_TOOL = 'Agent'
 /** A value of the engine's own enum that stands in for the exact id while the engine checks the call. */
 export const CARRIER_VALUE = 'haiku'
 const PLUGIN = 'rice-multi-models'
-/** Invisible separators that end the description of a carried call, so a lost record is told from a real `haiku`. */
-export const CARRIER_MARK = '\u2063\u2062'
-export const markDescription = (description: unknown): string => `${typeof description === 'string' ? description : ''}${CARRIER_MARK}`
+/** A visible note distinguishes a lost carried call from a real haiku and makes approval/transcript text truthful. */
+export const CARRIER_MARK = ` [${PLUGIN}: exact Agent model `
+const CARRIER_END = `; ${CARRIER_VALUE} is validation only]`
+export const markDescription = (description: unknown, id: string): string => `${typeof description === 'string' ? description : ''}${CARRIER_MARK}${JSON.stringify(id)}${CARRIER_END}`
 export function unmarkDescription(description: string): { text: string; marked: boolean } {
-  return description.endsWith(CARRIER_MARK) ? { text: description.slice(0, -CARRIER_MARK.length), marked: true } : { text: description, marked: false }
+  const start = description.lastIndexOf(CARRIER_MARK)
+  return start >= 0 && description.endsWith(CARRIER_END) ? { text: description.slice(0, start), marked: true } : { text: description, marked: false }
 }
 /** Records kept per session; calls remove their own, so only abandoned ones (a hot reload) ever reach this. */
 const MAX_ENTRIES = 128
@@ -88,7 +90,7 @@ export function pickRequested(entry: CarrierEntry | undefined, model: string | u
     if (fork) return { deny: `${PLUGIN}: a fork runs on its parent's model, so the Agent model "${entry.id}" cannot be applied; name a subagent_type to run on it. No subagent was started.` }
     return { requested: entry.id, exact: entry.id }
   }
-  if (marked && model === CARRIER_VALUE) {
+  if (marked) {
     return { deny: `${PLUGIN}: this Agent call's exact model could not be recovered (no record for it), so it was not run as ${CARRIER_VALUE}. Retry, or choose a model with agent frontmatter. No subagent was started.` }
   }
   return { requested: model }

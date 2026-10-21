@@ -112,9 +112,9 @@ on the id.
 - **How it works.** The engine checks `model` against four values, but only after the
   mod's `tool.call` hook has seen the raw call. The hook records the exact id under the
   call's `tool_use_id` (in host session state, so a hot reload keeps it), passes the
-  engine a valid value (`haiku`) and marks the call's description with two invisible
-  characters. `agent.spawn` takes the id back, removes the mark and runs the subagent on
-  the id. Each parallel call has its own record; a record is removed when its spawn takes
+  engine a valid value (`haiku`) and adds a visible description note naming the exact
+  model and explaining that `haiku` is validation only. `agent.spawn` takes the id back,
+  removes the note and runs the subagent on the id. Each parallel call has its own record; a record is removed when its spawn takes
   it, and when its call ends for any reason.
 - **How failure looks.** An id nothing discovered or declared is refused before the engine
   runs the call: `rice-multi-models: Agent model "<id>" is not a model this session can
@@ -127,7 +127,9 @@ on the id.
   checks the arguments, which no documentation promises (verified on Claude Code 2.1.302
   and 2.1.307). If a later engine checks first, an exact id fails in the engine's own
   validation with its message, and nothing runs on the wrong model. The Agent permission
-  prompt and the session transcript show the carrier value (`haiku`) for the call. Upstream
+  input still has the carrier value (`haiku`), but its description visibly names the exact
+  model and permission asks add the exact id to their reason without changing the decision.
+  Transcripts can retain that visible note; the child task description does not. Upstream
   requests: let `tool.describe` override input-schema fields that are not pinned, or let
   `Agent.model` accept any string that `agent.spawn` resolves or denies.
 

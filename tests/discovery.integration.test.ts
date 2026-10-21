@@ -19,10 +19,12 @@ const { runStep, offeredTools } = await import(`${root}/helper/run.ts`)
 
 type Hook = { matcher?: Record<string, unknown>; callback: (...args: any[]) => any }
 const hooks = new Map<string, Hook[]>()
+const catches = new Map<string, (...args: any[]) => any>()
 const on: any = (event: string, matcherOrCallback: any, callback?: any) => {
   const hook = callback ? { matcher: matcherOrCallback, callback } : { callback: matcherOrCallback }
   hooks.set(event, [...(hooks.get(event) ?? []), hook])
   return { catch: (failed: (...args: any[]) => any) => {
+    catches.set(event, failed)
     const callback = hook.callback
     // Like the host: a failed hook's catch receives next with called and error.
     const failure = (next: any, error: unknown) => Object.assign(typeof next === 'function' ? next : () => undefined, { called: false, error: { kind: 'error', message: error instanceof Error ? error.message : String(error) } })
@@ -895,13 +897,13 @@ test('parallel calls keep their own ids and leave no record behind', async () =>
   expect(b.spawned[0].model).toBe('local/qwen')
   expect(c.spawned[0].model).toBe((await spawn('codex/gpt-6.1-sol', 'general-purpose', 'sonnet')).received.model)
   expect(a.spawned[0].description).toBe('fixture')
-  const missing = await hook('agent.spawn')(host, { ...spawnInput('codex/gpt-6.1-sol', 'general-purpose', 'haiku'), tool_use_id: 'toolu_par_a', description: markDescription('fixture') }, async () => { throw new Error('must not start') })
+  const missing = await hook('agent.spawn')(host, { ...spawnInput('codex/gpt-6.1-sol', 'general-purpose', 'haiku'), tool_use_id: 'toolu_par_a', description: markDescription('fixture', 'local/qwen') }, async () => { throw new Error('must not start') })
   expect(missing.deny).toContain('could not be recovered')
 })
 
 test('a marked spawn with no record is refused, never run as haiku', async () => {
   let started = false
-  const refused = await hook('agent.spawn')(host, { ...spawnInput('codex/gpt-6.1-sol', 'general-purpose', 'haiku'), tool_use_id: 'toolu_lost', description: markDescription('fixture') }, async () => { started = true; return { model: 'haiku', agentId: 'x' } })
+  const refused = await hook('agent.spawn')(host, { ...spawnInput('codex/gpt-6.1-sol', 'general-purpose', 'haiku'), tool_use_id: 'toolu_lost', description: markDescription('fixture', 'local/qwen') }, async () => { started = true; return { model: 'haiku', agentId: 'x' } })
   expect(started).toBe(false)
   expect(refused.deny).toContain('not run as haiku')
 })
@@ -910,11 +912,11 @@ test('the record is removed when the call ends without a spawn, and when the eng
   await reload({ local: provider('qwen') })
   const abandoned = await agentCall('toolu_abandoned', { model: 'local/qwen' }, { skipSpawn: true })
   expect(abandoned.spawned).toEqual([])
-  const late = await hook('agent.spawn')(host, { ...spawnInput('codex/gpt-6.1-sol', 'general-purpose', 'haiku'), tool_use_id: 'toolu_abandoned', description: markDescription('fixture') }, async () => ({ model: 'haiku', agentId: 'x' }))
+  const late = await hook('agent.spawn')(host, { ...spawnInput('codex/gpt-6.1-sol', 'general-purpose', 'haiku'), tool_use_id: 'toolu_abandoned', description: markDescription('fixture', 'local/qwen') }, async () => ({ model: 'haiku', agentId: 'x' }))
   expect(late.deny).toContain('could not be recovered')
   const thrown = await hook('tool.call')(host, { tool: 'Agent', tool_use_id: 'toolu_thrown', model: 'local/qwen' }, async () => { throw new Error('engine failure') }).catch((error: unknown) => error)
   expect(JSON.stringify(thrown)).toContain('Agent model could not be resolved')
-  const afterThrow = await hook('agent.spawn')(host, { ...spawnInput('codex/gpt-6.1-sol', 'general-purpose', 'haiku'), tool_use_id: 'toolu_thrown', description: markDescription('fixture') }, async () => ({ model: 'haiku', agentId: 'x' }))
+  const afterThrow = await hook('agent.spawn')(host, { ...spawnInput('codex/gpt-6.1-sol', 'general-purpose', 'haiku'), tool_use_id: 'toolu_thrown', description: markDescription('fixture', 'local/qwen') }, async () => ({ model: 'haiku', agentId: 'x' }))
   expect(afterThrow.deny).toContain('could not be recovered')
 })
 
@@ -923,6 +925,46 @@ test('a fork with an exact id is refused and consumes the record', async () => {
   const run = await agentCall('toolu_fork', { model: 'local/qwen' }, { fork: true })
   expect(run.spawned.at(-1).outcome.deny).toContain('fork')
   expect(run.spawned.length).toBe(1)
+})
+
+test('spawn failure handling denies before dispatch and preserves a settled dispatch without replay', async () => {
+  const failed = catches.get('agent.spawn')
+  expect(failed).toBeDefined()
+  let calls = 0
+  const result = { model: 'local/qwen', agentId: 'settled-spawn' }
+  const next = Object.assign(async () => { calls++; return result }, { called: false, error: { kind: 'error', message: 'owned state failure' } })
+  const denied = await failed!(host, spawnInput('sonnet', 'general-purpose', 'haiku'), next)
+  expect(denied.deny).toContain('no subagent was started')
+  expect(calls).toBe(0)
+  next.called = true
+  expect(await failed!(host, spawnInput('sonnet', 'general-purpose', 'haiku'), next)).toBe(result)
+  expect(calls).toBe(1)
+})
+
+test('exact-model permission asks identify the real model without changing the decision or pinned input', async () => {
+  await reload({ local: provider('qwen') })
+  let observed: any
+  const result = await hook('tool.call')(host, { tool: 'Agent', tool_use_id: 'toolu_approval_exact', model: 'local/qwen', description: 'owned task' }, async (rewritten: any) => {
+    const nativeHost = { ...host, session: { ...host.session, model: async () => 'sonnet' } }
+    const input = { model: rewritten.model, description: rewritten.description }
+    let receivedInput: unknown
+    const verdict = await hook('tool.check')(nativeHost, { tool: 'Agent', tool_use_id: 'toolu_approval_exact', input }, async (received: any) => {
+      receivedInput = received.input
+      return { decision: 'ask', reason: 'native ask', decider: 'person' }
+    })
+    observed = { rewritten, input, receivedInput, verdict }
+    return { result: 'owned denied fixture' }
+  })
+  expect(result.deny).toBeUndefined()
+  expect(observed).toBeDefined()
+  expect(observed.rewritten.description).toContain('exact Agent model "local/qwen"')
+  expect([...observed.rewritten.description].every(character => character.codePointAt(0)! < 128)).toBe(true)
+  expect(observed.receivedInput).toBe(observed.input)
+  expect(observed.verdict).toMatchObject({ decision: 'ask', decider: 'person' })
+  expect(observed.verdict.reason).toContain('native ask')
+  expect(observed.verdict.reason).toContain('exact model "local/qwen"')
+  expect(observed.verdict.reason).toContain('haiku is validation only')
+  expect(observed.input.model).toBe('haiku')
 })
 
 test('the Agent tool description names the discovered ids, and only once', async () => {

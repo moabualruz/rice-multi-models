@@ -81,6 +81,8 @@ test('a spawn restores the exact id, refuses a marked spawn with no record and r
   const missing = pickRequested(undefined, CARRIER_VALUE, false, true)
   expect('deny' in missing && missing.deny).toContain('could not be recovered')
   expect('deny' in missing && missing.deny).toContain('not run as haiku')
+  expect('deny' in pickRequested(undefined, 'sonnet', false, true)).toBe(true)
+  expect('deny' in pickRequested(undefined, undefined, false, true)).toBe(true)
   // An unmarked haiku is the engine's own request.
   expect(pickRequested(undefined, CARRIER_VALUE, false, false)).toEqual({ requested: CARRIER_VALUE })
   expect(pickRequested(undefined, 'sonnet', false, false)).toEqual({ requested: 'sonnet' })
@@ -89,11 +91,14 @@ test('a spawn restores the exact id, refuses a marked spawn with no record and r
   expect('deny' in fork && fork.deny).toContain('fork')
 })
 
-test('the description mark is invisible, removable and absent from other text', () => {
-  const marked = markDescription('Fix the bug')
+test('the description note visibly names the exact model and is removable from the child task', () => {
+  const marked = markDescription('Fix the bug', 'codex/owned-child')
+  expect(marked).toContain('exact Agent model "codex/owned-child"')
+  expect(marked).toContain('haiku is validation only')
+  expect([...marked].every(character => character.codePointAt(0)! < 128)).toBe(true)
   expect(unmarkDescription(marked)).toEqual({ text: 'Fix the bug', marked: true })
   expect(unmarkDescription('Fix the bug')).toEqual({ text: 'Fix the bug', marked: false })
-  expect(unmarkDescription(markDescription(undefined))).toEqual({ text: '', marked: true })
+  expect(unmarkDescription(markDescription(undefined, 'p/m'))).toEqual({ text: '', marked: true })
 })
 
 const agentSchema = { type: 'object', properties: { description: { type: 'string' }, model: { type: 'string', enum: ['sonnet', 'opus', 'haiku', 'fable'], description: 'engine text' } }, required: ['description'] }
