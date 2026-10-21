@@ -462,12 +462,19 @@ async function buildRequest($: EngineInterface, e: TurnStepInput, transcript: re
   if (!target) throw new Error(`${e.model} names no provider`)
   const provider = target.label
   const infos = await $.tool.list()
-  const names = infos.map(info => info.name)
   const builtins = builtinNames(infos)
   const io = promptsPort($)
   // The installed claude's own tool definitions and agent prompts. A main step without them still runs, with the
   // generated schema table; a subagent's prompt cannot be had without them, so its step is refused (systemFor).
   const native = e.agentId !== undefined || builtins.length ? await stepTools($, builtins) : undefined
+  // The hook API can list platform tools that the native model request does not receive. When a native capture is
+  // available, it is authoritative for the native surface sent to the provider; retain MCP tools separately.
+  const nativeCapture = native === undefined || native instanceof Error ? undefined : native
+  const modelInfos = nativeCapture === undefined ? infos : [
+    ...nativeCapture.tools.map(tool => infos.find(info => !info.mcp && info.name === tool.name) ?? { name: tool.name, description: tool.description, mcp: false }),
+    ...infos.filter(info => info.mcp && !nativeCapture.tools.some(tool => tool.name === info.name)),
+  ]
+  const names = modelInfos.map(info => info.name)
   let system: string
   let allow: (tool: string) => boolean = () => true
   let messages = transcript
@@ -504,7 +511,7 @@ async function buildRequest($: EngineInterface, e: TurnStepInput, transcript: re
     allow = tool => allowed(tool) && only.includes(tool)
   }
   messages = withCarry(withIdentity(messages, target.model, provider), carryFor(who))
-  const tools: RemoteTool[] = remoteTools(infos, described, allow, {}, native === undefined || native instanceof Error ? undefined : toolTable(native))
+  const tools: RemoteTool[] = remoteTools(modelInfos, described, allow, {}, native === undefined || native instanceof Error ? undefined : toolTable(native))
   if (handback) tools.push({ name: HANDBACK_TOOL.name, description: HANDBACK_TOOL.description, schema: { ...HANDBACK_TOOL.schema } })
   const prefs = await read($, prefsAtom)
   const isCodex = target.provider === 'codex' && !target.remote

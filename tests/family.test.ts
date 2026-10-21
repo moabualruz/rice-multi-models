@@ -63,8 +63,8 @@ describe('spawn decisions', () => {
     expect(spawn({ definitionModel: 'sonnet' })).toMatchObject({ model: 'a/main', family: 'a' })
     expect(spawn({ requested: 'haiku' }, { a: { haiku: 'a/small' } })).toMatchObject({ model: 'a/small' })
   })
-  test('explicit routed choices are honored exactly', () => {
-    expect(spawn({ definitionModel: 'b/child' })).toMatchObject({ native: true, family: 'b', explicit: true })
+  test('routed ids in frontmatter and explicit choices are honored exactly', () => {
+    expect(spawn({ definitionModel: 'b/child' })).toMatchObject({ model: 'b/child', native: false, family: 'b', explicit: true })
     expect(spawn({ requested: 'b/child' })).toMatchObject({ model: 'b/child', family: 'b', explicit: true })
   })
   test('a Claude parent and forks keep native resolution', () => {

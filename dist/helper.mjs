@@ -9732,7 +9732,7 @@ function deriveCapture(capture) {
 // helper/native-tools.ts
 var TOOL_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 async function captureTools(names, outer) {
-  const tools = /* @__PURE__ */ new Set([...names.filter((name) => TOOL_NAME.test(name)), "Agent"]);
+  const tools = /* @__PURE__ */ new Set([...names.filter((name) => TOOL_NAME.test(name)), "Agent", "DeferredToolPlaceholder"]);
   let main2;
   let listed = [];
   let expected;
@@ -9773,8 +9773,7 @@ async function captureTools(names, outer) {
   });
   if (main2 === void 0) throw new Error("the installed claude sent no request");
   const capture = deriveCapture({ version: run2.version, listed, main: main2, spawned });
-  const missing = [...tools].filter((name) => !capture.tools.some((tool) => tool.name === name));
-  if (missing.length > 0) throw new Error(`Claude Code did not expose requested native tools: ${missing.join(", ")}`);
+  if (!capture.tools.some((tool) => tool.name === "Agent")) throw new Error("Claude Code did not expose the native Agent tool");
   const select = (sets) => ({
     foreground: sets.foreground.filter((name) => tools.has(name)),
     background: sets.background.filter((name) => tools.has(name))

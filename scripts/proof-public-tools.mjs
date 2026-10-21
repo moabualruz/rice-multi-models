@@ -48,6 +48,7 @@ try {
   // lists, each started in the foreground and in the background by the stub's answer.
   const first = isolated('native')
   writeFileSync(join(first.config, 'agents', 'owned-proof-agent.md'), `---\nname: owned-proof-agent\ndescription: Owned proof agent\n---\n\n${AGENT_BODY}\n\n`)
+  writeFileSync(join(first.config, 'agents', 'owned-proof-restricted-agent.md'), `---\nname: owned-proof-restricted-agent\ndescription: Owned restricted proof agent\ntools: [Read]\n---\n\n${AGENT_BODY}\n\n`)
   const requests = []
   let listed, spawned = false, started
   // The agent types come from the engine's start event, which can reach this process after its first request.
@@ -113,8 +114,11 @@ try {
     for (const background of [false, true]) {
       const body = agentRequest(type, background)
       if (!body) continue
-      const own = type === 'owned-proof-agent' ? AGENT_BODY : capture.prompts[type]
-      const tools = type === 'owned-proof-agent' ? capture.custom : capture.offered[type]
+      const custom = type === 'owned-proof-agent' || type === 'owned-proof-restricted-agent'
+      const own = custom ? AGENT_BODY : capture.prompts[type]
+      const tools = type === 'owned-proof-restricted-agent'
+        ? { foreground: capture.custom.foreground.filter(name => name === 'Read'), background: capture.custom.background.filter(name => name === 'Read') }
+        : type === 'owned-proof-agent' ? capture.custom : capture.offered[type]
       assert.equal(typeof own, 'string', `the capture holds the ${type} prompt`)
       assert.equal(capture.agentHead + own + capture.agentTail, lastBlock(body), `the ${type} prompt equals the native run, byte for byte`)
       const actualTools = names(body.tools).sort(), expectedTools = [...(background ? tools.background : tools.foreground)].sort()
@@ -122,13 +126,13 @@ try {
       compared.push(`${type}:${background ? 'background' : 'foreground'}`)
     }
   }
-  assert.ok(compared.includes('Explore:foreground') && compared.includes('general-purpose:background') && compared.includes('owned-proof-agent:foreground'))
+  assert.ok(compared.includes('Explore:foreground') && compared.includes('general-purpose:background') && compared.includes('owned-proof-agent:foreground') && compared.includes('owned-proof-restricted-agent:foreground'))
 
   // 3. A routed session through the mod: its main request and an Explore subagent's carry exactly those texts.
   const second = isolated('routed', { ANTHROPIC_BASE_URL: 'http://127.0.0.1:1' })
   const plugin = join(fixture, 'plugin'), evidence = join(fixture, 'wires.json'), spawnEvidence = join(fixture, 'spawn.json')
   mkdirSync(join(second.home, '.claude', 'agents'), { recursive: true })
-  writeFileSync(join(second.home, '.claude', 'agents', 'owned-proof-agent.md'), `---\nname: owned-proof-agent\ndescription: Owned routed proof agent\nmodel: codex/owned-child\ntools: [Read]\n---\n\n${AGENT_BODY}\n\n`)
+  writeFileSync(join(second.home, '.claude', 'agents', 'owned-proof-restricted-agent.md'), `---\nname: owned-proof-restricted-agent\ndescription: Owned routed restricted proof agent\nmodel: codex/owned-child\ntools: [Read]\n---\n\n${AGENT_BODY}\n\n`)
   for (const directory of ['.claude-plugin', 'hooks', 'types', 'dist', 'scripts']) cpSync(join(root, directory), join(plugin, directory), { recursive: true })
   const file = join(plugin, 'hooks/register.ts')
   let source = readFileSync(file, 'utf8')
@@ -152,7 +156,7 @@ try {
     await $.fs.write(${JSON.stringify(evidence)},JSON.stringify(rows))
     const answered=JSON.stringify(req.transcript).includes('tool_result')
     const events=req.who==='main'&&!answered
-      ?[{type:'tool_use',id:'toolu_owned_custom',name:'Agent',input:{description:'Owned custom agent',prompt:'Find the owned marker',subagent_type:'owned-proof-agent',run_in_background:false}},{type:'usage',in:10,out:2,cacheRead:0,cacheWrite:0},{type:'stop',reason:'tool_use'}]
+      ?[{type:'tool_use',id:'toolu_owned_custom',name:'Agent',input:{description:'Owned custom agent',prompt:'Find the owned marker',subagent_type:'owned-proof-restricted-agent',run_in_background:false}},{type:'usage',in:10,out:2,cacheRead:0,cacheWrite:0},{type:'stop',reason:'tool_use'}]
       :[{type:'text',text:req.who==='main'?'OWNED_MAIN_DONE':'OWNED_EXPLORE_REPORT'},{type:'usage',in:10,out:2,cacheRead:0,cacheWrite:0},{type:'stop',reason:'end_turn'}]
     for (const event of events) yield {stream:'stdout',text:JSON.stringify(event)+'\\n'}
     return {value:{code:0,signal:null}}
@@ -165,7 +169,7 @@ try {
   console.log(JSON.stringify({ phase: 'routed-session', ownedPid: child.pid }))
   let stdout = '', stderr = ''
   child.stdout.on('data', bytes => stdout += bytes); child.stderr.on('data', bytes => stderr += bytes)
-  child.stdin.end(`${JSON.stringify({ type: 'user', message: { role: 'user', content: 'Use one owned-proof-agent, then finish.' } })}\n`)
+  child.stdin.end(`${JSON.stringify({ type: 'user', message: { role: 'user', content: 'Use one owned-proof-restricted-agent, then finish.' } })}\n`)
   assert.equal(await finish('routed session', 90_000), 0, (stdout + stderr).slice(-2000))
   const events = stdout.split('\n').flatMap(line => { try { return [JSON.parse(line)] } catch { return [] } })
   const init = events.find(event => event.type === 'system' && event.subtype === 'init')
@@ -180,14 +184,14 @@ try {
   const sent = tools => JSON.stringify(tools.map(tool => ({ name: tool.name, description: tool.description, input_schema: tool.schema })).sort((a, b) => a.name.localeCompare(b.name)))
   const expected = tools => JSON.stringify(tools.map(tool => ({ name: tool.name, description: tool.description, input_schema: tool.input_schema })).sort((a, b) => a.name.localeCompare(b.name)))
   if (sent(main.tools) !== expected(nativeMain.tools)) toolParity.push({ type: 'routed-main', actual: names(main.tools), expected: names(nativeMain.tools) })
-  const nativeCustom = agentRequest('owned-proof-agent', false)
+  const nativeCustom = agentRequest('owned-proof-restricted-agent', false)
   assert.equal(custom.target, 'codex/owned-child', 'the exact routed model in custom frontmatter owns the child step')
   assert.equal(custom.system, lastBlock(nativeCustom), 'the routed custom agent gets its captured native prompt, byte for byte')
   if (sent(custom.tools) !== expected(nativeCustom.tools)) toolParity.push({ type: 'routed-custom-agent', actual: names(custom.tools), expected: names(nativeCustom.tools) })
-  assert.deepEqual(JSON.parse(readFileSync(spawnEvidence, 'utf8')), { type: 'owned-proof-agent', requested: null, definitionModel: 'codex/owned-child', selected: null, reason: 'the agent definition names a routed model' }, 'the plugin leaves custom frontmatter model resolution to Claude Code')
+  assert.deepEqual(JSON.parse(readFileSync(spawnEvidence, 'utf8')), { type: 'owned-proof-restricted-agent', requested: null, definitionModel: 'codex/owned-child', selected: 'codex/owned-child', reason: 'the agent definition names a routed model' }, 'the plugin routes exact model ids from custom frontmatter')
   assert.ok(!custom.system.includes('styx'))
   if (definitions(capture.tools) !== definitions(nativeMain.tools)) toolParity.push({ type: 'native-tool-definitions', differentFields, orderMatches, nativeNames: nativeMain.tools.map(tool => tool.name), captureNames: capture.tools.map(tool => tool.name) })
-  console.log(JSON.stringify({ customAgentProof: true, customAgentType: 'owned-proof-agent', frontmatterModel: 'codex/owned-child', resolvedTarget: custom.target, loadedModAgentTypes: loadedAgents.filter(type => type.startsWith('rice-multi-models:')), nativeToolCaptureVersion: capture.version, capturedTools: capture.tools.length, comparedAgentPrompts: compared.length, routedRequests: wires.length, strictParityFailures: toolParity }))
+  console.log(JSON.stringify({ customAgentProof: true, customAgentType: 'owned-proof-restricted-agent', frontmatterModel: 'codex/owned-child', resolvedTarget: custom.target, loadedModAgentTypes: loadedAgents.filter(type => type.startsWith('rice-multi-models:')), nativeToolCaptureVersion: capture.version, capturedTools: capture.tools.length, comparedAgentPrompts: compared.length, routedRequests: wires.length, strictParityFailures: toolParity }))
   assert.ok(toolParity.length === 0, `every native and routed tool definition and tool set must match exactly; ${JSON.stringify(toolParity)}`)
 } finally {
   terminate()

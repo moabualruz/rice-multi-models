@@ -92,7 +92,7 @@ export function spawnDecision(input: SpawnInput, tiers: TierMap, ports: FamilyPo
   const parentFamily = familyOf(input.parentModel, ports)
   if (input.fork) return { family: parentFamily, explicit: false, reason: 'forks inherit their parent model' }
   if (input.requested !== undefined && ports.isRouted(input.requested)) return { model: input.requested, family: familyOf(input.requested, ports), explicit: true, reason: 'an explicit routed model was requested' }
-  if (input.definitionModel !== undefined && ports.isRouted(input.definitionModel)) return { family: familyOf(input.definitionModel, ports), explicit: true, reason: 'the agent definition names a routed model' }
+  if (input.definitionModel !== undefined && ports.isRouted(input.definitionModel)) return { model: input.definitionModel, family: familyOf(input.definitionModel, ports), explicit: true, reason: 'the agent definition names a routed model' }
   if (parentFamily === CLAUDE_FAMILY) return { family: CLAUDE_FAMILY, explicit: false, reason: 'the parent runs on Claude' }
   const tier = input.requested ?? input.definitionModel
   const model = tierModel(parentFamily, tier === 'inherit' ? undefined : tier, input.parentModel, tiers, ports)

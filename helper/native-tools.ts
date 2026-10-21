@@ -15,8 +15,9 @@ const TOOL_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/
 export async function captureTools(names: readonly string[], outer?: AbortSignal): Promise<NativeCapture> {
   // The Agent tool starts the agents whose prompts are read. Capture against
   // Claude Code's default native surface, then select this session's names: an
-  // explicit --tools list changes its own dynamic tool descriptions.
-  const tools = new Set([...names.filter(name => TOOL_NAME.test(name)), 'Agent'])
+  // explicit --tools list changes its own dynamic tool descriptions. The native request also carries the deferred
+  // placeholder even though the plugin's tool list omits it.
+  const tools = new Set([...names.filter(name => TOOL_NAME.test(name)), 'Agent', 'DeferredToolPlaceholder'])
   let main: Record<string, unknown> | undefined
   let listed: string[] = []
   let expected: number | undefined
@@ -55,8 +56,7 @@ export async function captureTools(names: readonly string[], outer?: AbortSignal
   })
   if (main === undefined) throw new Error('the installed claude sent no request')
   const capture = deriveCapture({ version: run.version, listed, main, spawned })
-  const missing = [...tools].filter(name => !capture.tools.some(tool => tool.name === name))
-  if (missing.length > 0) throw new Error(`Claude Code did not expose requested native tools: ${missing.join(', ')}`)
+  if (!capture.tools.some(tool => tool.name === 'Agent')) throw new Error('Claude Code did not expose the native Agent tool')
   const select = (sets: { readonly foreground: readonly string[]; readonly background: readonly string[] }) => ({
     foreground: sets.foreground.filter(name => tools.has(name)),
     background: sets.background.filter(name => tools.has(name)),
