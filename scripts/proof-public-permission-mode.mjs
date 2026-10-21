@@ -303,12 +303,12 @@ const proofFingerprints: unknown[] = []`)
     writeFileSync(join(directory, 'receipt.json'), JSON.stringify(run, null, 2))
     assert.equal(interrupted, false, 'proof was not interrupted'); assert.equal(timedOut, false, 'bounded native deadline'); assert.equal(terminal.code, 0, stderr.slice(-2000))
     assert.equal(context.captureFailure, undefined, 'bounded native output'); assert.equal(context.providerFailure, undefined, 'owned provider contract'); assert.ok(observed, 'native driver finishes'); assert.equal(observed.failure, undefined, 'native fixture prerequisites')
-    const expectedEffectiveChildMode = version.startsWith('2.1.306') ? 'plan' : 'auto'
+    const expectedNativeChildMode = version.startsWith('2.1.306') ? 'plan' : 'auto'
     if (test.explicitAuto) {
       assert.equal(spawnMode?.permissionMode, 'auto', 'native agent frontmatter defines the child mode')
       assert.equal(spawnMode?.contested, false, 'the child agent definition is unambiguous')
-      assert.equal(effectiveMode?.mode, expectedEffectiveChildMode, 'effective child mode follows the installed Claude Code version')
-      assert.equal(proof?.mode, expectedEffectiveChildMode, 'permission proof follows the effective child mode')
+      assert.equal(proof?.mode, expectedNativeChildMode, 'native permission proof follows the installed Claude Code version')
+      assert.equal(effectiveMode?.mode, proof?.mode, 'the permission gate follows the native effective child mode')
     } else assert.equal(proof?.mode, 'auto', 'actual action begins in auto mode')
     const expectedApproval = test.approved === 'effective-mode' ? proof?.mode === 'auto' : test.approved
     const judgments = context.requests.filter(row => row.classifier)

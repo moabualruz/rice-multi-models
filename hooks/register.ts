@@ -5,7 +5,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, ModelCompleteResult, ModelUsage, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
-import { AGENT_PERMISSION_MODES, BUILTIN_AGENTS, HANDBACK_TOOL, identityLine, isFork, toolFilter } from './agents'
+import { BUILTIN_AGENTS, HANDBACK_TOOL, identityLine, isFork, toolFilter } from './agents'
 import type { AgentDef } from './agents'
 import { anchoredEstimate, reportedInput } from './budget'
 import type { UsageAnchor } from './budget'
@@ -73,8 +73,6 @@ const memory = createMemory()
 const described = new Map<string, Described>()
 /** The model each subagent loop last ran on, for its compaction. */
 const agentModels = new Map<string, string>()
-/** Effective permission-mode overrides from unambiguous native agent frontmatter, by spawned agent id. */
-const agentPermissionModes = new Map<string, string>()
 const webToolGate = createToolGate()
 const toolModes = new Map<string, { mode?: string; agentId?: string }>()
 let permissionDefaults: Promise<unknown> | undefined
@@ -1295,10 +1293,7 @@ export const register: Register = on => {
     // session's nonce survives in the process environment.
     if (!permissionContextNonce) permissionContextNonce = await $.env.get('RICE_MULTI_MODELS_PERMISSION_CONTEXT_NONCE') ?? ''
     const context = consumePermissionContext(result.additionalContext ?? [], { nonce: permissionContextNonce, sessionId: await $.session.id(), toolUseId: e.tool_use_id })
-    if (context.proof) {
-      const override = context.proof.agentId === undefined ? undefined : agentPermissionModes.get(context.proof.agentId)
-      toolModes.set(e.tool_use_id, { mode: override ?? context.proof.mode, agentId: context.proof.agentId })
-    }
+    if (context.proof) toolModes.set(e.tool_use_id, { mode: context.proof.mode, agentId: context.proof.agentId })
     return { ...result, additionalContext: context.remaining }
   })
 
@@ -1389,10 +1384,6 @@ export const register: Register = on => {
     if (result.agentId) {
       setCapped(spawnDecisions, result.agentId, decision)
       setCapped(spawnBackground, result.agentId, e.background)
-      if (!registered.has(e.subagentType) && definition?.permissionMode && AGENT_PERMISSION_MODES.has(definition.permissionMode)
-        && !(await contested(promptsPort($), memory, e.subagentType))) {
-        setCapped(agentPermissionModes, result.agentId, definition.permissionMode)
-      }
     }
     return result
   })
