@@ -77,6 +77,29 @@ try {
   const nativeLoopbackUrl = `${base}/native-engine-page`
   cpSync(join(root, 'hooks'), join(plugin, 'hooks'), { recursive: true })
   cpSync(join(root, 'helper'), join(plugin, 'helper'), { recursive: true })
+  // Claude refuses the loopback probe, so stub only the copied plugin's native next result.
+  const gateTransitionFile = join(fixture, 'gate-transition.json'), registerFile = join(plugin, 'hooks/register.ts')
+  let registerSource = readFileSync(registerFile, 'utf8')
+  const nativeNextCall = 'const nativeResult = await next(e)'
+  const gateFinishCall = 'const gate = await webToolGate.finish(ticket, nativeResult, (question, options) => $.ui.ask(question, options), next.signal)'
+  assert.equal(registerSource.split(nativeNextCall).length - 1, 1, 'production native continuation seam is unique')
+  assert.equal(registerSource.split(gateFinishCall).length - 1, 1, 'production gate finish seam is unique')
+  registerSource = registerSource.replace(nativeNextCall, `const nativeResult = await (async () => {
+    const permissionInput = e.input ?? { url: e.url, prompt: e.prompt, ...(e.offset === undefined ? {} : { offset: e.offset }) }
+    const permissionStop = webToolGate.check({ ...e, input: permissionInput }, { decision: 'allow' })
+    const result = { isError: true, text: permissionStop.reason ?? '' }
+    const path = ${JSON.stringify(gateTransitionFile)}
+    const rows = await $.fs.exists(path) ? JSON.parse(await $.fs.read(path)) : []
+    rows.push({ stage: 'stubbed-native-next', permissionStop, result })
+    await $.fs.write(path, JSON.stringify(rows))
+    return result
+  })()`)
+  registerSource = registerSource.replace(gateFinishCall, `${gateFinishCall}
+      const gatePath = ${JSON.stringify(gateTransitionFile)}
+      const gateRows = await $.fs.exists(gatePath) ? JSON.parse(await $.fs.read(gatePath)) : []
+      gateRows.push({ stage: 'gate-finished', approved: gate.approved, input: gate.input })
+      await $.fs.write(gatePath, JSON.stringify(gateRows))`)
+  writeFileSync(registerFile, registerSource)
   mkdirSync(join(plugin, '.claude-plugin'), { recursive: true }); mkdirSync(join(plugin, 'dist'), { recursive: true })
   writeFileSync(join(plugin, '.claude-plugin/plugin.json'), JSON.stringify({ name: 'rice-multi-models-owned-proof', version: '1.0.0', description: 'Owned production WebFetch hook fixture', author: { name: 'Owned fixture' }, license: 'MIT' }))
   writeFileSync(join(plugin, 'README.md'), 'This isolated fixture exercises the production WebFetch hook through ordinary Claude. It uses synthetic provider responses, synthetic page content and a temporary configuration directory. No account, installed plugin, real session or external page is read. It checks both configured-service extraction and the Claude Code native WebFetch fallback. The fixture is created and removed by the proof script.\n')
@@ -132,12 +155,18 @@ try {
   const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve) }); clearTimeout(timer)
   let output; try { output = JSON.parse(stdout) } catch {}
   const outcomes = typeof output?.result === 'string' && output.result.startsWith('OWNED_PUBLIC_FETCH ') ? JSON.parse(output.result.slice('OWNED_PUBLIC_FETCH '.length)) : []
-  let nativeReceipt, failure
+  let nativeReceipt, failure, gateTransition
   try { nativeReceipt = JSON.parse(readFileSync(receipts.native, 'utf8')) } catch {}
   try { failure = JSON.parse(readFileSync(receipts.hook, 'utf8')) } catch {}
-  const receipt = { scope: 'ordinary native CLI, production hook registration, public tool.call and permission gate; isolated HOME/config, synthetic providers and pages, plus an engine WebFetch loopback probe; no production account or external page access', nativeEngineLoopback: loopbackReceipt, code, timedOut, outcomes, observations, nativeReceipt, stderrPresent: !!stderr, ...(failure ? { failure } : {}) }
+  try { gateTransition = JSON.parse(readFileSync(gateTransitionFile, 'utf8')) } catch {}
+  const receipt = { scope: 'ordinary native CLI, production hook registration, public tool.call and permission gate with a stubbed native next; isolated HOME/config, synthetic providers and pages, plus an engine WebFetch loopback probe; no production account or external page access', nativeEngineLoopback: loopbackReceipt, code, timedOut, outcomes, observations, nativeReceipt, gateTransition, stderrPresent: !!stderr, ...(failure ? { failure } : {}) }
   process.stdout.write(`${JSON.stringify(receipt)}\n`)
   assert.equal(code, 0); assert.equal(timedOut, false); assert.equal(outcomes.length, 3)
+  const stubbedNext = gateTransition?.filter(row => row.stage === 'stubbed-native-next') ?? [], finishedGates = gateTransition?.filter(row => row.stage === 'gate-finished') ?? []
+  assert.equal(stubbedNext.length, 3, 'each WebFetch calls the owned native-next stub')
+  assert.ok(stubbedNext.every(row => row.permissionStop?.decision === 'deny' && row.result?.isError === true && row.result.text === row.permissionStop.reason), 'native next returns the production gate stop result')
+  assert.equal(finishedGates.length, 3, 'each stubbed native result reaches the production gate finish')
+  assert.ok(finishedGates.every((row, index) => row.approved && row.input?.url === inputs[index].url), 'the production gate approves each exact checked WebFetch input')
   assert.deepEqual(outcomes[0], { isError: false, denied: false, result: marker, url: inputs[0].url, code: 200, bytes: Buffer.byteLength(selectedPage) })
   assert.deepEqual(outcomes[1], { isError: false, denied: false, result: nativeMarker, url: inputs[1].url, code: 200, bytes: Buffer.byteLength(nativePage) })
   assert.deepEqual(outcomes[2], { isError: false, denied: false, result: directMarker, url: inputs[2].url, code: 200, bytes: Buffer.byteLength(directPage) })
