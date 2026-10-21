@@ -9,7 +9,8 @@ inside the normal `claude` command through supported plugin hooks. Release
 agent files remain native. Release 0.12.0 added credential-free web-tier
 eligibility and configuration diagnostics. Release 0.13.0 preserves more document
 and image content across provider codecs and reports configured model capabilities,
-including tool coverage and web tiers, in setup, doctor and status. It registers no
+including tool coverage and web tiers, in setup, doctor and status. Release 0.14.0 lets the
+Agent tool's `model` argument name any discovered `<provider>/<model>` id exactly. It registers no
 MCP tools and needs no launcher, proxy or gateway.
 
 **Each conversation stays on its own provider family.** A Codex session's
