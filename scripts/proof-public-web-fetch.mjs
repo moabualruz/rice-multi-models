@@ -11,7 +11,7 @@ import { spawn, spawnSync } from 'node:child_process'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const fixture = mkdtempSync(join(tmpdir(), 'rice-public-fetch-'))
-const config = join(fixture, '.claude'), plugin = join(fixture, 'production-plugin'), driver = join(fixture, 'driver'), nativeHttp = join(fixture, 'native-http')
+const config = join(fixture, '.claude'), plugin = join(fixture, 'production-plugin'), driver = join(fixture, 'driver'), nativeHttp = join(fixture, 'native-http'), loopbackDriver = join(fixture, 'loopback-driver')
 const inputs = [
   { url: 'https://93.184.216.34/configured-page', prompt: 'Extract the published change.' },
   { url: 'https://93.184.216.34/native-page', prompt: 'Extract the native page.' },
@@ -22,6 +22,8 @@ let child, timedOut = false
 const selectedPage = '<html><body><h1>Owned release</h1><p>The published change is ACTUAL_PAGE_EVIDENCE.</p></body></html>'
 const directPage = '<html><body><h1>Owned direct source</h1><p>The direct page says DIRECT_PAGE_EVIDENCE.</p></body></html>'
 const nativePage = 'Owned native source document.'
+const nativeLoopbackPage = 'Owned engine-native loopback source.'
+let loopbackTimedOut = false
 const nativeModel = { id: 'claude-haiku-5-5', lifecycle: 'active', max_tokens: 2048 }
 const json = (response, body, status = 200) => { response.writeHead(status, { 'content-type': 'application/json', ...(status >= 400 ? { 'x-should-retry': 'false' } : {}) }); response.end(JSON.stringify(body)) }
 const server = createServer(async (request, response) => {
@@ -31,6 +33,10 @@ const server = createServer(async (request, response) => {
   if (url.pathname === '/direct-page') {
     observations.push({ stage: 'direct-page', status: 200 })
     response.writeHead(200, { 'content-type': 'text/html' }); response.end(directPage); return
+  }
+  if (url.pathname === '/native-engine-page') {
+    observations.push({ stage: 'engine-native-loopback', status: 200 })
+    response.writeHead(200, { 'content-type': 'text/plain' }); response.end(nativeLoopbackPage); return
   }
   if (url.pathname === '/fetch') {
     const requested = body?.url
@@ -68,6 +74,7 @@ try {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   mkdirSync(config); mkdirSync(join(config, 'rice-multi-models'))
   const base = `http://127.0.0.1:${server.address().port}`
+  const nativeLoopbackUrl = `${base}/native-engine-page`
   cpSync(join(root, 'hooks'), join(plugin, 'hooks'), { recursive: true })
   cpSync(join(root, 'helper'), join(plugin, 'helper'), { recursive: true })
   mkdirSync(join(plugin, '.claude-plugin'), { recursive: true }); mkdirSync(join(plugin, 'dist'), { recursive: true })
@@ -82,15 +89,37 @@ try {
   writeFileSync(join(config, 'settings.json'), '{}'); writeFileSync(join(fixture, '.claude.json'), JSON.stringify({ hasCompletedOnboarding: true }))
   const receipts = { hook: join(fixture, 'hook-receipt.json'), native: join(fixture, 'native-http.json') }
   const driverSource = `export const register=on=>{on('turn.step',async function*($,e){const outcomes=[];for(const input of ${JSON.stringify(inputs)}){const answer=await $.tool.call({tool:'WebFetch',...input});outcomes.push({isError:answer.isError===true,denied:!!answer.deny,reason:answer.deny,result:answer.result?.result,url:answer.result?.url,code:answer.result?.code,bytes:answer.result?.bytes});}const text='OWNED_PUBLIC_FETCH '+JSON.stringify(outcomes);yield{kind:'text',index:0,text};yield{kind:'stop',stopReason:'end_turn',usage:null};return{turnId:e.turnId,index:e.index,answer:text,toolUses:[],stopReason:'end_turn',usage:null};});};`
+  const loopbackDriverSource = `export const register=on=>{on('turn.step',async function*($,e){const call=await $.tool.call({tool:'WebFetch',url:${JSON.stringify(nativeLoopbackUrl)},prompt:'Read the loopback fixture page.'});const native=call.result;const content=Array.isArray(native?.content)?native.content:[];const detail=[call.error,call.message,native?.error,native?.message,...content.map(item=>item?.text)].filter(value=>typeof value==='string').join(' ').replaceAll(${JSON.stringify(nativeLoopbackUrl)},'owned loopback URL').slice(0,300);const outcome={isError:call.isError===true,denied:!!call.deny,reason:call.deny,result:native?.result??native?.text,url:native?.url,code:native?.code,detail,resultKeys:native&&typeof native==='object'?Object.keys(native).slice(0,12):[]};const answer='OWNED_ENGINE_LOOPBACK '+JSON.stringify(outcome);yield{kind:'text',index:0,text:answer};yield{kind:'stop',stopReason:'end_turn',usage:null};return{turnId:e.turnId,index:e.index,answer,toolUses:[],stopReason:'end_turn',usage:null};});};`
   const nativeHttpSource = `export const register=on=>{on('http.fetch',async($,e,next)=>{const url=new URL(e.url);if(url.origin!=='https://api.anthropic.com')return next(e);const body=e.init?.body?JSON.parse(e.init.body):undefined;if(url.pathname==='/v1/models'){await $.fs.write(${JSON.stringify(receipts.native)},JSON.stringify({stage:'native-models',authHandlePresent:!!e.init?.auth}));return{value:{status:200,ok:true,headers:{'content-type':'application/json'},text:JSON.stringify({data:[${JSON.stringify(nativeModel)}],has_more:false})}};}if(url.pathname==='/v1/messages'){const requested=JSON.parse(body.messages[0].content).url;await $.fs.write(${JSON.stringify(receipts.native)},JSON.stringify({stage:'native-messages',authHandlePresent:!!e.init?.auth,model:body.model,requested,webFetchTool:body.tools?.[0]?.name}));const failed=requested===${JSON.stringify(inputs[2].url)};const content=[{type:'server_tool_use',id:'srvtoolu_owned_fetch',name:'web_fetch',input:{url:requested}},...(failed?[{type:'web_fetch_tool_result_error',tool_use_id:'srvtoolu_owned_fetch',error_code:'url_not_accessible'}]:[{type:'web_fetch_tool_result',tool_use_id:'srvtoolu_owned_fetch',content:{type:'web_fetch_result',url:requested,retrieved_at:'2026-10-21T00:00:00Z',content:{type:'document',title:'Owned native page',citations:{enabled:false},source:{type:'text',media_type:'text/plain',data:${JSON.stringify(nativePage)}}}}},{type:'text',text:${JSON.stringify(nativeMarker)}}])];return{value:{status:200,ok:true,headers:{'content-type':'application/json'},text:JSON.stringify({id:'msg_owned_fetch',type:'message',role:'assistant',model:body.model,content,stop_reason:'end_turn',usage:{input_tokens:20,output_tokens:8}})}};}throw new Error('Owned unexpected first-party WebFetch path');}).catch(async($,e,next)=>{await $.fs.write(${JSON.stringify(receipts.hook)},JSON.stringify({phase:'native-http-fixture',kind:next.error.kind}));return{value:{status:503,ok:false,headers:{},text:'{}'}};});};`
-  writePlugin(driver, 'owned-public-fetch-caller', driverSource); writePlugin(nativeHttp, 'owned-public-fetch-native-http', nativeHttpSource)
+  writePlugin(driver, 'owned-public-fetch-caller', driverSource); writePlugin(nativeHttp, 'owned-public-fetch-native-http', nativeHttpSource); writePlugin(loopbackDriver, 'owned-engine-loopback-caller', loopbackDriverSource)
   const env = Object.fromEntries(['PATH', 'PATHEXT', 'TMPDIR', 'LANG', 'SystemRoot', 'SystemDrive', 'WINDIR', 'ComSpec', 'TEMP', 'TMP', 'ProgramFiles', 'ProgramFiles(x86)', 'CLAUDE_CODE_GIT_BASH_PATH'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]))
   Object.assign(env, { HOME: fixture, USERPROFILE: fixture, CLAUDE_CONFIG_DIR: config, RICE_MULTI_MODELS_NODE: process.execPath, ANTHROPIC_API_KEY: 'owned-fixture-only', ANTHROPIC_UNIX_SOCKET: join(fixture, 'unused-native.sock'), DISABLE_AUTOUPDATER: '1', DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' })
   const native = process.env.RICE_CLAUDE_EXECUTABLE ?? 'claude'
-  for (const path of [nativeHttp, driver]) {
+  for (const path of [nativeHttp, driver, loopbackDriver]) {
     const validated = spawnSync(native, ['plugin', 'validate', '--strict', path], { env, cwd: fixture, encoding: 'utf8', timeout: 15000 })
     assert.equal(validated.status, 0, 'owned public fixture plugins validate')
   }
+  child = spawn(native, ['-p', '--model', 'selected/owned', '--plugin-dir', loopbackDriver, '--setting-sources', 'user', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--tools', 'WebFetch', '--allowedTools', 'WebFetch', '--no-session-persistence', '--output-format', 'json', 'Run the owned engine WebFetch loopback probe.'], { cwd: fixture, env, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] })
+  let loopbackStdout = '', loopbackStderr = ''
+  child.stdout.on('data', bytes => loopbackStdout += bytes); child.stderr.on('data', bytes => loopbackStderr += bytes)
+  const loopbackTimer = setTimeout(() => { loopbackTimedOut = true; terminate() }, 30000)
+  const loopbackCode = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve) }); clearTimeout(loopbackTimer)
+  let loopbackOutput; try { loopbackOutput = JSON.parse(loopbackStdout) } catch {}
+  const loopbackRaw = typeof loopbackOutput?.result === 'string' && loopbackOutput.result.startsWith('OWNED_ENGINE_LOOPBACK ') ? loopbackOutput.result.slice('OWNED_ENGINE_LOOPBACK '.length) : ''
+  const loopbackOutcome = loopbackRaw ? JSON.parse(loopbackRaw) : undefined
+  const loopbackRequests = observations.filter(row => row.stage === 'engine-native-loopback')
+  const loopbackReceipt = { code: loopbackCode, timedOut: loopbackTimedOut, outcome: loopbackOutcome, loopbackRequests, stderrPresent: !!loopbackStderr }
+  if (loopbackRequests.length === 1) {
+    assert.equal(loopbackOutcome?.isError, false, 'native WebFetch retrieves the owned loopback page')
+    assert.equal(loopbackOutcome?.result, nativeLoopbackPage)
+    assert.equal(loopbackOutcome?.url, nativeLoopbackUrl)
+  } else {
+    assert.equal(loopbackRequests.length, 0, 'native WebFetch either reads the fixture once or rejects loopback before connecting')
+    assert.equal(loopbackOutcome?.isError, true, 'native WebFetch reports its loopback refusal')
+    assert.equal(loopbackOutcome?.denied, false, 'loopback refusal comes from WebFetch, not the permission gate')
+  }
+  assert.equal(loopbackCode, 0, 'native loopback probe process exits successfully'); assert.equal(loopbackTimedOut, false); assert.ok(loopbackOutcome, 'native loopback outcome is captured')
+  child = undefined
   const doctor = spawnSync(native, ['-p', '--model', 'selected/owned', '--plugin-dir', plugin, '--setting-sources', 'user', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--no-session-persistence', '--output-format', 'json', '/rice-models doctor'], { env, cwd: fixture, encoding: 'utf8', timeout: 30000 })
   assert.equal(doctor.status, 0, 'owned helper doctor command completes')
   const approval = spawnSync(native, ['-p', '--model', 'selected/owned', '--plugin-dir', plugin, '--setting-sources', 'user', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--no-session-persistence', '--output-format', 'json', '/rice-models approve selected'], { env, cwd: fixture, encoding: 'utf8', timeout: 30000 })
@@ -106,7 +135,7 @@ try {
   let nativeReceipt, failure
   try { nativeReceipt = JSON.parse(readFileSync(receipts.native, 'utf8')) } catch {}
   try { failure = JSON.parse(readFileSync(receipts.hook, 'utf8')) } catch {}
-  const receipt = { scope: 'ordinary native CLI, production hook registration, public tool.call and permission gate; isolated HOME/config, synthetic providers and pages; no production account or external page access', code, timedOut, outcomes, observations, nativeReceipt, stderrPresent: !!stderr, ...(failure ? { failure } : {}) }
+  const receipt = { scope: 'ordinary native CLI, production hook registration, public tool.call and permission gate; isolated HOME/config, synthetic providers and pages, plus an engine WebFetch loopback probe; no production account or external page access', nativeEngineLoopback: loopbackReceipt, code, timedOut, outcomes, observations, nativeReceipt, stderrPresent: !!stderr, ...(failure ? { failure } : {}) }
   process.stdout.write(`${JSON.stringify(receipt)}\n`)
   assert.equal(code, 0); assert.equal(timedOut, false); assert.equal(outcomes.length, 3)
   assert.deepEqual(outcomes[0], { isError: false, denied: false, result: marker, url: inputs[0].url, code: 200, bytes: Buffer.byteLength(selectedPage) })
