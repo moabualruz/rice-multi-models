@@ -9004,6 +9004,41 @@ function publicWebSearchResult(query, sources, policy, durationSeconds, calls) {
   };
 }
 
+// hooks/web-search-tier.ts
+var unavailable = (recognized, reason, constraints = []) => ({ recognized, reason, constraints });
+function nativeSearchDecision(target, remote, restrictions) {
+  if (!remote) {
+    if (splitTarget(target)?.provider !== "codex") return unavailable(false, "No provider-native web search contract is implemented for this route.");
+    const constraints2 = [
+      ...restrictions.maxUses === void 0 ? [] : ["Codex cannot enforce a maximum number of search uses before making its provider call."],
+      ...restrictions.blockedDomains?.length ? ["Codex cannot enforce blocked-domain filtering before its provider call."] : []
+    ];
+    return constraints2.length ? unavailable(true, "The Codex subscription search contract is recognized, but requested restrictions require a later tier.", constraints2) : { method: "hosted", recognized: true, reason: "The selected Codex subscription has a recognized hosted web search route.", constraints: [] };
+  }
+  if (remote.model.webSearch === "off") return unavailable(false, "Provider web search is explicitly disabled.");
+  let url;
+  try {
+    url = new URL(remote.provider.baseUrl);
+  } catch {
+    return unavailable(false, "The selected provider endpoint is not a valid URL.");
+  }
+  if (url.origin === "https://ollama.com" && remote.provider.auth !== "none") {
+    return { method: "ollama", recognized: true, reason: "The selected Ollama cloud endpoint has its own configured search route.", constraints: [] };
+  }
+  const kind = remote.model.kind;
+  if (!["responses", "anthropic", "gemini"].includes(kind)) return unavailable(false, `No native web search contract is implemented for the ${kind} transport.`);
+  const constraints = kind === "gemini" ? [
+    ...restrictions.maxUses === void 0 ? [] : ["Gemini grounding cannot enforce a maximum number of search uses."],
+    ...restrictions.allowedDomains?.length ? ["Gemini grounding cannot enforce an allowed-domain filter."] : [],
+    ...restrictions.blockedDomains?.length ? ["Gemini grounding cannot enforce a blocked-domain filter."] : [],
+    ...restrictions.location ? ["Gemini grounding cannot enforce a search location."] : []
+  ] : [];
+  if (constraints.length) return unavailable(true, "The native search contract is recognized, but requested restrictions require a later tier.", constraints);
+  if (remote.model.webSearch === "native") return { method: "hosted", recognized: true, reason: "Native web search was explicitly enabled for this provider model.", constraints: [] };
+  const official = kind === "responses" && url.origin === "https://api.openai.com" || kind === "anthropic" && url.origin === "https://api.anthropic.com" || kind === "gemini" && url.origin === "https://generativelanguage.googleapis.com";
+  return official ? { method: "hosted", recognized: true, reason: `The selected ${kind} endpoint has a recognized native web search contract.`, constraints: [] } : unavailable(false, "This compatible endpoint has no explicitly configured native web search capability.");
+}
+
 // helper/search/endpoints.ts
 import { readFileSync as readFileSync2, statSync } from "node:fs";
 import { homedir as homedir3 } from "node:os";
@@ -9121,15 +9156,7 @@ async function configuredSearch(query, signal, endpoints = searchEndpoints(), re
 // helper/search/provider.ts
 var keys2 = createKeys(runCommand, Date.now);
 function providerSearch(target, remote, restrictions) {
-  if (!remote) return splitTarget(target)?.provider === "codex" && !restrictions.blockedDomains?.length ? "hosted" : void 0;
-  if (remote.model.webSearch === "off") return void 0;
-  const url = new URL(remote.provider.baseUrl);
-  if (url.origin === "https://ollama.com" && remote.provider.auth !== "none") return "ollama";
-  const kind = remote.model.kind;
-  if (!["responses", "anthropic", "gemini"].includes(kind)) return void 0;
-  if (kind === "gemini" && (restrictions.maxUses !== void 0 || restrictions.allowedDomains?.length || restrictions.blockedDomains?.length || restrictions.location)) return void 0;
-  if (remote.model.webSearch === "native") return "hosted";
-  return kind === "responses" && url.origin === "https://api.openai.com" || kind === "anthropic" && url.origin === "https://api.anthropic.com" || kind === "gemini" && url.origin === "https://generativelanguage.googleapis.com" ? "hosted" : void 0;
+  return nativeSearchDecision(target, remote, restrictions).method;
 }
 async function ollamaSearch(wire, remote, query, signal) {
   const credential = await keys2.get(remote.provider, new Set(wire.approved));
@@ -9198,7 +9225,7 @@ function createToolSearch(ports = {}) {
     const selected = parsed?.config ? resolve(parsed.config, wire.req.target) : void 0;
     const remote = selected?.kind === "remote" ? selected : void 0;
     const method = providerSearch(wire.req.target, remote, policy);
-    const answer = (sources, calls) => ({ kind: "answered", result: publicWebSearchResult(query, sources, policy, (io.now() - started) / 1e3, calls) });
+    const answer = (stage, sources, calls) => ({ kind: "answered", stage, result: publicWebSearchResult(query, sources, policy, (io.now() - started) / 1e3, calls) });
     if (method) {
       try {
         const attempt = AbortSignal.any([signal, AbortSignal.timeout(3e4)]);
@@ -9211,8 +9238,7 @@ function createToolSearch(ports = {}) {
         } };
         const events = method === "ollama" && remote ? await io.cloud(searchWire, remote, query, attempt) : io.step(searchWire, attempt);
         const found = await completedSearch(events, attempt);
-        if (!remote && splitTarget(wire.req.target)?.provider === "codex" && policy.maxUses !== void 0 && (found.complete !== true || !Number.isSafeInteger(found.calls) || Number(found.calls) < 1 || Number(found.calls) > policy.maxUses)) throw new SearchUnavailable("Selected provider search cannot satisfy the use bound.");
-        return answer(found.sources, method === "ollama" ? 1 : found.calls);
+        return answer("provider-native", found.sources, method === "ollama" ? 1 : found.calls);
       } catch {
         signal.throwIfAborted();
       }
@@ -9221,11 +9247,11 @@ function createToolSearch(ports = {}) {
       const attempt = AbortSignal.any([signal, AbortSignal.timeout(3e4)]);
       const results = await io.configured(query, attempt, io.endpoints());
       signal.throwIfAborted();
-      return answer(results, 1);
+      return answer("configured-service", results, 1);
     } catch {
       signal.throwIfAborted();
     }
-    return { kind: "native-fallback", reason: "Selected-provider and configured web search are unavailable.", request: {
+    return { kind: "native-fallback", stage: "claude-native", reason: "Selected-provider and configured web search are unavailable.", request: {
       query,
       ...policy.allowedDomains ? { allowed_domains: policy.allowedDomains } : {},
       ...policy.blockedDomains ? { blocked_domains: policy.blockedDomains } : {},

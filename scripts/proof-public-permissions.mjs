@@ -40,7 +40,7 @@ const server = createServer(async (request, response) => {
   const path = request.url.split('?')[0]
   if (path === '/selected/v1/responses') {
     const classifier = raw.includes('pendingAction'), search = body?.tools?.some(tool => tool.type === 'web_search') === true
-    requests.push({ phase, method: request.method, path, model: body?.model, classifier, search, rewrittenSearch: raw.includes('OWNED_REWRITTEN_SEARCH'), rewrittenFetch: raw.includes('OWNED_REWRITTEN_FETCH'), completeInstructions: raw.includes('OWNED_LONG_INSTRUCTIONS_START') && raw.includes('OWNED_LONG_INSTRUCTIONS_END'), noTools: !body?.tools?.length, strictSchema: body?.text?.format?.type === 'json_schema', credentialFree: !request.headers.authorization && !request.headers['x-api-key'] })
+    requests.push({ phase, method: request.method, path, model: body?.model, classifier, search, searchQueryMarkers: ['OWNED_REWRITTEN_SEARCH', 'OWNED_ONE_TIME_SEARCH', 'OWNED_ONE_TIME_DENIED', 'OWNED_MODEL_CHANGE_SEARCH'].filter(marker => raw.includes(marker)), rewrittenSearch: raw.includes('OWNED_REWRITTEN_SEARCH'), rewrittenFetch: raw.includes('OWNED_REWRITTEN_FETCH'), completeInstructions: raw.includes('OWNED_LONG_INSTRUCTIONS_START') && raw.includes('OWNED_LONG_INSTRUCTIONS_END'), noTools: !body?.tools?.length, strictSchema: body?.text?.format?.type === 'json_schema', credentialFree: !request.headers.authorization && !request.headers['x-api-key'] })
     return responseEvents(response, classifier ? JSON.stringify({ decision: 'allow', reason: 'Only the owned requested marker is printed.' }) : search ? 'Owned search answer.' : 'OWNED_SELECTED_EXTRACTION', search)
   }
   requests.push({ phase, method: request.method, path, native: path.startsWith('/native/'), ...(body ? { model: body.model, maxTokens: body.max_tokens, nativeNaming: JSON.stringify(body.system)?.includes('You are naming a coding session') === true, systemPrefix: JSON.stringify(body.system)?.slice(0, 500), messagePrefix: JSON.stringify(body.messages)?.slice(0, 800) } : {}) })
@@ -83,6 +83,9 @@ try {
   const registerFile = join(plugin, 'hooks/register.ts')
   let source = readFileSync(registerFile, 'utf8')
   source = source.replaceAll('await loadProviders($)', 'await loadProviders($); for (const provider of Object.values(loaded.config.providers)) await $.store.set(TRUST_PREFIX + fingerprint(provider), true)')
+  source = source.replace("  on('tool.call', async ($, e, next) => {", "  let proofModelAfterApproval;\n  on('tool.call', async ($, e, next) => {")
+  source = source.replace('const model = e.agentId === undefined ? await $.session.model() : agentModels.get(e.agentId)\n      if (model !== initialModel', 'const model = e.agentId === undefined ? (proofModelAfterApproval ?? await $.session.model()) : agentModels.get(e.agentId)\n      if (model !== initialModel')
+  source = source.replace('const gate = await webToolGate.finish(ticket, nativeResult, (question, options) => $.ui.ask(question, options), next.signal)', `const proofCase = JSON.parse(await $.fs.read(${JSON.stringify(phaseFile)})); const gate = await webToolGate.finish(ticket, nativeResult, async (question, options) => { if (proofCase.changeModelAfterApproval) proofModelAfterApproval = 'selected/changed'; return proofCase.askAnswer; }, proofCase.cancelBeforeApproval ? AbortSignal.abort() : next.signal)`)
   const close = source.lastIndexOf('\n}')
   assert.ok(close > 0)
   source = source.slice(0, close) + `
@@ -115,6 +118,10 @@ try {
     { name: 'native-deny', mode: 'auto', call: bash, permissions: { deny: ['Bash'] }, classifier: 0, approved: false },
     { name: 'forced-ask', mode: 'auto', call: bash, permissions: { ask: ['Bash'] }, classifier: 0, approved: false },
     { name: 'search-allowed-rewritten', mode: 'default', call: { tool: 'WebSearch', query: 'OWNED_ORIGINAL_SEARCH' }, permissions: { allow: ['WebSearch'] }, rewrite: true, approved: true },
+    { name: 'search-one-time-approved', mode: 'default', call: { tool: 'WebSearch', query: 'OWNED_ONE_TIME_SEARCH' }, permissions: { ask: ['WebSearch'] }, askAnswer: 'Allow once', approved: true },
+    { name: 'search-one-time-denied', mode: 'default', call: { tool: 'WebSearch', query: 'OWNED_ONE_TIME_DENIED' }, permissions: { ask: ['WebSearch'] }, askAnswer: 'Deny', approved: false },
+    { name: 'search-model-changed-during-approval', mode: 'default', call: { tool: 'WebSearch', query: 'OWNED_MODEL_CHANGE_SEARCH' }, permissions: { ask: ['WebSearch'] }, askAnswer: 'Allow once', changeModelAfterApproval: true, approved: false },
+    { name: 'search-cancelled-before-approval', mode: 'default', call: { tool: 'WebSearch', query: 'OWNED_CANCELLED_SEARCH' }, permissions: { ask: ['WebSearch'] }, cancelBeforeApproval: true, approved: false },
     { name: 'fetch-allowed-rewritten', mode: 'default', call: { tool: 'WebFetch', url: 'https://original.example/page', prompt: 'OWNED_ORIGINAL_FETCH' }, permissions: { allow: ['WebFetch(domain:127.0.0.1)'] }, rewrite: true, approved: true },
     { name: 'search-ask-headless', mode: 'default', call: { tool: 'WebSearch', query: 'OWNED_ASK_SEARCH' }, permissions: { ask: ['WebSearch'] }, approved: false },
     { name: 'fetch-ask-headless', mode: 'default', call: { tool: 'WebFetch', url: page, prompt: 'OWNED_ASK_FETCH' }, permissions: { ask: ['WebFetch'] }, approved: false },
@@ -150,10 +157,16 @@ try {
       assert.equal(result.deny, undefined, phase + ' permitted by native path')
       assert.notEqual(result.isError, true, phase + ' successful typed tool result')
       if (test.call.tool === 'Bash') assert.ok(result.result?.stdout?.includes('OWNED_CLASSIFIER_MARKER'), 'real Bash prints selected-classifier marker')
-      if (test.call.tool === 'WebSearch') { assert.equal(result.result?.query, 'OWNED_REWRITTEN_SEARCH'); assert.ok(selected.some(row => row.search && row.rewrittenSearch)) }
+      if (test.call.tool === 'WebSearch') {
+        const expectedQuery = test.rewrite ? 'OWNED_REWRITTEN_SEARCH' : test.call.query
+        assert.equal(result.result?.query, expectedQuery, phase + ' returns the replacement result, not the native stopped result')
+        assert.ok(selected.some(row => row.search && row.searchQueryMarkers.includes(expectedQuery)))
+        assert.equal(JSON.stringify(result).includes('stopped this tool before execution'), false, phase + ' never leaks the original native result')
+      }
       if (test.call.tool === 'WebFetch') { assert.equal(result.result?.url, page); assert.equal(result.result?.result, 'OWNED_SELECTED_EXTRACTION'); if (!interactive) assert.ok(selected.some(row => row.rewrittenFetch)); assert.ok(requests.slice(start).some(row => row.page && row.path === '/rewritten')) }
     } else {
       assert.ok(result.deny || result.isError, phase + ' does not execute')
+      if (test.call.tool === 'WebSearch') assert.equal(result.result, undefined, phase + ' never returns a native or replacement search result')
       assert.equal(selected.length, 0, phase + ' sends no selected-provider request')
       assert.equal(requests.slice(start).some(row => row.page), false, phase + ' retrieves no page')
     }

@@ -192,9 +192,16 @@ session. Changes apply on the next search.
 Official OpenAI Responses, Anthropic Messages and Google endpoints have their own
 search contracts, checked when searching. Codex uses its subscription backend.
 Other compatible endpoints opt in with the model's `"webSearch": "native"`
-setting; `"off"` skips that provider's search. Domain filters and result limits
-are kept; a provider that cannot honor them hands the query to the next option.
-See the [provider research](docs/research/provider-web-search-20261016.md).
+setting; `"off"` skips that provider's search. A native route is skipped before
+its call whenever it cannot enforce a requested restriction, including Codex
+`maxUses` and blocked-domain filtering. The routed WebSearch applies an 8-use
+bound, so Codex uses a later tier for those requests. A valid empty result is
+terminal and does not trigger another service. `/rice-models doctor` and
+`/rice-models status` show the selected model's native eligibility and reasons,
+configured services in priority order, and whether the Claude fallback can be
+attempted. This metadata omits endpoint URLs and credential references; live
+Claude account access is verified only if that fallback is used. Safe debug
+messages identify the stage that answered. The same doctor/status object reserves `fetchTierState` for a pure fetch-state snapshot with ordered `tiers` containing `order`, `stage`, `eligible` and `reason`. Its assumed producer contract is `fetchTierState({ target, remote, configuredServices })`. Until the fetch implementation exposes that function, the field reports that fetch-tier diagnostics are unavailable; WebFetch itself is not disabled. See the [provider research](docs/research/provider-web-search-20261016.md).
 
 ## Provider setup
 
