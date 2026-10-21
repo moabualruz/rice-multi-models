@@ -129,4 +129,4 @@ Focused evidence on Claude Code 2.1.306:
   external inference or bypass the host classifier. This is not a passing permission
   proof; support for routed model ids in the host classifier is not documented here.
 
-The full `bun run check` gate has not passed for this 0.11.0 lane.
+The latest `bun run check` passed the unit suites (505 tests across 46 files), typecheck, hook typecheck, generated bundle check, Node runtime tests (31 passed), clean install, native activation (3 passed), routing, native adapter, compaction, tool parity, and permission proofs (7 cases). It then failed at `test:permission-mode`: the first three of four cases passed and the explicit child-auto case failed as described above. Search, evaluator, title proofs and the final `git diff --check` were not reached. The full gate has not passed for this 0.11.0 lane.

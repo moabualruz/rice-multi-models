@@ -624,7 +624,7 @@ test('configured provider ids resolve through the generic provider stepper', asy
   }
 })
 
-test('leaves exact custom agent frontmatter model resolution to Claude Code', async () => {
+test('routes the exact custom agent frontmatter model through agent.spawn', async () => {
   store.clear()
   await reload({ local: provider('qwen') })
   const name = 'local-review'
@@ -646,8 +646,8 @@ test('leaves exact custom agent frontmatter model resolution to Claude Code', as
       agents.push({ id: agentId, type: event.subagentType, description: event.description, status: 'running' })
       return { model: 'local/qwen', agentId }
     })
-    expect(received.model).toBeUndefined()
-    // The fixture's downstream response simulates host resolution; this test only proves the plugin leaves it untouched.
+    expect(received.model).toBe('local/qwen')
+    // The exact provider model in native frontmatter is forwarded to the host.
     expect(chosen.model).toBe('local/qwen')
     expect(approvalAskCount).toBe(asks)
     expect(store.size).toBe(0)
@@ -776,7 +776,7 @@ test("routed steps send the installed claude's tool definitions, and a subagent 
   const general = (await step('general-purpose', 'codex/gpt-6.1-sol'), wires.at(-1).req)
   // Exactly the engine's subagent prompt: no identity preamble, no environment or closing line added here.
   expect(general.system).toBe(`FIXTURE GENERAL PURPOSE PROMPT${FIXTURE_TAIL}`)
-  expect(general.tools.map((tool: any) => tool.name)).toEqual(['Read', 'Bash'])
+  expect(general.tools.map((tool: any) => tool.name)).toEqual(['Bash', 'Read'])
   const explore = (await step('Explore', 'codex/gpt-6.1-sol'), wires.at(-1).req)
   expect(explore.system).toBe(`FIXTURE EXPLORE PROMPT${FIXTURE_TAIL}`)
   // Explore is offered what the engine offers Explore.

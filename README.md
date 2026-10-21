@@ -29,8 +29,9 @@ companion [rice-session-accounts](https://github.com/moabualruz/rice-session-acc
 
 ## Install and start
 
-You need Claude Code (tested with 2.1.301 and 2.1.302) and Node.js 22 or newer
-on the PATH Claude Code starts with. Install from a terminal:
+You need Claude Code 2.1.301 or newer and Node.js 22 or newer on the PATH
+Claude Code starts with. CI tests 2.1.301 and 2.1.302; focused native proofs also
+run on 2.1.306. Install from a terminal:
 
 ```sh
 claude plugin install rice-multi-models --marketplace moabualruz/rice-mods
@@ -397,10 +398,11 @@ ordinary `claude` command.
 
 ## Requirements and platform scope
 
-Claude Code 2.1.301 or 2.1.302 (both checked in CI) and Node.js 22 or newer.
-Provider CLIs, accounts and keys depend on the providers you use; a declared local
-endpoint needs no Codex login. The compiled helper, its WebSocket library and the
-provider instruction asset are part of the plugin; nothing is installed at runtime.
+Claude Code 2.1.301 or newer and Node.js 22 or newer. CI tests Claude Code
+2.1.301 and 2.1.302; focused native proofs also run on 2.1.306. Provider CLIs,
+accounts and keys depend on the providers you use; a declared local endpoint needs
+no Codex login. The compiled helper, its WebSocket library and the provider
+instruction asset are part of the plugin; nothing is installed at runtime.
 
 macOS, Linux, WSL and native Windows are supported: Unix sockets or named pipes,
 native Windows paths and npm shims. WSL uses its Linux environment. Claude Code's
