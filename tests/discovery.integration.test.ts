@@ -2,6 +2,7 @@ import { beforeAll, expect, mock, test } from 'bun:test'
 import { fileURLToPath } from 'node:url'
 import { unknownMetadata, type ModelCatalogue } from '../hooks/catalogue'
 import { deriveTemplate, INSTRUCTIONS_MARK, SUMMARY_MARK } from '../hooks/native-compaction'
+import { markDescription } from '../hooks/agent-model'
 import { BODY_MARK, deriveCapture, MARKER_AGENT } from '../hooks/native-tools'
 
 const root = fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]$/, '')
@@ -825,4 +826,112 @@ test("without the installed claude's definitions a main step falls back and says
     host.tool.list = list
     toolCaptureFails = false
   }
+})
+
+// Exact model ids through the Agent tool's `model`: the engine's order is tool.call, its own check of the
+// argument against four values, then agent.spawn with the same tool_use_id.
+const ENGINE_MODELS = ['fable', 'haiku', 'opus', 'sonnet']
+type EngineRun = { result: any; spawned: any[]; checked: unknown[] }
+const agentCall = async (toolUseId: string, input: Record<string, unknown>, options: { spawnModelFrom?: (e: any) => string | undefined; fork?: boolean; skipSpawn?: boolean; parent?: string } = {}): Promise<EngineRun> => {
+  const spawned: any[] = []
+  const checked: unknown[] = []
+  const result = await hook('tool.call')(host, { tool: 'Agent', tool_use_id: toolUseId, description: 'fixture', prompt: 'fixture task', ...input }, async (e: any) => {
+    checked.push(e.model)
+    if (e.model !== undefined && !ENGINE_MODELS.includes(e.model)) return { error: `validation: ${e.model}` }
+    if (options.skipSpawn) return { result: 'abandoned' }
+    const outcome = await hook('agent.spawn')(host, { ...spawnInput(options.parent ?? 'codex/gpt-6.1-sol', (input['subagent_type'] as string | undefined) ?? 'general-purpose', e.model), tool_use_id: toolUseId, description: e.description, fork: options.fork ?? false }, async (s: any) => {
+      spawned.push(s)
+      return { model: s.model, agentId: `agent-${toolUseId}` }
+    })
+    spawned.push({ outcome })
+    return { result: outcome }
+  })
+  return { result, spawned, checked }
+}
+const describeAgent = async () => (await hook('tool.describe')(host, { tool: 'Agent', description: 'Engine Agent text.', provider: { plugin: 'engine', tier: 'core' } }, async (e: any) => ({ description: e.description }))).description as string
+
+test('an exact discovered id passed as Agent model runs the subagent on exactly that id', async () => {
+  await reload({ local: provider('qwen') }, { fast: { target: 'local/qwen' } })
+  for (const parent of ['codex/gpt-6.1-sol', 'sonnet']) {
+    for (const id of ['codex/gpt-6.1-sol', 'local/qwen', 'fast']) {
+      const run = await agentCall(`toolu_exact_${parent}_${id}`, { model: id }, { parent })
+      expect(run.checked).toEqual(['haiku'])
+      const received = run.spawned[0]
+      expect(received.model).toBe(id)
+      expect(run.spawned.at(-1).outcome.model).toBe(id)
+    }
+  }
+})
+
+test('an unknown id is denied visibly with the valid ids and starts nothing', async () => {
+  await reload({ local: provider('qwen') })
+  const run = await agentCall('toolu_unknown', { model: 'codex/gpt-9-imaginary' })
+  expect(run.checked).toEqual([])
+  expect(run.spawned).toEqual([])
+  expect(run.result.deny).toContain('"codex/gpt-9-imaginary"')
+  for (const valid of ['haiku', 'sonnet', 'opus', 'fable', 'codex/gpt-6.1-sol', 'local/qwen']) expect(run.result.deny).toContain(valid)
+})
+
+test('Claude aliases and an absent model behave as without the carrier, and an engine haiku is not a lost carrier', async () => {
+  await reload({ local: provider('qwen') })
+  for (const model of ['sonnet', 'opus', 'fable', 'haiku', undefined]) {
+    const run = await agentCall(`toolu_alias_${model}`, model === undefined ? {} : { model })
+    const plain = await spawn('codex/gpt-6.1-sol', 'general-purpose', model)
+    expect(run.result.deny).toBeUndefined()
+    expect(run.checked).toEqual([model])
+    expect(run.spawned[0].description).toBe('fixture')
+    expect(run.spawned[0].model).toBe(plain.received.model)
+  }
+})
+
+test('parallel calls keep their own ids and leave no record behind', async () => {
+  await reload({ local: provider('qwen') })
+  const [a, b, c] = await Promise.all([
+    agentCall('toolu_par_a', { model: 'codex/gpt-6.1-sol' }),
+    agentCall('toolu_par_b', { model: 'local/qwen' }),
+    agentCall('toolu_par_c', { model: 'sonnet' }),
+  ])
+  expect(a.spawned[0].model).toBe('codex/gpt-6.1-sol')
+  expect(b.spawned[0].model).toBe('local/qwen')
+  expect(c.spawned[0].model).toBe((await spawn('codex/gpt-6.1-sol', 'general-purpose', 'sonnet')).received.model)
+  expect(a.spawned[0].description).toBe('fixture')
+  const missing = await hook('agent.spawn')(host, { ...spawnInput('codex/gpt-6.1-sol', 'general-purpose', 'haiku'), tool_use_id: 'toolu_par_a', description: markDescription('fixture') }, async () => { throw new Error('must not start') })
+  expect(missing.deny).toContain('could not be recovered')
+})
+
+test('a marked spawn with no record is refused, never run as haiku', async () => {
+  let started = false
+  const refused = await hook('agent.spawn')(host, { ...spawnInput('codex/gpt-6.1-sol', 'general-purpose', 'haiku'), tool_use_id: 'toolu_lost', description: markDescription('fixture') }, async () => { started = true; return { model: 'haiku', agentId: 'x' } })
+  expect(started).toBe(false)
+  expect(refused.deny).toContain('not run as haiku')
+})
+
+test('the record is removed when the call ends without a spawn, and when the engine rejects it', async () => {
+  await reload({ local: provider('qwen') })
+  const abandoned = await agentCall('toolu_abandoned', { model: 'local/qwen' }, { skipSpawn: true })
+  expect(abandoned.spawned).toEqual([])
+  const late = await hook('agent.spawn')(host, { ...spawnInput('codex/gpt-6.1-sol', 'general-purpose', 'haiku'), tool_use_id: 'toolu_abandoned', description: markDescription('fixture') }, async () => ({ model: 'haiku', agentId: 'x' }))
+  expect(late.deny).toContain('could not be recovered')
+  const thrown = await hook('tool.call')(host, { tool: 'Agent', tool_use_id: 'toolu_thrown', model: 'local/qwen' }, async () => { throw new Error('engine failure') }).catch((error: unknown) => error)
+  expect(JSON.stringify(thrown)).toContain('Agent model could not be resolved')
+  const afterThrow = await hook('agent.spawn')(host, { ...spawnInput('codex/gpt-6.1-sol', 'general-purpose', 'haiku'), tool_use_id: 'toolu_thrown', description: markDescription('fixture') }, async () => ({ model: 'haiku', agentId: 'x' }))
+  expect(afterThrow.deny).toContain('could not be recovered')
+})
+
+test('a fork with an exact id is refused and consumes the record', async () => {
+  await reload({ local: provider('qwen') })
+  const run = await agentCall('toolu_fork', { model: 'local/qwen' }, { fork: true })
+  expect(run.spawned.at(-1).outcome.deny).toContain('fork')
+  expect(run.spawned.length).toBe(1)
+})
+
+test('the Agent tool description names the discovered ids, and only once', async () => {
+  await reload({ local: provider('qwen') })
+  const text = await describeAgent()
+  expect(text.startsWith('Engine Agent text.\n\n[rice-multi-models]')).toBe(true)
+  expect(text).toContain('codex/gpt-6.1-sol')
+  expect(text).toContain('local/qwen')
+  expect(text.match(/\[rice-multi-models\]/g)?.length).toBe(1)
+  await reload({})
+  expect(await describeAgent()).toContain('codex/gpt-6.1-sol')
 })

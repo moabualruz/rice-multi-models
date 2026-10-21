@@ -13,7 +13,7 @@ declare module 'claude-code' {
       /** The main transcript's file, as the engine's classic hooks name it (a compaction summary cites it). */
       transcript: { path: string | null }
       /** Exact Agent model ids awaiting their agent.spawn, by tool_use_id (see hooks/agent-model.ts). */
-      'agent-model-carrier': { entries: readonly { toolUseId: string; kind: 'exact' | 'engine'; at: number; id?: string }[] }
+      'agent-model-carrier': { entries: readonly { toolUseId: string; kind: 'exact'; at: number; id: string }[] }
     }
   }
 }

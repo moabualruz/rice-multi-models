@@ -3,8 +3,9 @@
 // The engine accepts only `fable`, `haiku`, `opus` and `sonnet` there, and checks the argument after the plugin's
 // `tool.call` hook ran. The hook sees the raw argument first, so a call naming an exact id this session can run
 // is carried: `tool.call` records the id under the call's tool_use_id and hands the engine a valid value
-// (CARRIER_VALUE); `agent.spawn` takes the id back and the subagent runs on exactly that id. The carrier value is
-// never a tier request: a spawn that carries it with no record is refused, not run. Pure: state in and out.
+// (CARRIER_VALUE) and marks the description with an invisible suffix; `agent.spawn` takes the id back, removes the
+// mark and the subagent runs on exactly that id. A marked spawn with no record is refused, never run as the carrier's
+// tier (an unmarked `haiku` is the engine's own request and passes). Pure: state in and out.
 import type { ModelCatalogue } from './catalogue'
 import { NATIVE_ALIASES } from './family'
 import type { Loaded } from './providers'
@@ -13,6 +14,12 @@ export const AGENT_TOOL = 'Agent'
 /** A value of the engine's own enum that stands in for the exact id while the engine checks the call. */
 export const CARRIER_VALUE = 'haiku'
 const PLUGIN = 'rice-multi-models'
+/** Invisible separators that end the description of a carried call, so a lost record is told from a real `haiku`. */
+export const CARRIER_MARK = '\u2063\u2062'
+export const markDescription = (description: unknown): string => `${typeof description === 'string' ? description : ''}${CARRIER_MARK}`
+export function unmarkDescription(description: string): { text: string; marked: boolean } {
+  return description.endsWith(CARRIER_MARK) ? { text: description.slice(0, -CARRIER_MARK.length), marked: true } : { text: description, marked: false }
+}
 /** Records kept per session; calls remove their own, so only abandoned ones (a hot reload) ever reach this. */
 const MAX_ENTRIES = 128
 const DENIAL_LIST_LIMIT = 60
@@ -21,8 +28,8 @@ const DESCRIPTION_LIST_LIMIT = 30
 export const SCHEMA_ENUM_LIMIT = 200
 export const DESCRIPTION_MARK = `[${PLUGIN}] The model parameter also takes`
 
-/** What a call recorded: an exact id to run, or the engine's own carrier-valued request (so a missing record is told apart). */
-export type CarrierEntry = { toolUseId: string; kind: 'exact' | 'engine'; at: number; id?: string }
+/** What a call recorded: the exact id its spawn runs. */
+export type CarrierEntry = { toolUseId: string; kind: 'exact'; at: number; id: string }
 export type CarrierState = { readonly entries: readonly CarrierEntry[] }
 export const emptyCarrier: CarrierState = { entries: [] }
 
@@ -43,7 +50,6 @@ export function exactModelIds(catalogue: ModelCatalogue, loaded: Loaded): string
 
 export type CallVerdict =
   | { kind: 'pass' }
-  | { kind: 'engine' }
   | { kind: 'carry'; id: string }
   | { kind: 'deny'; reason: string }
 
@@ -52,7 +58,7 @@ const listed = (ids: readonly string[], limit: number): string => ids.length <= 
 /** What a raw Agent `model` argument asks for. */
 export function classifyCall(model: unknown, ids: readonly string[]): CallVerdict {
   if (typeof model !== 'string' || model === '') return { kind: 'pass' }
-  if ((NATIVE_ALIASES as readonly string[]).includes(model)) return model === CARRIER_VALUE ? { kind: 'engine' } : { kind: 'pass' }
+  if ((NATIVE_ALIASES as readonly string[]).includes(model)) return { kind: 'pass' }
   if (ids.includes(model)) return { kind: 'carry', id: model }
   const valid = [...NATIVE_ALIASES, ...ids]
   return { kind: 'deny', reason: `${PLUGIN}: Agent model "${model}" is not a model this session can run, so no subagent was started. Valid values: ${listed(valid, DENIAL_LIST_LIMIT)}.` }
@@ -77,12 +83,12 @@ export type SpawnPick = { requested: string | undefined; exact?: string } | { de
  * The `model` a spawn decides from. An exact record wins; a carrier-valued spawn with no record is refused (it
  * would otherwise run as the carrier's tier); a fork inherits its parent, so an exact id on one is refused.
  */
-export function pickRequested(entry: CarrierEntry | undefined, model: string | undefined, fork: boolean): SpawnPick {
-  if (entry?.kind === 'exact' && entry.id !== undefined) {
+export function pickRequested(entry: CarrierEntry | undefined, model: string | undefined, fork: boolean, marked: boolean): SpawnPick {
+  if (entry !== undefined) {
     if (fork) return { deny: `${PLUGIN}: a fork runs on its parent's model, so the Agent model "${entry.id}" cannot be applied; name a subagent_type to run on it. No subagent was started.` }
     return { requested: entry.id, exact: entry.id }
   }
-  if (entry === undefined && model === CARRIER_VALUE && !fork) {
+  if (marked && model === CARRIER_VALUE) {
     return { deny: `${PLUGIN}: this Agent call's exact model could not be recovered (no record for it), so it was not run as ${CARRIER_VALUE}. Retry, or choose a model with agent frontmatter. No subagent was started.` }
   }
   return { requested: model }

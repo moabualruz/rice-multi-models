@@ -5,7 +5,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, ModelCompleteResult, ModelUsage, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
-import { AGENT_TOOL, CARRIER_VALUE, classifyCall, emptyCarrier, entryOf, exactModelIds, forgetEntry, pickRequested, recordEntry, withDescriptionSuffix } from './agent-model'
+import { AGENT_TOOL, CARRIER_VALUE, classifyCall, emptyCarrier, entryOf, exactModelIds, forgetEntry, markDescription, pickRequested, recordEntry, unmarkDescription, withDescriptionSuffix } from './agent-model'
 import { BUILTIN_AGENTS, HANDBACK_TOOL, identityLine, isFork, toolFilter } from './agents'
 import type { AgentDef } from './agents'
 import { anchoredEstimate, reportedInput } from './budget'
@@ -582,7 +582,7 @@ async function stepOwnerModel($: EngineInterface, e: TurnStepInput): Promise<str
   return stepModel(e.model, owner, explicitClaude, tiers(), familyPorts)
 }
 
-type AgentCallInput = { tool_use_id: string; model?: unknown }
+type AgentCallInput = { tool_use_id: string; model?: unknown; description?: unknown }
 
 /**
  * An Agent call's `model`, seen before the engine checks it: an exact id this session can run is recorded under the
@@ -594,10 +594,10 @@ async function agentCall<E extends AgentCallInput, R>($: EngineInterface, e: E, 
   if (verdict.kind === 'deny') return { deny: verdict.reason }
   if (verdict.kind === 'pass') return next(e)
   if (!e.tool_use_id) return { deny: `${PLUGIN}: this Agent call carries no tool_use_id, so its model cannot be carried to the spawn; no subagent was started` }
-  const entry = { toolUseId: e.tool_use_id, kind: verdict.kind === 'carry' ? 'exact' as const : 'engine' as const, at: Date.now(), ...(verdict.kind === 'carry' ? { id: verdict.id } : {}) }
+  const entry = { toolUseId: e.tool_use_id, kind: 'exact' as const, at: Date.now(), id: verdict.id }
   await update($, carrierAtom, state => recordEntry(state, entry))
   try {
-    return await next(verdict.kind === 'carry' ? { ...e, model: CARRIER_VALUE } : e)
+    return await next({ ...e, model: CARRIER_VALUE, description: markDescription(e.description) })
   } finally {
     await update($, carrierAtom, state => forgetEntry(state, e.tool_use_id))
   }
@@ -1523,7 +1523,8 @@ export const register: Register = on => {
 
   on('agent.spawn', async ($, e, next) => {
     if (e.resume || e.workflow) return next(e)
-    const picked = pickRequested(await takeCarried($, e.tool_use_id), e.model, e.fork)
+    const description = unmarkDescription(e.description)
+    const picked = pickRequested(await takeCarried($, e.tool_use_id), e.model, e.fork, description.marked)
     if ('deny' in picked) return { deny: picked.deny }
     const definition = e.fork ? undefined : registered.get(e.subagentType) ?? await definitionOf(promptsPort($), memory, e.subagentType)
     // The engine reports a parent's own model, which for a remapped loop (an
@@ -1534,7 +1535,8 @@ export const register: Register = on => {
     const decision = spawnDecision({ parentModel, requested: picked.requested, definitionModel: definition?.model, fork: e.fork }, tiers(), familyPorts)
     $.ui.log(`${PLUGIN}: spawn ${e.subagentType} from ${parentModel}: ${decision.model ?? 'native resolution'} (${decision.reason})`, { to: 'debug' })
     if (picked.exact !== undefined && decision.model !== picked.exact) return { deny: `${PLUGIN}: Agent model ${picked.exact} cannot be run by this session (${decision.reason}); no subagent was started` }
-    const result = await next(decision.model !== undefined && decision.model !== e.model ? { ...e, model: decision.model } : e)
+    const restored = description.marked ? { ...e, description: description.text } : e
+    const result = await next(decision.model !== undefined && decision.model !== e.model ? { ...restored, model: decision.model } : restored)
     if (picked.exact !== undefined && result.model !== picked.exact) $.ui.log(`${PLUGIN}: Agent model ${picked.exact} was requested but the subagent started on ${result.model}`, { to: 'transcript' })
     if (result.agentId) {
       setCapped(spawnDecisions, result.agentId, decision)

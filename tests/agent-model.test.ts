@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { CARRIER_VALUE, classifyCall, descriptionSuffix, emptyCarrier, entryOf, exactModelIds, forgetEntry, pickRequested, recordEntry, SCHEMA_ENUM_LIMIT, widenAgentSchema, withDescriptionSuffix } from '../hooks/agent-model'
+import { CARRIER_VALUE, classifyCall, markDescription, unmarkDescription, descriptionSuffix, emptyCarrier, entryOf, exactModelIds, forgetEntry, pickRequested, recordEntry, SCHEMA_ENUM_LIMIT, widenAgentSchema, withDescriptionSuffix } from '../hooks/agent-model'
 import { unknownMetadata } from '../hooks/catalogue'
 import type { ModelCatalogue } from '../hooks/catalogue'
 import { remoteTools } from '../hooks/tools'
@@ -30,7 +30,7 @@ test('a call is classified before the engine checks it', () => {
   expect(classifyCall(undefined, ids)).toEqual({ kind: 'pass' })
   expect(classifyCall('sonnet', ids)).toEqual({ kind: 'pass' })
   expect(classifyCall(7, ids)).toEqual({ kind: 'pass' })
-  expect(classifyCall(CARRIER_VALUE, ids)).toEqual({ kind: 'engine' })
+  expect(classifyCall(CARRIER_VALUE, ids)).toEqual({ kind: 'pass' })
   expect(classifyCall('codex/gpt-6.1-sol', ids)).toEqual({ kind: 'carry', id: 'codex/gpt-6.1-sol' })
   expect(classifyCall('fast', ids)).toEqual({ kind: 'carry', id: 'fast' })
 })
@@ -54,7 +54,6 @@ test('the carrier records, consumes and forgets by tool_use_id, and parallel cal
   let state = emptyCarrier
   state = recordEntry(state, { toolUseId: 'toolu_a', kind: 'exact', id: 'codex/gpt-6.1-sol', at: 1 })
   state = recordEntry(state, { toolUseId: 'toolu_b', kind: 'exact', id: 'codex/gpt-6-luna', at: 2 })
-  state = recordEntry(state, { toolUseId: 'toolu_c', kind: 'engine', at: 3 })
   expect(entryOf(state, 'toolu_a')?.id).toBe('codex/gpt-6.1-sol')
   expect(entryOf(state, 'toolu_b')?.id).toBe('codex/gpt-6-luna')
   expect(entryOf(state, 'toolu_missing')).toBeUndefined()
@@ -76,17 +75,25 @@ test('abandoned records are bounded', () => {
   expect(entryOf(state, 'toolu_0')).toBeUndefined()
 })
 
-test('a spawn restores the exact id, refuses a missing record and refuses a fork', () => {
-  expect(pickRequested({ toolUseId: 't', kind: 'exact', id: 'codex/gpt-6-luna', at: 1 }, CARRIER_VALUE, false)).toEqual({ requested: 'codex/gpt-6-luna', exact: 'codex/gpt-6-luna' })
-  const missing = pickRequested(undefined, CARRIER_VALUE, false)
+test('a spawn restores the exact id, refuses a marked spawn with no record and refuses a fork', () => {
+  const entry = { toolUseId: 't', kind: 'exact' as const, id: 'codex/gpt-6-luna', at: 1 }
+  expect(pickRequested(entry, CARRIER_VALUE, false, true)).toEqual({ requested: 'codex/gpt-6-luna', exact: 'codex/gpt-6-luna' })
+  const missing = pickRequested(undefined, CARRIER_VALUE, false, true)
   expect('deny' in missing && missing.deny).toContain('could not be recovered')
   expect('deny' in missing && missing.deny).toContain('not run as haiku')
-  expect(pickRequested({ toolUseId: 't', kind: 'engine', at: 1 }, CARRIER_VALUE, false)).toEqual({ requested: CARRIER_VALUE })
-  expect(pickRequested(undefined, 'sonnet', false)).toEqual({ requested: 'sonnet' })
-  expect(pickRequested(undefined, undefined, false)).toEqual({ requested: undefined })
-  expect(pickRequested(undefined, CARRIER_VALUE, true)).toEqual({ requested: CARRIER_VALUE })
-  const fork = pickRequested({ toolUseId: 't', kind: 'exact', id: 'codex/gpt-6-luna', at: 1 }, CARRIER_VALUE, true)
+  // An unmarked haiku is the engine's own request.
+  expect(pickRequested(undefined, CARRIER_VALUE, false, false)).toEqual({ requested: CARRIER_VALUE })
+  expect(pickRequested(undefined, 'sonnet', false, false)).toEqual({ requested: 'sonnet' })
+  expect(pickRequested(undefined, undefined, false, false)).toEqual({ requested: undefined })
+  const fork = pickRequested(entry, CARRIER_VALUE, true, true)
   expect('deny' in fork && fork.deny).toContain('fork')
+})
+
+test('the description mark is invisible, removable and absent from other text', () => {
+  const marked = markDescription('Fix the bug')
+  expect(unmarkDescription(marked)).toEqual({ text: 'Fix the bug', marked: true })
+  expect(unmarkDescription('Fix the bug')).toEqual({ text: 'Fix the bug', marked: false })
+  expect(unmarkDescription(markDescription(undefined))).toEqual({ text: '', marked: true })
 })
 
 const agentSchema = { type: 'object', properties: { description: { type: 'string' }, model: { type: 'string', enum: ['sonnet', 'opus', 'haiku', 'fable'], description: 'engine text' } }, required: ['description'] }
