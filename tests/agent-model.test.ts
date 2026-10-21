@@ -119,7 +119,7 @@ test('the description gets one short suffix derived from the ids, once', () => {
   expect(text.startsWith('Engine text.\n\n[rice-multi-models]')).toBe(true)
   for (const id of ids) expect(text).toContain(id)
   expect(withDescriptionSuffix(text, ids)).toBe(text)
-  expect(/[–—]/.test(text)).toBe(false)
+  expect(new RegExp('[\\u2013\\u2014]').test(text)).toBe(false)
   const many = descriptionSuffix(Array.from({ length: 80 }, (_, index) => `p/m${index}`))
   expect(many).toContain('and 50 more')
 })
