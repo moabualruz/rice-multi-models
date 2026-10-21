@@ -1,6 +1,6 @@
 import type { Target } from '../../hooks/config.ts'
 import type { WebSearch, StepEvent, StepWire } from '../../hooks/protocol.ts'
-import { splitTarget } from '../../hooks/protocol.ts'
+import { nativeSearchDecision } from '../../hooks/web-search-tier.ts'
 import { createKeys } from '../styx/auth.ts'
 import { runCommand } from '../core/subprocess.ts'
 import { searchRecords, SearchUnavailable } from './endpoints.ts'
@@ -10,17 +10,7 @@ const keys = createKeys(runCommand, Date.now)
 
 /** A compatible inference API alone never establishes hosted search support. */
 export function providerSearch(target: string, remote: Remote | undefined, restrictions: WebSearch): 'hosted' | 'ollama' | undefined {
-  if (!remote) return splitTarget(target)?.provider === 'codex' && !restrictions.blockedDomains?.length ? 'hosted' : undefined
-  if (remote.model.webSearch === 'off') return undefined
-  const url = new URL(remote.provider.baseUrl)
-  if (url.origin === 'https://ollama.com' && remote.provider.auth !== 'none') return 'ollama'
-  const kind = remote.model.kind
-  if (!['responses', 'anthropic', 'gemini'].includes(kind)) return undefined
-  if (kind === 'gemini' && (restrictions.maxUses !== undefined || restrictions.allowedDomains?.length || restrictions.blockedDomains?.length || restrictions.location)) return undefined
-  if (remote.model.webSearch === 'native') return 'hosted'
-  return kind === 'responses' && url.origin === 'https://api.openai.com'
-    || kind === 'anthropic' && url.origin === 'https://api.anthropic.com'
-    || kind === 'gemini' && url.origin === 'https://generativelanguage.googleapis.com' ? 'hosted' : undefined
+  return nativeSearchDecision(target, remote, restrictions).method
 }
 
 /** Ollama local inference never borrows a cloud key. Only this selected cloud account can search. */

@@ -49,6 +49,8 @@ import { commandText, detectRuntime as probeRuntime, helperFile, setupSummary, s
 import type { PickerResult, Runtime } from './setup'
 import { searchConfigurationCommand } from './search-config'
 import type { SearchConfigurationResult, SearchEdit } from './search-config'
+import { webSearchStatus } from './web-search-status'
+import { DEFAULT_WEB_SEARCH_MAX_USES } from './web-search-tier'
 import { runNativeSearch } from './native-search'
 import type { ToolSearchOutcome } from '../helper/search/tool-search'
 import { createToolGate } from './tool-gate'
@@ -1012,6 +1014,7 @@ async function statusText($: EngineInterface): Promise<string> {
       ? `Tool definitions and agent prompts: Claude Code's own, read from the installed claude ${tools.version} (built-in agent types ${tools.agentTypes.join(', ') || 'none'}); a tool it did not show (MCP, or interactive only) uses ${table}.`
       : `Tool definitions and agent prompts: ${tools.error === 'not read yet' ? 'not read from the installed claude yet' : `the installed claude's could not be read (${tools.error})`}; built-in tools use ${table}, and a routed subagent step is refused until they are read.`,
     limitsText() ? `ChatGPT limits: ${limitsText()}` : 'ChatGPT limits: shown after the first WebSocket request',
+    `Web search: ${JSON.stringify(await currentWebSearchStatus($))}`,
     lastStep ? `last step: ${lastStep.model} for ${lastStep.who}, ${lastStep.ms} ms over ${lastStep.transport}` : 'no routed step yet',
     ...memory.notes.slice(-5),
   ]
@@ -1092,6 +1095,7 @@ async function discoveryStatus($: EngineInterface): Promise<Record<string, unkno
     nativeContext: await nativeContextStatus($),
     toolSchemaVersion: STAMP.engineVersion,
     toolDefinitions: await toolDefinitionsState($),
+    webSearch: await currentWebSearchStatus($),
     currentEngineVersion: version.version,
     limits: limitsReport(limits, limitsObservedAt),
     lastStep: lastStep ? { model: lastStep.model, who: lastStep.who, durationMs: lastStep.ms, transport: lastStep.transport } : null,
@@ -1131,11 +1135,28 @@ async function setupCommand($: EngineInterface, action: string | undefined): Pro
   return setupSummary(runtime, await syncPicker($, runtime, rows), rows.length, defaultModel('codex'))
 }
 
+async function readSearchConfiguration($: EngineInterface, checked: Runtime, edit?: SearchEdit): Promise<SearchConfigurationResult> {
+  if (checked.error || !checked.executable) return { ok: false, error: 'Search configuration is unavailable until the local helper is ready.' }
+  const configDir = (await $.env.get('CLAUDE_CONFIG_DIR')) || `${checked.info?.home || (await $.env.get('USERPROFILE')) || (await $.env.get('HOME')) || ''}/.claude`
+  try {
+    const result = await $.process.run([checked.executable, helperFile($.plugin.root), 'search-config'], { stdin: JSON.stringify({ configDir, ...(edit ? { edit } : {}) }), timeoutMs: 10_000 })
+    const parsed: SearchConfigurationResult = JSON.parse(result.stdout)
+    return typeof parsed.ok === 'boolean' ? parsed : { ok: false, error: 'Search configuration helper returned an invalid result.' }
+  } catch { return { ok: false, error: 'Search configuration helper did not complete.' } }
+}
+
+async function currentWebSearchStatus($: EngineInterface, checked: Runtime = runtime) {
+  const model = await $.session.model()
+  const search = await readSearchConfiguration($, checked)
+  const config = search.config ?? { version: 1 as const, endpoints: [] }
+  return webSearchStatus(model, remoteOf(loaded, model), config, await $.env.get('RICE_MULTI_MODELS_SEARCH_URL'), search.ok)
+}
+
 /** Pure diagnostics: no startup, settings write, install, network request, login or approval. */
 async function doctorCommand($: EngineInterface): Promise<string> {
   const checked = await detectRuntime($)
   return JSON.stringify({ runtime: checked.info || { node: { executable: checked.executable, version: checked.version } }, error: checked.error || null,
-    integration: { kind: 'public plugin hooks', start: 'claude', compaction: 'session.compact', toolDefinitions: await toolDefinitionsState($), search: await searchCommand($, ''), legacySearchConfigured: !!await $.env.get('RICE_MULTI_MODELS_SEARCH_URL') },
+    integration: { kind: 'public plugin hooks', start: 'claude', compaction: 'session.compact', toolDefinitions: await toolDefinitionsState($), webSearch: await currentWebSearchStatus($, checked) },
     actions: checked.error ? ['/rice-models setup repair'] : ['/rice-models setup repair', ...(!checked.info?.auth.codex ? ['codex login', ...(!checked.info?.clis.codex ? ['/rice-models setup codex'] : [])] : [])] }, null, 2)
 }
 
@@ -1187,15 +1208,7 @@ async function opencodeCommand($: EngineInterface, words: readonly string[]): Pr
 async function searchCommand($: EngineInterface, args: string): Promise<string> {
   const checked = await detectRuntime($)
   if (checked.error || !checked.executable) return setupSummary(checked)
-  const configDir = (await $.env.get('CLAUDE_CONFIG_DIR')) || `${checked.info?.home || (await $.env.get('USERPROFILE')) || (await $.env.get('HOME')) || ''}/.claude`
-  const configuration = async (edit?: SearchEdit): Promise<SearchConfigurationResult> => {
-    try {
-      const result = await $.process.run([checked.executable!, helperFile($.plugin.root), 'search-config'], { stdin: JSON.stringify({ configDir, ...(edit ? { edit } : {}) }), timeoutMs: 10_000 })
-      const parsed: SearchConfigurationResult = JSON.parse(result.stdout)
-      return typeof parsed.ok === 'boolean' ? parsed : { ok: false, error: 'Search configuration helper returned an invalid result.' }
-    } catch { return { ok: false, error: 'Search configuration helper did not complete. Check /rice-models doctor.' } }
-  }
-  return searchConfigurationCommand(args, { read: () => configuration(), edit: edit => configuration(edit), ask: (question, options) => $.ui.ask(question, options) })
+  return searchConfigurationCommand(args, { read: () => readSearchConfiguration($, checked), edit: edit => readSearchConfiguration($, checked, edit), ask: (question, options) => $.ui.ask(question, options) })
 }
 
 async function runCommand($: EngineInterface, args: string): Promise<string> {
@@ -1438,10 +1451,10 @@ export const register: Register = on => {
     try {
       const nativeResult = await next(e)
       const gate = await webToolGate.finish(ticket, nativeResult, (question, options) => $.ui.ask(question, options), next.signal)
-      if (!gate.approved) return gate.reason ? { deny: gate.reason } : nativeResult
+      if (!gate.approved) return { deny: gate.reason ?? `${PLUGIN}: the native web tool did not produce an approved replacement; its result was not used` }
       next.signal.throwIfAborted()
       const model = e.agentId === undefined ? await $.session.model() : agentModels.get(e.agentId)
-      if (!model || !isRouted(model)) return { deny: `${PLUGIN}: the conversation model changed during web-tool approval; retry the action` }
+      if (model !== initialModel || !model || !isRouted(model)) return { deny: `${PLUGIN}: the conversation model changed during web-tool approval; retry the action` }
       const remote = targetOf(model)?.remote
       const refused = remote ? await approval($, remote) : undefined
       if (refused) return { deny: refused }
@@ -1450,15 +1463,20 @@ export const register: Register = on => {
       const mode = e.tool === 'WebSearch' ? 'tool-search' : 'web-fetch'
       const input = gate.input as Omit<PublicWebFetchInput, 'wire'> | PublicWebSearchInput
       const run = await $.process.run([runtime.executable, helperFile($.plugin.root), mode], {
-        stdin: JSON.stringify({ ...input, wire, ...(mode === 'tool-search' ? { maxUses: 8 } : {}) }), timeoutMs: 120_000,
+        stdin: JSON.stringify({ ...input, wire, ...(mode === 'tool-search' ? { maxUses: DEFAULT_WEB_SEARCH_MAX_USES } : {}) }), timeoutMs: 120_000,
       })
       next.signal.throwIfAborted()
       if (run.exitCode !== 0 || run.isStdoutTruncated) return { deny: `${PLUGIN}: ${e.tool} did not complete with the selected provider; inspect /rice-models doctor` }
       if (mode === 'web-fetch') return { result: JSON.parse(run.stdout) as PublicWebFetchResult }
       const outcome = JSON.parse(run.stdout) as ToolSearchOutcome
-      if (outcome.kind === 'answered') return { result: outcome.result }
+      if (outcome.kind === 'answered') {
+        $.ui.log(`${PLUGIN}: WebSearch answered via ${outcome.stage}`, { to: 'debug' })
+        return { result: outcome.result }
+      }
       if (outcome.kind !== 'native-fallback' || !outcome.request) return { deny: `${PLUGIN}: invalid web search helper response` }
-      return { result: await runNativeSearch(outcome.request, { authorize: () => $.session.authorize(), fetch: (url, init) => $.http.fetch(url, init) }, next.signal) }
+      const result = await runNativeSearch(outcome.request, { authorize: () => $.session.authorize(), fetch: (url, init) => $.http.fetch(url, init) }, next.signal)
+      $.ui.log(`${PLUGIN}: WebSearch answered via ${outcome.stage}`, { to: 'debug' })
+      return { result }
     } finally { webToolGate.end(ticket); toolModes.delete(e.tool_use_id) }
   }).catch(() => ({ deny: `${PLUGIN}: the web tool failed; no action was approved or replayed automatically` }))
 
