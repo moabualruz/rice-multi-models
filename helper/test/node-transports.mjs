@@ -21,7 +21,6 @@ const fixtureModule = join(scratch, 'transports.mjs')
 await build({
   absWorkingDir: root, stdin: { contents: [
     "export { codexStep } from './helper/codex.ts'",
-    "export { harnessStep } from './helper/harness.ts'",
     "export { CodexSocket, SocketPool } from './helper/socket.ts'",
     "export { crc32, frameReader } from './helper/styx/codecs/eventstream.ts'",
     "export { runCommand } from './helper/core/subprocess.ts'",
@@ -216,33 +215,6 @@ for (const cancellation of ['abort', 'abandon']) {
     }
   })
 }
-
-test('release broken stdout aborts and reaps its detached worker before helper exit', { skip: process.platform === 'win32' }, async () => {
-  const workerScript = 'setInterval(() => process.stdout.write(JSON.stringify({type:"thought",data:String(process.pid)})+"\\n"),25)'
-  const driver = `const cp=require('node:child_process'); const original=cp.spawn; cp.spawn=(_command,_args,options)=>original(process.execPath,['-e',${JSON.stringify(workerScript)}],options); require('node:module').syncBuiltinESMExports(); process.argv=[process.execPath,${JSON.stringify(release)},'once']; import(require('node:url').pathToFileURL(${JSON.stringify(release)}).href);`
-  const helper = spawn(process.execPath, ['-e', driver], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, HOME: scratch, PATH: '' } })
-  const exited = once(helper, 'exit', { signal: AbortSignal.timeout(5000) })
-  const lines = createInterface({ input: helper.stdout })
-  let workerPid
-  try {
-    helper.stdin.end(JSON.stringify({ req: { ...req, target: 'grok/test', cwd: scratch }, configText: '', approved: [] }))
-    const [line] = await once(lines, 'line', { signal: AbortSignal.timeout(4000) })
-    const event = JSON.parse(line)
-    assert.equal(event.type, 'thinking')
-    workerPid = Number(event.text)
-    assert.ok(workerPid > 0)
-    lines.close()
-    helper.stdout.destroy()
-    const [code, signal] = await exited
-    assert.equal(signal, null)
-    assert.equal(code, 1)
-    assert.throws(() => process.kill(workerPid, 0), error => error.code === 'ESRCH')
-  } finally {
-    lines.close()
-    if (helper.exitCode === null && helper.signalCode === null) helper.kill('SIGKILL')
-    if (workerPid) runtime.terminateProcessTree(workerPid, { signal: 'SIGKILL' })
-  }
-})
 
 test('portable CRC32 matches AWS IEEE framing and rejects corrupt frames', () => {
   assert.equal(runtime.crc32(Buffer.from('123456789')), 0xcbf43926)

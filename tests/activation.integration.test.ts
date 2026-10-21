@@ -285,10 +285,9 @@ test('native window accepts maximum-only metadata but does not infer missing or 
 })
 
 test('native context requires fresh native-provider metadata for the exact selected model', async () => {
-  for (const kind of ['unavailable', 'worker', 'unknown']) {
+  for (const kind of ['unavailable', 'unknown']) {
     const f = contextFixture()
     if (kind === 'unavailable') f.discovery.catalogue.providers[0]!.status = 'unavailable'
-    if (kind === 'worker') f.discovery.catalogue.models[0]!.execution = 'CLI worker'
     if (kind === 'unknown') f.selection.model = 'codex/undiscovered'
     await startContext(f)
     expect(f.contextWrites).toEqual([])

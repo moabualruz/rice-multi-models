@@ -57,7 +57,7 @@ try {
   source = source.replace('export const register: Register = on => {', `let proofNative = 0
 const proofTargets: string[] = []
 export const register: Register = on => {`)
-  source = source.replace('    const started = await next(e)', `    await $.state.set({ plugin: 'rice-multi-models', key: 'prefs' }, { effort: null, transport: 'auto', helper: 'once', workers: 'read' })
+  source = source.replace('    const started = await next(e)', `    await $.state.set({ plugin: 'rice-multi-models', key: 'prefs' }, { effort: null, transport: 'auto', helper: 'once' })
     const started = await next(e)`)
   const close = source.lastIndexOf('\n}')
   source = source.slice(0, close) + `

@@ -13,10 +13,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { build } from 'esbuild'
 
 const root = fileURLToPath(new URL('../', import.meta.url)), fixture = realpathSync(mkdtempSync(join(tmpdir(), 'rice-public-evaluators-')))
-const plugin = join(fixture, 'plugin'), controller = join(fixture, 'controller'), rewriter = join(fixture, 'rewriter'), config = join(fixture, '.claude')
-const evidence = join(fixture, 'evidence.txt'), commands = join(fixture, 'commands.jsonl'), results = join(fixture, 'results.jsonl')
+const plugin = join(fixture, 'plugin'), controller = join(fixture, 'controller'), config = join(fixture, '.claude')
+const commands = join(fixture, 'commands.jsonl'), results = join(fixture, 'results.jsonl'), agentTypes = join(fixture, 'agent-types.json')
 const excludedMarker = join(fixture, 'excluded-command-ran'), sourceCheck = join(fixture, 'effective-sources.json')
-const tasks = join(fixture, 'evaluator-tasks.json')
 const native = process.env.RICE_CLAUDE_EXECUTABLE || 'claude'
 const observations = [], receipts = []
 let mode = 'allow', scenario = 'prompt-allow', child
@@ -28,20 +27,12 @@ const server = createServer(async (request, response) => {
     response.writeHead(429, { 'content-type': 'application/json', 'x-should-retry': 'false' })
     response.end('{"error":{"type":"rate_limit_error","message":"Owned Claude subscription exhausted"}}'); return
   }
-  const permission = body.messages?.some(row => row.role === 'system' && row.content.includes('Judge one pending tool action'))
-  const agent = body.tools?.some(tool => tool.function.name === 'Read')
-  const hasEvidence = body.messages?.some(row => row.role === 'tool' && JSON.stringify(row.content).includes('OWNED_AGENT_FILE'))
   const continued = JSON.stringify(body.messages).includes('\\"stop_hook_active\\":true') || JSON.stringify(body.messages).includes('"stop_hook_active":true')
-  const ownAgentPrompt = body.messages?.some(row => row.role === 'system' && row.content.includes('You verify one configured hook condition.')) ?? false
-  const finalRegisteredPrompt = body.messages?.some(row => row.role === 'system' && row.content.includes('OWNED_FINAL_REGISTERED_AGENT_PROMPT')) ?? false
-  observations.push({ mode, scenario, stage: permission ? 'permission' : agent ? 'agent' : 'prompt', model: body.model, hasEvidence, ...(agent ? { ownAgentPrompt, finalRegisteredPrompt } : {}) })
-  const verdict = JSON.stringify({ ok: agent || mode === 'allow' || continued, reason: agent ? 'Verified owned file' : 'OWNED_STOP_BLOCK' })
-  const content = permission ? JSON.stringify({ decision: 'allow', reason: 'The fixture explicitly authorizes this owned verification.' }) : verdict
-  const call = agent && !hasEvidence ? { id: 'owned_read', type: 'function', function: { name: 'Read', arguments: JSON.stringify({ file_path: evidence }) } }
-    : agent && mode === 'block' ? { id: 'owned_handback', type: 'function', function: { name: 'SubagentHandback', arguments: JSON.stringify({ message: verdict }) } } : undefined
+  observations.push({ mode, scenario, stage: 'prompt', model: body.model })
+  const content = JSON.stringify({ ok: mode === 'allow' || continued, reason: 'OWNED_STOP_BLOCK' })
   response.writeHead(200, { 'content-type': 'text/event-stream' })
-  response.write('data: ' + JSON.stringify({ choices: [{ index: 0, delta: call ? { tool_calls: [{ index: 0, ...call }] } : { content } }] }) + '\n\n')
-  response.end('data: ' + JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: call ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 20, completion_tokens: 10 } }) + '\n\ndata: [DONE]\n\n')
+  response.write('data: ' + JSON.stringify({ choices: [{ index: 0, delta: { content } }] }) + '\n\n')
+  response.end('data: ' + JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 20, completion_tokens: 10 } }) + '\n\ndata: [DONE]\n\n')
 })
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
 const commandCode = 'const fs=require("node:fs");const input=JSON.parse(fs.readFileSync(0,"utf8"));fs.appendFileSync(process.argv[1],JSON.stringify({event:input.hook_event_name,active:input.stop_hook_active})+"\\n");'
@@ -69,59 +60,34 @@ try {
   const parsed = parseConfig(configText); assert.ok(parsed.config)
   writeFileSync(join(config, 'settings.json'), JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: process.execPath, args: ['-e', excludedCode, excludedMarker], statusMessage: 'OWNED_EXCLUDED_HOOK' }] }] } }))
   writeFileSync(join(config, 'rice-multi-models.json'), configText)
-  writeFileSync(join(fixture, '.claude.json'), JSON.stringify({ hasCompletedOnboarding: true })); writeFileSync(evidence, 'OWNED_AGENT_FILE')
+  writeFileSync(join(fixture, '.claude.json'), JSON.stringify({ hasCompletedOnboarding: true }))
   const file = join(plugin, 'hooks/register.ts')
   let source = readFileSync(file, 'utf8')
-  // A completed integration can supply this exact production registration itself.
-  if (!source.includes('registerEvaluators(on,')) {
-    source = "import{registerEvaluators}from'./evaluator-runtime'\n" + source
-    source = source.replace('export const register: Register = on => {', `export const register: Register = on => {
-      registerEvaluators(on, {
-        owner: async({agentId,mainModel,session}) => {const model=agentId===undefined?mainModel:agentModels.get(agentId);if(!model)throw new Error('Unknown evaluator owner');return isRouted(model)?{target:model,who:agentId??'main',session}:null},
-        complete: async(port,request,approved,timeoutMs,signal)=>{signal.throwIfAborted();const remote=targetOf(request.target)?.remote;if(budgetError(request)||remote&&!approved.includes(remote.fingerprint))return{isAnswered:false};const answer=await collectText(port,{configText:loaded.text,approved,req:request,userAgent:USER_AGENT});return{isAnswered:answer.error===undefined&&['end_turn','stop_sequence'].includes(answer.stopReason??''),text:answer.text}},
-        node: async()=>{if(!runtime.executable)throw new Error('Node is unavailable');return runtime.executable},
-        sources: async()=>({sources:[]}),
-      })`)
-  }
   source = source.replace('permissionContextNonce = crypto.randomUUID()', `await $.store.set(${JSON.stringify('trust:' + fingerprint(parsed.config.providers.selected))},true);permissionContextNonce = crypto.randomUUID()`)
   const close = source.lastIndexOf('\n}'); assert.ok(close > 0)
   source = source.slice(0, close) + `
-    on('state.get',{plugin:'rice-multi-models',key:'prefs'},()=>({value:{value:{effort:null,transport:'auto',helper:'once',workers:'read'},version:0}}))
+    on('state.get',{plugin:'rice-multi-models',key:'prefs'},()=>({value:{value:{effort:null,transport:'auto',helper:'once'},version:0}}))
     on('process.run',async($,e,next)=>{if(!e.argv.includes('discover'))return next(e);return{value:{exitCode:0,stdout:JSON.stringify({models:[],providers:[]}),stderr:'',isStdoutTruncated:false,isStderrTruncated:false}}})
   ` + source.slice(close)
   writeFileSync(file, source)
-  const runtimeFile = join(plugin, 'hooks/evaluator-runtime.ts')
-  const originalRuntime = readFileSync(runtimeFile, 'utf8')
-  const diagnosticRuntime = originalRuntime
-    .replace("if (spawned.deny || !spawned.agentId || spawned.model !== owner.target)", `await $.fs.write(${JSON.stringify(join(fixture, 'spawn.json'))},JSON.stringify(spawned));if (spawned.deny || !spawned.agentId || spawned.model !== owner.target)`)
-    .replace('agent: (hook, input, actual, cancellation) => agent($, hook, input, actual, node, cancellation, state),', `agent: async(hook,input,actual,cancellation)=>{try{return await agent($,hook,input,actual,node,cancellation,state)}catch(error){await $.fs.write(${JSON.stringify(join(fixture, 'failure.json'))},JSON.stringify({kind:'agent',message:error instanceof Error?error.message.slice(0,500):'unknown'}));throw error}},`)
-    .replaceAll('.catch(() => ({ preventContinuation: true, stopReason: failed }))', `.catch(async($,e,next)=>{await $.fs.write(${JSON.stringify(join(fixture, 'failure.json'))},JSON.stringify({kind:next.error.kind,message:next.error.message?.slice(0,500)}));return{preventContinuation:true,stopReason:failed}})`)
-  writeFileSync(runtimeFile, diagnosticRuntime)
   mkdirSync(join(controller, '.claude-plugin'), { recursive: true }); mkdirSync(join(controller, 'hooks'))
   writeFileSync(join(controller, '.claude-plugin/plugin.json'), JSON.stringify({ name: 'owned-evaluator-controller', version: '1.0.0', description: 'Owned evaluator acceptance controller', author: { name: 'Owned fixture' } }))
   writeFileSync(join(controller, 'hooks/hooks.json'), JSON.stringify({ modules: ['./register.js'] }))
-  const controllerSource = `export const register=on=>{let turns=0;const agents=[],stops=[];
-    on('agent.spawn',async($,e,next)=>{const result=await next(e);if(e.subagentType.startsWith('rice-multi-models:evaluator-'))agents.push({id:result.agentId,model:result.model,type:e.subagentType,provider:next.origin});return result;});
-    on('tool.call',{tool:'TaskStop'},async($,e,next)=>{const result=await next(e);stops.push({asked:e.task_id,confirmed:result.result?.task_id,isError:result.isError===true,denied:typeof result.deny==='string'});return result;});
+  const controllerSource = `export const register=on=>{let turns=0,registrations=0;const seen=[];
+    on('agent.register',async($,e,next)=>{const result=await next(e);registrations++;if(typeof e.name==='string'&&e.name.startsWith('rice-multi-models:'))seen.push(e.name);return result;});
     on('turn.step',async function*($,e,next){if(e.agentId!==undefined)return yield*next(e);const excluded=JSON.stringify(await $.settings.read()).includes('OWNED_EXCLUDED_HOOK');await $.fs.write(${JSON.stringify(sourceCheck)},JSON.stringify({excluded}));const answer=excluded?'OWNED_SOURCE_SETUP_FAILURE':'OWNED_MAIN_'+(++turns);yield{kind:'text',index:0,text:answer};yield{kind:'stop',stopReason:'end_turn',usage:null};return{turnId:e.turnId,index:e.index,answer,toolUses:[],stopReason:'end_turn',usage:null};});
-    on('classic.Stop',async($,e,next)=>{const result=await next(e);let report;try{const list=await $.agent.list();const statuses=agents.map(agent=>({id:agent.id,status:list.find(row=>row.id===agent.id)?.status??'absent'}));report={agents,stops,statuses};}catch(error){report={agents,stops,fixtureFailure:error instanceof Error?error.message.slice(0,500):'unknown'};}await $.fs.write(${JSON.stringify(tasks)},JSON.stringify(report));await $.fs.write(${JSON.stringify(results)},JSON.stringify({active:e.stop_hook_active,result}));return result;});};`
+    on('classic.Stop',async($,e,next)=>{const result=await next(e);await $.fs.write(${JSON.stringify(results)},JSON.stringify({active:e.stop_hook_active,result}));await $.fs.write(${JSON.stringify(agentTypes)},JSON.stringify({seen,registrations}));return result;});};`
   assert.equal(spawnSync(process.execPath, ['--input-type=module', '--check'], { input: controllerSource, encoding: 'utf8' }).status, 0)
   writeFileSync(join(controller, 'hooks/register.js'), controllerSource)
-  mkdirSync(join(rewriter, '.claude-plugin'), { recursive: true }); mkdirSync(join(rewriter, 'hooks'))
-  writeFileSync(join(rewriter, '.claude-plugin/plugin.json'), JSON.stringify({ name: 'owned-evaluator-rewriter', version: '1.0.0', description: 'Owned final registered definition acceptance', author: { name: 'Owned fixture' } }))
-  writeFileSync(join(rewriter, 'hooks/hooks.json'), JSON.stringify({ modules: ['./register.js'] }))
-  const rewriteSource = `export const register=on=>{on('agent.register',{name:/^evaluator-/},($,e,next)=>next({...e,prompt:e.prompt+'\\nOWNED_FINAL_REGISTERED_AGENT_PROMPT'}));};`
-  assert.equal(spawnSync(process.execPath, ['--input-type=module', '--check'], { input: rewriteSource, encoding: 'utf8' }).status, 0)
-  writeFileSync(join(rewriter, 'hooks/register.js'), rewriteSource)
   const env = Object.fromEntries(['PATH', 'SystemRoot', 'SystemDrive', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'ProgramFiles', 'ProgramFiles(x86)', 'CLAUDE_CODE_GIT_BASH_PATH'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]))
   Object.assign(env, { HOME: fixture, USERPROFILE: fixture, CLAUDE_CONFIG_DIR: config, ANTHROPIC_API_KEY: 'owned-no-account', ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.address().port}`, DISABLE_AUTOUPDATER: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' })
-  for (const folder of [controller, plugin, rewriter]) {
+  for (const folder of [controller, plugin]) {
     const checked = spawnSync(native, ['plugin', 'validate', '--strict', folder], { cwd: fixture, env, encoding: 'utf8', timeout: 15000 })
     assert.equal(checked.status, 0, (checked.stdout + checked.stderr).slice(-4000))
   }
   const command = { type: 'command', command: process.execPath, args: ['-e', commandCode, commands] }
   const prompt = { type: 'prompt', prompt: 'OWNED_EVALUATOR: Verify the completion. $ARGUMENTS', timeout: 15 }
-  const agentHook = { type: 'agent', prompt: `Read ${evidence} and verify OWNED_AGENT_FILE. $ARGUMENTS`, timeout: 15 }
+  const agentHook = { type: 'agent', prompt: 'OWNED_AGENT_EVALUATOR: Verify the completion. $ARGUMENTS', timeout: 15 }
   const scenarios = [
     { name: 'prompt-allow', mode: 'allow', hooks: { Stop: [{ hooks: [command, prompt] }] }, answer: 'OWNED_MAIN_1', commands: 1 },
     { name: 'prompt-block', mode: 'block', hooks: { Stop: [{ hooks: [command, prompt] }] }, answer: 'OWNED_MAIN_2', commands: 2 },
@@ -131,23 +97,21 @@ try {
   let expectedCommands = 0
   for (const current of scenarios) {
     mode = current.mode; scenario = current.name
-    for (const stale of [results, tasks, join(fixture, 'failure.json'), join(fixture, 'spawn.json')]) rmSync(stale, { force: true })
-    child = spawn(native, ['-p', '--model', 'selected/owned', '--plugin-dir', controller, '--plugin-dir', plugin, '--plugin-dir', rewriter, '--setting-sources', '', '--settings', JSON.stringify({ hooks: current.hooks }), '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--tools', 'Read,Agent,TaskStop', '--allowedTools', 'Read,Agent,TaskStop', '--no-session-persistence', '--output-format', 'json', '--', 'Return the owned completion.'], { cwd: fixture, env, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] })
+    for (const stale of [results, agentTypes]) rmSync(stale, { force: true })
+    child = spawn(native, ['-p', '--model', 'selected/owned', '--plugin-dir', controller, '--plugin-dir', plugin, '--setting-sources', '', '--settings', JSON.stringify({ hooks: current.hooks }), '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--tools', 'Read,Agent,TaskStop', '--allowedTools', 'Read,Agent,TaskStop', '--no-session-persistence', '--output-format', 'json', '--', 'Return the owned completion.'], { cwd: fixture, env, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] })
     console.log(JSON.stringify({ phase: `evaluators-${current.name}`, ownedPid: child.pid, preload: false }))
     let stdout = '', stderr = '', timedOut = false
     child.stdout.on('data', bytes => stdout += bytes); child.stderr.on('data', bytes => stderr += bytes)
     const timer = setTimeout(() => { timedOut = true; terminate() }, 30000)
     const code = await new Promise(resolve => child.once('close', resolve)); clearTimeout(timer)
-    let output, stop, failure; try { output = JSON.parse(stdout) } catch {} try { stop = JSON.parse(readFileSync(results, 'utf8')) } catch {} try { failure = JSON.parse(readFileSync(join(fixture, 'failure.json'), 'utf8')) } catch {}
-    let taskReport; try { taskReport = JSON.parse(readFileSync(tasks, 'utf8')) } catch { taskReport = { fixtureFailure: 'The task oracle did not write its receipt.' } }
+    let output, stop, registeredTypes; try { output = JSON.parse(stdout) } catch {} try { stop = JSON.parse(readFileSync(results, 'utf8')) } catch {} try { registeredTypes = JSON.parse(readFileSync(agentTypes, 'utf8')) } catch { registeredTypes = null }
     const observed = observations.filter(row => row.scenario === current.name)
-    const receipt = { scenario: current.name, mode, code, timedOut, answer: output?.result, stop, failure, tasks: taskReport, observedRequests: observed, stderrPresent: !!stderr, ...(taskReport.fixtureFailure ? { fixtureStderr: stderr.slice(-3000), fixtureOutput: stdout.slice(-3000) } : {}) }
+    const receipt = { scenario: current.name, mode, code, timedOut, answer: output?.result, stop, registeredTypes, observedRequests: observed, stderrPresent: !!stderr }
     receipts.push(receipt); console.log(JSON.stringify(receipt))
     assert.deepEqual(JSON.parse(readFileSync(sourceCheck, 'utf8')), { excluded: false }, 'disabled user hooks are absent from effective configuration')
     assert.equal(existsSync(excludedMarker), false, 'an excluded user command never executes')
     assert.equal(code, 0); assert.equal(timedOut, false)
-    assert.equal(taskReport.fixtureFailure, undefined)
-    assert.equal(taskReport.agents.length, 0, 'the mod spawns no verifier agent')
+    assert.deepEqual(registeredTypes.seen, [], 'the plugin registers no rice-multi-models agent types')
     expectedCommands += current.commands
     assert.equal(readFileSync(commands, 'utf8').trim().split('\n').length, expectedCommands, 'the configured command runs once per Stop occurrence')
     if (current.name === 'agent-native') {

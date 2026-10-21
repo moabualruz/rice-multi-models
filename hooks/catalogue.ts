@@ -13,7 +13,7 @@ export type ModelMetadata = {
 export type DiscoveredModel = {
   model: string
   label: string
-  execution: 'native provider' | 'CLI worker'
+  execution: 'native provider'
   source: string
   observedAt: number
   metadata: ModelMetadata

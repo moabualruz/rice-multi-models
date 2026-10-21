@@ -34,12 +34,6 @@ export type StepRequest = {
   who: string
   session: string
   transport?: Transport
-  /** The directory a worker CLI runs in (the session's). */
-  cwd?: string
-  /** A worker CLI's session to resume: the conversation's run, kept from its `resume` event. */
-  resume?: string
-  /** Whether a worker CLI may edit files (accept-edits) or only read and plan. */
-  workerWrite?: boolean
   /** Authentic native request constraints, preserved by the in-process adapter. */
   native?: {
     maxTokens?: number
@@ -74,7 +68,6 @@ export type StepEvent =
   | ({ type: 'search_sources' } & SearchEvidence)
   | ({ type: 'usage' } & Usage)
   | { type: 'limits'; limits: Limits }
-  | { type: 'resume'; key: string }
   | { type: 'stop'; reason: StopReason }
   | { type: 'error'; kind: 'request' | 'response'; text: string }
   | ({ type: 'stats' } & StepStats)

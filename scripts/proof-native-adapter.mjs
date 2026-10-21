@@ -141,7 +141,7 @@ try {
   let source = readFileSync(file, 'utf8')
   source = inject(source, 'export const register: Register = on => {', 'let proofBuiltinsDone = false\nexport const register: Register = on => {')
   source = inject(source, '    await loadProviders($)', `    await loadProviders($)\n    if (!loaded.config) throw new Error('owned fixture configuration must pass the production parser')\n    for (const provider of Object.values(loaded.config.providers)) await $.store.set(TRUST_PREFIX + fingerprint(provider), true)`, true)
-  source = inject(source, '    const started = await next(e)', `    await $.state.set({ plugin: 'rice-multi-models', key: 'prefs' }, { effort: null, transport: 'sse', helper: 'once', workers: 'read' })\n    const started = await next(e)`)
+  source = inject(source, '    const started = await next(e)', `    await $.state.set({ plugin: 'rice-multi-models', key: 'prefs' }, { effort: null, transport: 'sse', helper: 'once' })\n    const started = await next(e)`)
   // The children prelude records each auxiliary outcome and never throws: the
   // host skips a turn.step hook that throws and sends the step, unrouted, to
   // native Claude. $.model.fork takes { prompt }.

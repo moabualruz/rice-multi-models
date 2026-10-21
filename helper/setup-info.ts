@@ -13,7 +13,7 @@ export type SetupInfo = {
   configDir: string
   codexHome: string
   opencodeAuthFile: string
-  clis: Partial<Record<'codex' | 'agy' | 'grok' | 'opencode' | 'npm', string>>
+  clis: Partial<Record<'codex' | 'opencode' | 'npm', string>>
   auth: { codex: boolean; opencode: boolean }
 }
 
@@ -29,7 +29,7 @@ export async function setupInfo(env: NodeJS.ProcessEnv = process.env): Promise<S
   const opencodeAuthFile = path.join(env.XDG_DATA_HOME || path.join(home, '.local', 'share'), 'opencode', 'auth.json')
   const dirs = [...(env.PATH || '').split(path.delimiter), path.join(home, '.local', 'bin'), path.join(home, '.codex', 'bin')].filter(Boolean)
   const clis: SetupInfo['clis'] = {}
-  for (const name of ['codex', 'agy', 'grok', 'opencode', 'npm'] as const) {
+  for (const name of ['codex', 'opencode', 'npm'] as const) {
     const suffixes = process.platform === 'win32' ? ['.exe', '.cmd', ''] : ['']
     for (const dir of dirs) {
       for (const suffix of suffixes) {

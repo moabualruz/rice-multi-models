@@ -25,9 +25,8 @@ A family is a provider id (`codex`, a declared provider such as `openrouter`, or
 | --- | --- |
 | Agent tool `model` alias (`haiku`, `sonnet`, `opus`, `fable`) under a routed parent | The tier inside the parent's family: `tiers.<family>.<alias>`, else `tiers.<family>.default`, else the parent's own model |
 | Agent with no model, or a definition naming a native alias | Same as above |
-| Agent definition naming `provider/model` | That exact model |
-| Agent type `rice-multi-models:<family>` | That family, tier from the alias |
-| Agent type `rice-multi-models:claude` | Native Claude, alias honored |
+| Agent definition naming `provider/model` | That exact model; the host passes the frontmatter id through unchanged |
+| Agent tool `model` argument with an exact provider id | Rejected by Claude Code before hooks; only `haiku`, `sonnet`, `opus` or `fable` are accepted |
 | Forks | Inherit the parent model (host rule) |
 | Forked skill or skill `model:` alias in a routed conversation | Tier inside the owning conversation's family |
 | Parent on native Claude | Native resolution unchanged |
@@ -36,21 +35,22 @@ A family is a provider id (`codex`, a declared provider such as `openrouter`, or
 id, mapping `default`, `haiku`, `sonnet`, `opus` and `fable` to routed model ids of
 that family. Entries from another family are ignored.
 
-The main prompt gets one session section that lists the available families, their
-default models, tiers and agent types. It contains no tool instructions.
+The main prompt gets one session section that lists the available families,
+default models and tiers, plus guidance to use exact provider/model ids in custom
+agent frontmatter. It contains no tool instructions.
 
 ## Implementation boundaries
 
 | Boundary | Behavior |
 | --- | --- |
 | `turn.step` | Answers routed steps for main and subagents from the engine's own transcript, prompt and tools. Native alias steps resolve inside the owner's family. A step whose family cannot be resolved is refused visibly; the hook never throws, because a throwing hook lets the host run the native request. |
-| `agent.spawn` | Applies the family table above before the engine resolves the model, using the parent's effective (remapped) model; the mod's own agent types carry their registered model. |
+| `agent.spawn` | Resolves native aliases inside the parent's family and honors routed ids in readable custom agent frontmatter before the engine resolves the model. Exact ids in the Agent tool argument are rejected by the host before hooks; the mod registers no provider-family or Claude wrapper types. |
 | `session.compact` | Selected-provider summary with a bounded verbatim tail of recent engine messages split at an exchange boundary (tool pairs and pending calls kept whole). The summary request is fitted to the model's input bound by shortening tool outputs, then long texts, then leaving out the middle of the oldest history; failures keep the original transcript. |
-| `tool.call` / `tool.check` for WebSearch and WebFetch | Native rules and classic PreToolUse run first; the checked input is then served by the selected provider, configured search services, then native search with the session's account (search only). |
-| `tool.check` (auto mode) | Unresolved asks for routed conversations are judged by the owner's provider with the effective auto-mode policy. SubagentHandback is never judged here. |
+| `tool.call` / `tool.check` for WebSearch and WebFetch | Native rules and classic PreToolUse run first; the checked input is then served by the selected provider, configured search services, then native search with the session's account (search only). WebFetch still uses the mod-authored extraction instruction. |
+| `tool.check` (auto mode) | Unresolved asks for routed conversations are judged by the owner's provider with the effective auto-mode policy and mod-authored request. SubagentHandback is never judged here. |
 | Classic PreToolUse command hook | Reports the native per-call permission mode (`scripts/permission-context.mjs`). |
-| `classic.UserPromptSubmit` | Returns `sessionTitle` from the selected provider, with a local fallback. |
-| Classic Stop and SubagentStop | Prompt-type evaluators are answered by the selected provider when every hook source of the event is visible to the mod. |
+| `classic.UserPromptSubmit` | Returns `sessionTitle` from the selected provider using the mod-authored title request, with a local fallback. |
+| Classic Stop and SubagentStop | Prompt-type evaluators use the mod-authored evaluator request and are answered by the selected provider when every hook source of the event is visible to the mod. |
 | `model.complete`, `model.classify`, `model.fork` | Routed through the main conversation's family (these public events carry no caller identity). |
 
 ### Permission judgments
@@ -84,6 +84,12 @@ without an anchor, after a model change or after compaction.
   modules registered before this mod), an invoked skill, an agent definition file
   or a session plugin directory may define hooks for the same event, evaluators run
   natively rather than risking dropped hooks.
+- **Native auxiliary text.** The public title and permission events expose results
+  and decision context, not Claude Code's internal prompts. Headless probes did not
+  capture the title or auto-mode judge text. Stop and SubagentStop system blocks
+  matched across marker runs, but their complete requests differed and independent
+  byte-for-byte verification was not achieved. The WebFetch probe did not reach a
+  successful extraction request. The mod keeps its existing text for these paths.
 - **Restricted tool sessions and flagged paths.** Without any file-edit tool, or in
   a working directory the host flags as a suspicious Windows path (8.3 short
   names), an auto-to-plan switch during a pending judgment cannot be told apart by

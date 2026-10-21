@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { commandHookResult, evaluatorAnswer, evaluatorPrompt, evaluatorRequest, evaluatorTools, planStopEvaluators, runStopEvaluators, type EvaluatorPort, type EvaluatorSource, type PlannedEvaluator } from '../hooks/evaluators'
+import { commandHookResult, evaluatorAnswer, evaluatorPrompt, evaluatorRequest, planStopEvaluators, runStopEvaluators, type EvaluatorPort, type EvaluatorSource, type PlannedEvaluator } from '../hooks/evaluators'
 
 const event = { hook_event_name: 'Stop' as const, session_id: 'owned-session', last_assistant_message: 'Complete', stop_hook_active: false }
 const owner = { target: 'selected/child', who: 'owned-child', session: 'owned-session' }
@@ -19,6 +19,12 @@ test('planning retains native type order, last duplicate settings value, and sep
   expect(plan.hasEvaluators).toBe(true)
 })
 
+test('agent-type evaluators remain native and cannot enter the prompt adapter', async () => {
+  const plan = planStopEvaluators([source([{ type: 'agent', prompt: 'Inspect files' }])], event, 'bash')
+  expect(plan.hooks.map(hook => hook.type)).toEqual(['agent'])
+  await expect(runStopEvaluators(plan, event, owner, { command: unused, prompt: unused }, new AbortController().signal)).rejects.toThrow('must run through Claude Code')
+})
+
 test('managed matching groups already ran, Stop ignores matcher, and nontool if hooks never run', () => {
   const managed = source([{ type: 'prompt', prompt: 'Managed condition' }], { kind: 'settings', managed: true })
   const same = source([{ type: 'prompt', prompt: 'Managed condition' }])
@@ -33,7 +39,7 @@ test('managed matching groups already ran, Stop ignores matcher, and nontool if 
 test('an unpreserved hook or invalid matcher prevents any partial replacement', async () => {
   const plan = planStopEvaluators([source([{ type: 'prompt', prompt: 'Condition' }, { type: 'http', url: 'https://owned.invalid' }])], event, 'bash')
   expect(plan.errors).toHaveLength(1)
-  const port: EvaluatorPort = { command: unused, prompt: unused, agent: unused }
+  const port: EvaluatorPort = { command: unused, prompt: unused }
   await expect(runStopEvaluators(plan, event, owner, port, new AbortController().signal)).rejects.toThrow('losing configured behavior')
   const invalid = planStopEvaluators([{ origin: { kind: 'settings' }, settings: { hooks: { SubagentStop: [{ matcher: '[invalid', hooks: [] }] } } }], { hook_event_name: 'SubagentStop' }, 'bash')
   expect(invalid.errors).toHaveLength(1)
@@ -60,22 +66,15 @@ test('the configured prompt and complete event bind the explicit child without p
   expect(evaluatorPrompt('$ARGUMENTS / $ARGUMENTS', event)).toBe(JSON.stringify(event) + ' / ' + JSON.stringify(event))
 })
 
-test('the verifier retains native tool capabilities and excludes the actual native control pool', () => {
-  expect(evaluatorTools(['Read', 'Bash', 'Edit', 'Write', 'Grep', 'Glob', 'mcp__owned__test', 'TaskStop', 'Agent', 'Task', 'Poll', 'ExitPlanMode', 'EnterPlanMode', 'StructuredOutput', 'AskUserQuestion', 'Workflow', 'memory_write', 'ConnectGitHub', 'PublishPlugin', 'EndConversation', 'AppifactRepl']))
-    .toEqual(['Read', 'Bash', 'Edit', 'Write', 'Grep', 'Glob', 'mcp__owned__test', 'TaskStop'])
-})
-
-test('Stop prompt impossible allows stopping, while agent and ordinary false verdicts continue work', () => {
-  const failed = { isAnswered: true, text: '{"ok":false,"reason":"Run the checks","impossible":true}' }
-  expect(evaluatorAnswer('prompt', failed).result).toEqual({})
-  expect(evaluatorAnswer('agent', failed).result).toEqual({ block: 'Run the checks' })
-  expect(evaluatorAnswer('prompt', { isAnswered: true, text: '{"ok":false,"reason":"Run the checks"}' }).result).toEqual({ block: 'Run the checks' })
-  expect(evaluatorAnswer('prompt', { isAnswered: true, text: '{"ok":true,"reason":"Verified"}' }).result).toEqual({})
+test('prompt evaluator results preserve native impossible and block behavior', () => {
+  expect(evaluatorAnswer({ isAnswered: true, text: '{"ok":false,"reason":"Run the checks","impossible":true}' }).result).toEqual({})
+  expect(evaluatorAnswer({ isAnswered: true, text: '{"ok":false,"reason":"Run the checks"}' }).result).toEqual({ block: 'Run the checks' })
+  expect(evaluatorAnswer({ isAnswered: true, text: '{"ok":true,"reason":"Verified"}' }).result).toEqual({})
 })
 
 test('unusable evaluator output produces native-style nonblocking error without leaking provider bytes', () => {
   for (const completion of [{ isAnswered: false, text: 'private-owned-text' }, { isAnswered: true, text: 'private-owned-text' }, { isAnswered: true, text: '{"ok":false,"reason":""}' }, { isAnswered: true, text: '{"ok":"true","reason":"wrong"}' }]) {
-    const result = evaluatorAnswer('prompt', completion)
+    const result = evaluatorAnswer(completion)
     expect(result.result).toEqual({}); expect(result.error).toBeString(); expect(JSON.stringify(result)).not.toContain('private-owned-text')
   }
 })
@@ -89,25 +88,24 @@ test('command results preserve native Stop control, failure policy, and context'
   expect(commandHookResult({ exitCode: 0, stdout: 'Ordinary output', stderr: '' }).result).toEqual({})
 })
 
-test('matching hooks start in parallel, retain indexed aggregation and route the owner into both evaluators', async () => {
+test('matching command and prompt hooks start in parallel and aggregate in native order', async () => {
   const started: string[] = [], targets: string[] = []
   let release: (() => void) | undefined
   const waiting = new Promise<void>(resolve => { release = resolve })
-  const plan = planStopEvaluators([source([{ type: 'agent', prompt: 'Inspect files' }, { type: 'prompt', prompt: 'Check condition' }, { type: 'command', command: 'owned' }])], event, 'bash')
+  const plan = planStopEvaluators([source([{ type: 'prompt', prompt: 'Check condition' }, { type: 'command', command: 'owned' }])], event, 'bash')
   const running = runStopEvaluators(plan, event, owner, {
     command: async () => { started.push('command'); await waiting; return { result: { additionalContext: ['Command context'] } } },
     prompt: async (_hook, request) => { started.push('prompt'); targets.push(request.target); return { isAnswered: true, text: '{"ok":false,"reason":"Prompt feedback"}' } },
-    agent: async (_hook, _event, actual) => { started.push('agent'); targets.push(actual.target); return { isAnswered: true, text: '{"ok":false,"reason":"Agent feedback"}' } },
   }, new AbortController().signal)
-  expect(started).toEqual(['command', 'prompt', 'agent'])
+  expect(started).toEqual(['command', 'prompt'])
   release?.()
-  expect(await running).toEqual({ result: { additionalContext: ['Command context'], block: 'Agent feedback' }, errors: [] })
-  expect(targets).toEqual([owner.target, owner.target])
+  expect(await running).toEqual({ result: { additionalContext: ['Command context'], block: 'Prompt feedback' }, errors: [] })
+  expect(targets).toEqual([owner.target])
 })
 
 test('cancellation remains cancellation instead of becoming an allow or a native retry', async () => {
   const controller = new AbortController()
   const plan = planStopEvaluators([source([{ type: 'prompt', prompt: 'Condition' }])], event, 'bash')
-  const running = runStopEvaluators(plan, event, owner, { command: unused, agent: unused, prompt: async () => { controller.abort(); return { isAnswered: true, text: '{"ok":true,"reason":"ignored"}' } } }, controller.signal)
+  const running = runStopEvaluators(plan, event, owner, { command: unused, prompt: async () => { controller.abort(); return { isAnswered: true, text: '{"ok":true,"reason":"ignored"}' } } }, controller.signal)
   await expect(running).rejects.toThrow()
 })

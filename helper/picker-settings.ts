@@ -19,8 +19,6 @@ function legacyGenerated(row: unknown): row is Json {
   const provider = row.model.slice(0, slash)
   const model = row.model.slice(slash + 1)
   if (provider === 'codex') return /^.+ \(Codex\)$/.test(row.label) && /^ChatGPT subscription via rice-multi-models(?:, \d+k context)?$/.test(row.description)
-  const worker = provider === 'agy' ? 'Antigravity' : provider === 'grok' ? 'Grok' : undefined
-  if (worker && row.label === `${model} (${worker})` && row.description === `${worker} CLI as a worker with its own tools, via rice-multi-models`) return true
   return row.label === `${model} (${provider})` && /^(?:openai|responses|anthropic|gemini|bedrock) endpoint https?:\/\/\S+ via rice-multi-models(?:, \d+k context)?$/.test(row.description)
 }
 

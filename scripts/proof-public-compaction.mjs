@@ -22,7 +22,7 @@ try {
   const close = source.lastIndexOf('\n}')
   assert.ok(close > 0)
   source = source.slice(0, close) + `
-  on('state.get', {plugin:'rice-multi-models',key:'prefs'}, () => ({value:{value:{effort:null,transport:'auto',helper:'once',workers:'read'},version:0}}))
+  on('state.get', {plugin:'rice-multi-models',key:'prefs'}, () => ({value:{value:{effort:null,transport:'auto',helper:'once'},version:0}}))
   on('process.run', async ($, e, next) => {
     if (!e.argv.includes('discover')) return next(e)
     const metadata={contextWindow:500000,maxContextWindow:500000,inputTokenLimit:null,outputTokenLimit:32768,autoCompactTokenLimit:null,inputModalities:['text'],reasoningEfforts:null,tools:null,parallelToolCalls:null}

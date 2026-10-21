@@ -59,7 +59,7 @@ test('native startup refreshes catalogue and exposes factual metadata without a 
   on('classic.PostModelSwitch', () => ({}))
   mock.store(on)
   mock.clock(on, { now: 1800000000000 })
-  on('state.get', { plugin: 'rice-multi-models', key: 'prefs' }, () => ({ value: { value: { effort: null, transport: 'auto', helper: 'once', workers: 'read' }, version: 1 } }))
+  on('state.get', { plugin: 'rice-multi-models', key: 'prefs' }, () => ({ value: { value: { effort: null, transport: 'auto', helper: 'once' }, version: 1 } }))
   on('session.start', (_host, input) => ({ cwd: input.cwd }))
   // Native Windows resolves fs event paths with backslashes, including this
   // copied plugin's helper path. Only the synthetic file-matching oracle varies.

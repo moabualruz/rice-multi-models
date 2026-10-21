@@ -177,7 +177,12 @@ compile(waitSource)
 async function runCase(test, index, base) {
   phase = test.name
   const directory = join(fixture, test.name), plugin = join(directory, 'plugin'), caller = join(directory, 'caller'), config = join(directory, '.claude')
-  mkdirSync(directory); mkdirSync(config); mkdirSync(plugin); mkdirSync(join(plugin, 'scripts'))
+  mkdirSync(directory); mkdirSync(join(config, 'agents'), { recursive: true }); mkdirSync(plugin); mkdirSync(join(plugin, 'scripts'))
+  if (test.child) {
+    const agents = join(config, 'agents')
+    const override = test.explicitAuto ? 'permissionMode: auto\n' : ''
+    writeFileSync(join(agents, 'owned-permission-mode.md'), `---\nname: owned-permission-mode\ndescription: Owned child mode proof\nmodel: selected/main\ntools:\n  - Bash\n${override}---\n${childConstraint}\n`)
+  }
   const context = { test, directory, requests: [], controls: [], modelTurns: 0, stage: 'fixture-setup' }
   contexts.set(index, context); active = context
   const env = isolatedEnvironment(directory, `${base}/cases/${index}/native`)
@@ -198,6 +203,8 @@ async function runCase(test, index, base) {
   assert.ok(source.includes('await loadProviders($)'), 'production provider load anchor')
   // The copy records each mode fingerprint with its inputs, so a platform where two modes look alike can be diagnosed.
   const fingerprintLog = join(directory, 'fingerprints.json')
+  const spawnProbe = join(directory, 'spawn-probe.json')
+  const effectiveModeProbe = join(directory, 'effective-mode-probe.json')
   const fingerprintAnchor = '  return JSON.stringify(verdicts)\n}'
   assert.equal(source.split(fingerprintAnchor).length, 2, 'production fingerprint return anchor')
   source = source.replace(fingerprintAnchor, `  const proofFingerprint = JSON.stringify(verdicts)
@@ -207,9 +214,15 @@ async function runCase(test, index, base) {
 }
 const proofFingerprints: unknown[] = []`)
   source = source.replaceAll('await loadProviders($)', 'await loadProviders($); for (const provider of Object.values(loaded.config.providers)) await $.store.set(TRUST_PREFIX + fingerprint(provider), true)')
+  const spawnAnchor = '    const definition = e.fork ? undefined : registered.get(e.subagentType) ?? await definitionOf(promptsPort($), memory, e.subagentType)\n'
+  assert.equal(source.split(spawnAnchor).length, 2, 'production spawn-definition anchor')
+  source = source.replace(spawnAnchor, spawnAnchor + `    if (e.subagentType === 'owned-permission-mode') await $.fs.write(${JSON.stringify(spawnProbe)}, JSON.stringify({ registered: registered.has(e.subagentType), permissionMode: definition?.permissionMode, contested: await contested(promptsPort($), memory, e.subagentType) }))\n`)
+  const modeAnchor = '    const context = e.tool_use_id ? toolModes.get(e.tool_use_id) : undefined\n'
+  assert.equal(source.split(modeAnchor).length, 2, 'production permission-mode anchor')
+  source = source.replace(modeAnchor, modeAnchor + `    if (e.tool === 'Bash' && e.tool_use_id) await $.fs.write(${JSON.stringify(effectiveModeProbe)}, JSON.stringify({ mode: context?.mode, agentId: e.agentId, decision: verdict.decision }))\n`)
   const close = source.lastIndexOf('\n}'); assert.ok(close > 0, 'production registration boundary')
   source = source.slice(0, close) + `
-  on('state.get', {plugin:'rice-multi-models',key:'prefs'}, () => ({value:{value:{effort:null,transport:'sse',helper:'once',workers:'read'},version:0}}))
+  on('state.get', {plugin:'rice-multi-models',key:'prefs'}, () => ({value:{value:{effort:null,transport:'sse',helper:'once'},version:0}}))
   on('process.run', async ($, e, next) => e.argv.includes('discover') ? {value:{exitCode:0,stdout:JSON.stringify({models:[],providers:[]}),stderr:'',isStdoutTruncated:false,isStderrTruncated:false}} : next(e))
   on('classic.PreToolUse', {tool:'Bash'}, async ($, e, next) => {
     const result=await next(e)
@@ -227,8 +240,7 @@ const proofFingerprints: unknown[] = []`)
       const observation={};let agentId;
       try{
         if(${JSON.stringify(test.child)}){
-          const registered=await $.agent.register({name:'owned-permission-mode',description:'Owned child mode proof',model:'selected/main',tools:['Bash'],prompt:${JSON.stringify(childConstraint)},...(${JSON.stringify(test.explicitAuto === true)}?{permissionMode:'auto'}:{})});
-          const spawned=await $.agent.spawn({subagentType:registered.agent,prompt:${JSON.stringify(childConstraint + '\n' + command)},description:'Owned child mode proof'});observation.spawned=spawned;
+          const spawned=await $.agent.spawn({subagentType:'owned-permission-mode',prompt:${JSON.stringify(childConstraint + '\n' + command)},description:'Owned child mode proof'});observation.spawned=spawned;
           if(spawned.deny||!spawned.agentId)throw new Error('Owned child spawn prerequisite failed');agentId=spawned.agentId;
           const waited=await $.process.run([${JSON.stringify(process.execPath)},${JSON.stringify(waitFile)},${JSON.stringify(childResult)},${JSON.stringify(String(childLimit))}],{timeoutMs:${childLimit + 5000}});
           if(waited.exitCode!==0)throw new Error('Owned child Bash result deadline expired');
@@ -283,13 +295,19 @@ const proofFingerprints: unknown[] = []`)
     const observed = existsSync(outcome) ? JSON.parse(readFileSync(outcome)) : null
     const result = test.child && existsSync(childResult) ? JSON.parse(readFileSync(childResult)) : { result: observed?.result }
     const proof = existsSync(modeProof) ? JSON.parse(readFileSync(modeProof)) : null
-    const run = { name: test.name, ...terminal, timedOut, durationMs: Date.now() - started, requests: context.requests, controls: context.controls, barrier: context.barrier, observation: observed, toolResult: result, modeProof: proof, markerWritten: existsSync(join(directory, 'owned-mode-marker')), sourceHashes: context.sourceHashes, fixtureRegister: hash(readFileSync(register)), ...(context.providerFailure ? { providerFailure: context.providerFailure } : {}) }
+    const effectiveMode = existsSync(effectiveModeProbe) ? JSON.parse(readFileSync(effectiveModeProbe)) : null
+    const spawnMode = existsSync(spawnProbe) ? JSON.parse(readFileSync(spawnProbe)) : null
+    const run = { name: test.name, ...terminal, timedOut, durationMs: Date.now() - started, requests: context.requests, controls: context.controls, barrier: context.barrier, observation: observed, toolResult: result, modeProof: proof, effectiveMode, spawnMode, markerWritten: existsSync(join(directory, 'owned-mode-marker')), sourceHashes: context.sourceHashes, fixtureRegister: hash(readFileSync(register)), ...(context.providerFailure ? { providerFailure: context.providerFailure } : {}) }
     runs.push(run)
     writeFileSync(join(directory, 'native.stdout.jsonl'), stdout); writeFileSync(join(directory, 'native.stderr.log'), stderr)
     writeFileSync(join(directory, 'receipt.json'), JSON.stringify(run, null, 2))
     assert.equal(interrupted, false, 'proof was not interrupted'); assert.equal(timedOut, false, 'bounded native deadline'); assert.equal(terminal.code, 0, stderr.slice(-2000))
     assert.equal(context.captureFailure, undefined, 'bounded native output'); assert.equal(context.providerFailure, undefined, 'owned provider contract'); assert.ok(observed, 'native driver finishes'); assert.equal(observed.failure, undefined, 'native fixture prerequisites')
-    assert.equal(proof?.mode, 'auto', 'actual action begins in auto mode')
+    if (test.explicitAuto) {
+      assert.equal(spawnMode?.permissionMode, 'auto', 'native agent frontmatter defines the child mode')
+      assert.equal(spawnMode?.contested, false, 'the child agent definition is unambiguous')
+      assert.equal(effectiveMode?.mode, 'auto', 'agent frontmatter mode reaches the selected permission path')
+    } else assert.equal(proof?.mode, 'auto', 'actual action begins in auto mode')
     assert.equal(result.result?.deny === undefined && result.result?.isError !== true, test.approved, 'native action approval matches the case')
     assert.equal(run.markerWritten, test.approved, 'real action marker matches approval')
     const judgments = context.requests.filter(row => row.classifier)

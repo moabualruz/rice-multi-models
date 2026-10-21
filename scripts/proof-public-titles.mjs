@@ -89,7 +89,7 @@ try {
   const end = source.lastIndexOf('\n}')
   assert.ok(end > 0, 'production register boundary')
   source = source.slice(0, end) + `
-  on('state.get', {plugin:'rice-multi-models',key:'prefs'}, () => ({value:{value:{effort:null,transport:'sse',helper:'once',workers:'read'},version:0}}))
+  on('state.get', {plugin:'rice-multi-models',key:'prefs'}, () => ({value:{value:{effort:null,transport:'sse',helper:'once'},version:0}}))
   on('process.run', async ($, e, next) => {
     if (!e.argv.includes('discover')) return next(e)
     return {value:{exitCode:0,stdout:JSON.stringify({models:[],providers:[]}),stderr:'',isStdoutTruncated:false,isStderrTruncated:false}}

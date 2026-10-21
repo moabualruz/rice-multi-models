@@ -372,26 +372,26 @@ var require_permessage_deflate = __commonJS({
             value = value[0];
             if (key === "client_max_window_bits") {
               if (value !== true) {
-                const num2 = +value;
-                if (!Number.isInteger(num2) || num2 < 8 || num2 > 15) {
+                const num = +value;
+                if (!Number.isInteger(num) || num < 8 || num > 15) {
                   throw new TypeError(
                     `Invalid value for parameter "${key}": ${value}`
                   );
                 }
-                value = num2;
+                value = num;
               } else if (!this._isServer) {
                 throw new TypeError(
                   `Invalid value for parameter "${key}": ${value}`
                 );
               }
             } else if (key === "server_max_window_bits") {
-              const num2 = +value;
-              if (!Number.isInteger(num2) || num2 < 8 || num2 > 15) {
+              const num = +value;
+              if (!Number.isInteger(num) || num < 8 || num > 15) {
                 throw new TypeError(
                   `Invalid value for parameter "${key}": ${value}`
                 );
               }
-              value = num2;
+              value = num;
             } else if (key === "client_no_context_takeover" || key === "server_no_context_takeover") {
               if (value !== true) {
                 throw new TypeError(
@@ -1105,8 +1105,8 @@ var require_receiver = __commonJS({
           return;
         }
         const buf = this.consume(8);
-        const num2 = buf.readUInt32BE(0);
-        if (num2 > Math.pow(2, 53 - 32) - 1) {
+        const num = buf.readUInt32BE(0);
+        if (num > Math.pow(2, 53 - 32) - 1) {
           const error = this.createError(
             RangeError,
             "Unsupported WebSocket frame: payload length > 2^53 - 1",
@@ -1117,7 +1117,7 @@ var require_receiver = __commonJS({
           cb(error);
           return;
         }
-        this._payloadLength = num2 * Math.pow(2, 32) + buf.readUInt32BE(4);
+        this._payloadLength = num * Math.pow(2, 32) + buf.readUInt32BE(4);
         this.haveLength(cb);
       }
       /**
@@ -6522,235 +6522,6 @@ async function* codexStep(req, model2, signal, options = {}) {
   }
 }
 
-// helper/harness.ts
-import { randomUUID } from "node:crypto";
-import { homedir as homedir2 } from "node:os";
-
-// helper/core/subprocess.ts
-import { spawn as spawn3 } from "node:child_process";
-function startProcess(argv, cwd) {
-  const executable = argv[0];
-  if (!executable) throw new Error("empty executable argv");
-  const filename = /[/\\]/.test(executable) ? executable : resolveExecutable(executable);
-  const invocation = executableInvocation(filename, argv.slice(1));
-  const child = spawn3(invocation.command, invocation.args, {
-    cwd,
-    stdio: ["ignore", "pipe", "pipe"],
-    detached: process.platform !== "win32",
-    windowsHide: true,
-    ...invocation.options
-  });
-  let stderr = "";
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (chunk) => {
-    stderr = (stderr + String(chunk)).slice(-4096);
-  });
-  const exited = new Promise((resolve2, reject) => {
-    child.once("error", reject);
-    child.once("close", (code2) => resolve2(code2 ?? 1));
-  });
-  void exited.catch(() => {
-  });
-  const stop2 = () => {
-    if (child.pid) terminateProcessTree(child.pid, { signal: "SIGKILL" });
-  };
-  return { child, exited, stderr: () => stderr.trim().split("\n").at(-1)?.slice(0, 300) ?? "", stop: stop2 };
-}
-async function runCommand(argv, timeoutMs) {
-  const running = startProcess(argv);
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    running.stop();
-  }, timeoutMs);
-  try {
-    const chunks = [];
-    for await (const chunk of running.child.stdout) chunks.push(Buffer.from(chunk));
-    const exitCode = await running.exited;
-    if (timedOut) throw new Error(`timed out after ${timeoutMs} ms`);
-    return { stdout: Buffer.concat(chunks).toString("utf8"), exitCode };
-  } finally {
-    clearTimeout(timer);
-    if (running.child.exitCode === null) running.stop();
-  }
-}
-
-// helper/harness.ts
-var isJson = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
-var num = (v) => typeof v === "number" && Number.isFinite(v) ? v : 0;
-function summarize(input) {
-  if (!isJson(input)) return "";
-  const values = Object.values(input).filter((value) => typeof value === "string" || typeof value === "number").map((value) => String(value).replace(/\s+/g, " "));
-  return values.join(" ").slice(0, 160);
-}
-function agyEvents(line) {
-  if (!isJson(line)) return [];
-  if (line.event === "init" && typeof line.conversation_id === "string") return [{ kind: "session", id: line.conversation_id }];
-  if (line.event === "step_update" && isJson(line.step_update)) {
-    const step = line.step_update;
-    if (step.step_type === "tool" && step.state === "ACTIVE") {
-      const info = isJson(step.tool_info) ? step.tool_info : {};
-      const name = typeof step.tool_name === "string" ? step.tool_name : "tool";
-      return [{ kind: "progress", text: `
-▸ ${name} ${summarize(info.parameters)}
-` }];
-    }
-    if (step.step_type === "agent_response" && typeof step.text_delta === "string" && step.text_delta !== "") return [{ kind: "progress", text: step.text_delta }];
-    return [];
-  }
-  if (line.event === "result" && isJson(line.result)) {
-    const result = line.result;
-    const usage = isJson(result.usage) ? result.usage : {};
-    const read2 = num(usage.cache_read_tokens);
-    const events = [];
-    if (typeof result.conversation_id === "string") events.push({ kind: "session", id: result.conversation_id });
-    if (typeof result.response === "string" && result.response.trim() !== "") events.push({ kind: "answer", text: result.response.trim() });
-    events.push({ kind: "usage", in: Math.max(0, num(usage.input_tokens) - read2), out: num(usage.output_tokens), cacheRead: read2, cacheWrite: 0, reasoning: num(usage.thinking_tokens) });
-    const ok = result.status === "SUCCESS";
-    events.push(ok ? { kind: "done", ok } : { kind: "done", ok, error: `Antigravity ended with ${String(result.status)}` });
-    return events;
-  }
-  return [];
-}
-function grokParser() {
-  let text2 = "";
-  return {
-    feed(line) {
-      if (!isJson(line)) return [];
-      if (line.type === "thought" && typeof line.data === "string") return [{ kind: "progress", text: line.data }];
-      if (line.type === "text" && typeof line.data === "string") {
-        text2 += line.data;
-        return [];
-      }
-      if (line.type === "tool_call") {
-        const said = text2;
-        text2 = "";
-        const name = typeof line.toolName === "string" ? line.toolName : typeof line.title === "string" ? line.title : "tool";
-        return [...said.trim() ? [{ kind: "progress", text: `${said}
-` }] : [], { kind: "progress", text: `
-▸ ${name} ${summarize(line.rawInput)}
-` }];
-      }
-      if (line.type === "end") {
-        const usage = isJson(line.usage) ? line.usage : {};
-        const events = [];
-        if (typeof line.sessionId === "string") events.push({ kind: "session", id: line.sessionId });
-        if (text2.trim() !== "") events.push({ kind: "answer", text: text2.trim() });
-        text2 = "";
-        events.push({ kind: "usage", in: num(usage.input_tokens), out: num(usage.output_tokens), cacheRead: num(usage.cache_read_input_tokens), cacheWrite: num(usage.cache_creation_input_tokens), reasoning: num(usage.reasoning_tokens) });
-        const ok = line.stopReason === "end_turn" || line.stopReason === "max_tokens";
-        events.push(ok ? { kind: "done", ok } : { kind: "done", ok, error: `Grok stopped: ${String(line.stopReason)}` });
-        return events;
-      }
-      return [];
-    },
-    end: () => []
-  };
-}
-var textOf = (message) => typeof message.content === "string" ? message.content : message.content.filter((block) => block.type === "text" && typeof block.text === "string").map((block) => block.text).filter((text2) => !text2.trimStart().startsWith("<system-reminder>")).join("\n\n");
-function promptFor(req) {
-  const lastAnswer = req.resume ? req.transcript.findLastIndex((message) => message.role === "assistant") : -1;
-  const turns = req.transcript.slice(lastAnswer + 1).filter((message) => message.role === "user").map(textOf).filter((text2) => text2.trim() !== "");
-  const task = turns.join("\n\n");
-  return !req.resume && req.system.trim() !== "" ? `${req.system.trim()}
-
-# Task
-
-${task}` : task;
-}
-var EFFORT_AGY = { low: "low", medium: "medium", high: "high", xhigh: "high", max: "high" };
-function agyArgs(req, model2, prompt) {
-  const args = ["-p", prompt, "--output-format", "stream-json", "--disable-slash-commands", "--model", model2, "--add-dir", req.cwd ?? process.cwd()];
-  if (typeof req.effort === "string" && EFFORT_AGY[req.effort]) args.push("--effort", EFFORT_AGY[req.effort]);
-  if (req.resume) args.push("--conversation", req.resume);
-  else args.push("--new-project");
-  args.push("--mode", req.workerWrite ? "accept-edits" : "plan");
-  return args;
-}
-function grokArgs(req, model2, prompt) {
-  const args = ["-p", prompt, "--output-format", "streaming-json", "--no-auto-update", "--model", model2, "--permission-mode", req.workerWrite ? "acceptEdits" : "plan", "--cwd", req.cwd ?? process.cwd()];
-  if (typeof req.effort === "string") args.push("--reasoning-effort", req.effort === "max" || req.effort === "xhigh" ? "high" : req.effort);
-  args.push(...req.resume ? ["--resume", req.resume] : ["--session-id", randomUUID()]);
-  return args;
-}
-function binary(worker) {
-  try {
-    return resolveExecutable(worker);
-  } catch {
-    return `${homedir2()}/.local/bin/${worker}`;
-  }
-}
-async function* harnessStep(req, worker, model2, signal) {
-  const started = Date.now();
-  const prompt = promptFor(req);
-  if (prompt.trim() === "") {
-    yield { type: "error", kind: "request", text: `rice-multi-models: nothing to send ${worker}: the conversation has no user text` };
-    yield { type: "stats", ttfbMs: null, totalMs: 0, transport: worker };
-    return;
-  }
-  const argv = [binary(worker), ...worker === "agy" ? agyArgs(req, model2, prompt) : grokArgs(req, model2, prompt)];
-  signal.throwIfAborted();
-  const running = startProcess(argv, req.cwd ?? process.cwd());
-  const child = running.child;
-  const kill = running.stop;
-  signal.addEventListener("abort", kill, { once: true });
-  if (signal.aborted) kill();
-  const grok = grokParser();
-  let ttfb = null;
-  let answer = "";
-  let done;
-  const decoder6 = new TextDecoder();
-  let buffer = "";
-  const handle = function* (events) {
-    for (const event of events) {
-      ttfb ??= Date.now() - started;
-      if (event.kind === "session") yield { type: "resume", key: event.id };
-      else if (event.kind === "progress") yield { type: "thinking", text: event.text };
-      else if (event.kind === "answer") answer = event.text;
-      else if (event.kind === "usage") yield { type: "usage", in: event.in, out: event.out, cacheRead: event.cacheRead, cacheWrite: event.cacheWrite, ...event.reasoning ? { reasoning: event.reasoning } : {} };
-      else done = event;
-    }
-  };
-  try {
-    for await (const chunk of child.stdout) {
-      buffer += decoder6.decode(chunk, { stream: true });
-      let newline = buffer.indexOf("\n");
-      while (newline >= 0) {
-        const line = buffer.slice(0, newline).trim();
-        buffer = buffer.slice(newline + 1);
-        newline = buffer.indexOf("\n");
-        if (line === "") continue;
-        let parsed;
-        try {
-          parsed = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        yield* handle(worker === "agy" ? agyEvents(parsed) : grok.feed(parsed));
-      }
-    }
-    yield* handle(worker === "grok" ? grok.end() : []);
-    const code2 = await running.exited;
-    const stderr = running.stderr();
-    if (signal.aborted) {
-      yield { type: "error", kind: "request", text: `rice-multi-models: ${worker} was stopped` };
-    } else if (done?.kind === "done" && done.ok) {
-      if (answer) yield { type: "text", text: answer };
-      yield { type: "stop", reason: "end_turn" };
-    } else {
-      const why = done?.kind === "done" && done.error ? done.error : `${worker} exited ${code2}${stderr ? `: ${stderr}` : ""}`;
-      if (answer) yield { type: "text", text: answer };
-      yield { type: "error", kind: "response", text: `rice-multi-models: ${why}${/auth|log ?in|sign ?in/i.test(stderr) ? ` (run ${worker} login)` : ""}` };
-    }
-  } finally {
-    signal.removeEventListener("abort", kill);
-    if (child.exitCode === null) kill();
-    await running.exited.catch(() => {
-    });
-  }
-  yield { type: "stats", ttfbMs: ttfb, totalMs: Date.now() - started, transport: worker };
-}
-
 // hooks/coalesce.ts
 function coalesce(events) {
   const out = [];
@@ -8054,6 +7825,55 @@ async function post(r, signal) {
   return { status: res.status, body: body2(), cancel };
 }
 
+// helper/core/subprocess.ts
+import { spawn as spawn3 } from "node:child_process";
+function startProcess(argv, cwd) {
+  const executable = argv[0];
+  if (!executable) throw new Error("empty executable argv");
+  const filename = /[/\\]/.test(executable) ? executable : resolveExecutable(executable);
+  const invocation = executableInvocation(filename, argv.slice(1));
+  const child = spawn3(invocation.command, invocation.args, {
+    cwd,
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: process.platform !== "win32",
+    windowsHide: true,
+    ...invocation.options
+  });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => {
+    stderr = (stderr + String(chunk)).slice(-4096);
+  });
+  const exited = new Promise((resolve2, reject) => {
+    child.once("error", reject);
+    child.once("close", (code2) => resolve2(code2 ?? 1));
+  });
+  void exited.catch(() => {
+  });
+  const stop2 = () => {
+    if (child.pid) terminateProcessTree(child.pid, { signal: "SIGKILL" });
+  };
+  return { child, exited, stderr: () => stderr.trim().split("\n").at(-1)?.slice(0, 300) ?? "", stop: stop2 };
+}
+async function runCommand(argv, timeoutMs) {
+  const running = startProcess(argv);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    running.stop();
+  }, timeoutMs);
+  try {
+    const chunks = [];
+    for await (const chunk of running.child.stdout) chunks.push(Buffer.from(chunk));
+    const exitCode = await running.exited;
+    if (timedOut) throw new Error(`timed out after ${timeoutMs} ms`);
+    return { stdout: Buffer.concat(chunks).toString("utf8"), exitCode };
+  } finally {
+    clearTimeout(timer);
+    if (running.child.exitCode === null) running.stop();
+  }
+}
+
 // helper/run.ts
 var runHelper = runCommand;
 var stepper;
@@ -8085,10 +7905,6 @@ async function* runStep(wire, signal, options = {}) {
   }
   if (target?.provider === "codex") {
     yield* codexStep(wire.req, target.model, signal, { pool: options.pool });
-    return;
-  }
-  if (target?.provider === "agy" || target?.provider === "grok") {
-    yield* harnessStep(wire.req, target.provider, target.model, signal);
     return;
   }
   if (wire.configText.trim() !== "") {
@@ -8319,7 +8135,7 @@ async function client(socketPath, body2, lifetime) {
 import { access, mkdir, readFile as readFile2, realpath as realpath2 } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { constants } from "node:fs";
-import { homedir as homedir3 } from "node:os";
+import { homedir as homedir2 } from "node:os";
 import path3 from "node:path";
 async function exists(file, executable = false) {
   try {
@@ -8330,13 +8146,13 @@ async function exists(file, executable = false) {
   }
 }
 async function setupInfo(env = process.env) {
-  const home = path3.resolve(env.HOME || env.USERPROFILE || homedir3());
+  const home = path3.resolve(env.HOME || env.USERPROFILE || homedir2());
   const configDir = path3.resolve(env.CLAUDE_CONFIG_DIR || path3.join(home, ".claude"));
   const codexHome = path3.resolve(env.CODEX_HOME || path3.join(home, ".codex"));
   const opencodeAuthFile = path3.join(env.XDG_DATA_HOME || path3.join(home, ".local", "share"), "opencode", "auth.json");
   const dirs = [...(env.PATH || "").split(path3.delimiter), path3.join(home, ".local", "bin"), path3.join(home, ".codex", "bin")].filter(Boolean);
   const clis = {};
-  for (const name of ["codex", "agy", "grok", "opencode", "npm"]) {
+  for (const name of ["codex", "opencode", "npm"]) {
     const suffixes = process.platform === "win32" ? [".exe", ".cmd", ""] : [""];
     for (const dir of dirs) {
       for (const suffix of suffixes) {
@@ -8406,7 +8222,7 @@ async function setupCodex(env = process.env) {
 // helper/picker-settings.ts
 import { mkdir as mkdir2, readFile as readFile3, rename, rm, writeFile } from "node:fs/promises";
 import path4 from "node:path";
-import { randomUUID as randomUUID2 } from "node:crypto";
+import { randomUUID } from "node:crypto";
 var object2 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 var canonical = (v) => JSON.stringify(v, (_key, value) => object2(value) ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, value[key]])) : value);
 function legacyGenerated(row) {
@@ -8417,8 +8233,6 @@ function legacyGenerated(row) {
   const provider2 = row.model.slice(0, slash);
   const model2 = row.model.slice(slash + 1);
   if (provider2 === "codex") return /^.+ \(Codex\)$/.test(row.label) && /^ChatGPT subscription via rice-multi-models(?:, \d+k context)?$/.test(row.description);
-  const worker = provider2 === "agy" ? "Antigravity" : provider2 === "grok" ? "Grok" : void 0;
-  if (worker && row.label === `${model2} (${worker})` && row.description === `${worker} CLI as a worker with its own tools, via rice-multi-models`) return true;
   return row.label === `${model2} (${provider2})` && /^(?:openai|responses|anthropic|gemini|bedrock) endpoint https?:\/\/\S+ via rice-multi-models(?:, \d+k context)?$/.test(row.description);
 }
 async function readJson(file, absent) {
@@ -8434,7 +8248,7 @@ async function readJson(file, absent) {
 var TRANSIENT2 = /* @__PURE__ */ new Set(["EPERM", "EACCES", "EBUSY"]);
 var pause = (ms) => new Promise((resolve2) => setTimeout(resolve2, ms));
 async function atomicWrite(file, data) {
-  const temp = `${file}.${randomUUID2()}.tmp`;
+  const temp = `${file}.${randomUUID()}.tmp`;
   try {
     await writeFile(temp, `${JSON.stringify(data, null, 2)}
 `, { flag: "wx", mode: 384 });
@@ -8955,60 +8769,11 @@ async function discoverProviders(wire, options = {}) {
 }
 
 // helper/discover.ts
-function workerModelIds(provider2, output) {
-  const text2 = output.replace(/\x1b\[[0-9;]*m/g, "");
-  if (/not authenticated|not logged in|login required/i.test(text2)) return null;
-  const lines = text2.split(/\r?\n/);
-  const listed = provider2 === "grok" ? lines.slice(lines.findIndex((line) => line.trim() === "Available models:") + 1) : lines;
-  if (provider2 === "grok" && !lines.some((line) => line.trim() === "Available models:")) return null;
-  const ids = listed.flatMap((line) => {
-    const id = (provider2 === "agy" ? line.split("	")[0] : line.replace(/\s+\(default\)\s*$/, "")).trim();
-    return /^[a-z0-9][a-z0-9._:-]{1,199}$/.test(id) ? [id] : [];
-  });
-  return ids.length ? [...new Set(ids)] : null;
-}
-async function workerCatalogue(provider2, executable, signal) {
-  const source = `${provider2} models CLI`;
-  const unavailable = (error) => ({ models: [], providers: [{ provider: provider2, status: "unavailable", source, error }] });
-  if (!executable) return unavailable("cli-unavailable");
-  let running;
-  const stop2 = () => running?.stop();
-  signal.addEventListener("abort", stop2, { once: true });
-  try {
-    signal.throwIfAborted();
-    running = startProcess([executable, "models"]);
-    if (signal.aborted) stop2();
-    let text2 = "";
-    for await (const chunk of running.child.stdout) {
-      text2 += String(chunk);
-      if (Buffer.byteLength(text2) > 1024 * 1024) return unavailable("protocol-too-large");
-      signal.throwIfAborted();
-    }
-    const code2 = await running.exited;
-    signal.throwIfAborted();
-    if (code2 !== 0) return unavailable(`cli-exit-${code2}`);
-    const ids = workerModelIds(provider2, text2);
-    if (!ids) return unavailable("model-list-unavailable");
-    const observedAt = Date.now();
-    return { models: ids.map((id) => ({ model: `${provider2}/${id}`, label: `${id} (${provider2})`, execution: "CLI worker", source, observedAt, metadata: unknownMetadata() })), providers: [{ provider: provider2, status: "fresh", source, observedAt }] };
-  } catch {
-    return unavailable(signal.aborted ? "deadline-or-cancellation" : "discovery-failed");
-  } finally {
-    signal.removeEventListener("abort", stop2);
-    if (running?.child.exitCode === null) {
-      running.stop();
-      await running.exited.catch(() => {
-      });
-    }
-  }
-}
 async function discover(wire, lifetime) {
   const signal = AbortSignal.any([AbortSignal.timeout(1e4), ...lifetime ? [lifetime] : []]);
   const config = parseConfig(wire.configText || '{"providers":{}}').config;
-  const info = await setupInfo();
   const tasks = [discoverProviders(wire, { signal, timeoutMs: 8e3 })];
   if (!config?.providers.codex) tasks.push(discoverCodex({ signal }));
-  for (const provider2 of ["agy", "grok"]) if (!config?.providers[provider2]) tasks.push(workerCatalogue(provider2, info.clis[provider2], signal));
   const results = await Promise.all(tasks);
   return { models: results.flatMap((result) => result.models), providers: results.flatMap((result) => result.providers) };
 }
@@ -9017,7 +8782,7 @@ async function discover(wire, lifetime) {
 import { lstat, mkdir as mkdir3, open, rename as rename2, rm as rm2 } from "node:fs/promises";
 import { constants as constants2 } from "node:fs";
 import path5 from "node:path";
-import { randomUUID as randomUUID3 } from "node:crypto";
+import { randomUUID as randomUUID2 } from "node:crypto";
 
 // hooks/search-config.ts
 var SEARCH_KINDS = ["searxng", "brave", "tavily"];
@@ -9130,7 +8895,7 @@ async function read(file) {
   }
 }
 async function atomicWrite2(file, config) {
-  const temporary = `${file}.${randomUUID3()}.tmp`;
+  const temporary = `${file}.${randomUUID2()}.tmp`;
   let owned = false;
   try {
     const handle = await open(temporary, "wx", 384);
@@ -9241,12 +9006,12 @@ function publicWebSearchResult(query, sources, policy, durationSeconds, calls) {
 
 // helper/search/endpoints.ts
 import { readFileSync as readFileSync2, statSync } from "node:fs";
-import { homedir as homedir4 } from "node:os";
+import { homedir as homedir3 } from "node:os";
 import { join as join2 } from "node:path";
 var SearchUnavailable = class extends Error {
 };
 function searchEndpoints(environment = process.env) {
-  const file = join2(environment.CLAUDE_CONFIG_DIR ?? join2(homedir4(), ".claude"), "rice-multi-models/search.json");
+  const file = join2(environment.CLAUDE_CONFIG_DIR ?? join2(homedir3(), ".claude"), "rice-multi-models/search.json");
   let text2;
   try {
     if (statSync(file).size > MAX_SEARCH_CONFIG_BYTES) throw new SearchUnavailable("Search configuration exceeds its size limit.");
@@ -9676,7 +9441,7 @@ var NOT_A_KEY = "rice-capture-not-a-key";
 function claude(args) {
   return process.platform === "win32" ? { file: "cmd.exe", args: ["/d", "/s", "/c", "claude", ...args] } : { file: "claude", args: [...args] };
 }
-function textOf2(content) {
+function textOf(content) {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content.map((block) => block && typeof block === "object" && typeof block.text === "string" ? block.text : "").join("\n");
@@ -9882,7 +9647,7 @@ async function captureCompaction(outer) {
     label: "compaction",
     script: ["capture one", "/compact", "capture two", `/compact ${INSTRUCTIONS_MARK}`],
     answer: (parsed) => {
-      const last = textOf2(parsed.messages?.at(-1)?.content);
+      const last = textOf(parsed.messages?.at(-1)?.content);
       const summary2 = last.includes("<analysis>") && last.includes("<summary>");
       if (summary2) prompts.push(last);
       return { text: summary2 ? `<analysis>analysis</analysis>
@@ -9893,7 +9658,7 @@ ${SUMMARY_MARK}
     signal: outer
   });
   if (prompts.length !== 2) throw new Error(`the installed claude sent ${prompts.length} summary requests, not 2`);
-  const summary = run2.transcript.filter((row) => row.isCompactSummary).map((row) => textOf2(row.message?.content)).find((text2) => text2 !== "") ?? "";
+  const summary = run2.transcript.filter((row) => row.isCompactSummary).map((row) => textOf(row.message?.content)).find((text2) => text2 !== "") ?? "";
   if (!summary) throw new Error("the installed claude wrote no compaction summary row");
   const transcriptPath = /read the full transcript at: (.+)/.exec(summary)?.[1]?.trim() ?? "";
   return deriveTemplate({ version: run2.version, plain: prompts[0], custom: prompts[1], summaryMessage: summary, transcriptPath });
@@ -9967,7 +9732,7 @@ function deriveCapture(capture) {
 // helper/native-tools.ts
 var TOOL_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 async function captureTools(names, outer) {
-  const tools = [.../* @__PURE__ */ new Set([...names.filter((name) => TOOL_NAME.test(name)), "Agent"])].sort();
+  const tools = /* @__PURE__ */ new Set([...names.filter((name) => TOOL_NAME.test(name)), "Agent"]);
   let main2;
   let listed = [];
   let expected;
@@ -9976,10 +9741,10 @@ async function captureTools(names, outer) {
     label: "tools",
     script: [MAIN_MARK],
     // Default mode, which some versions do not start a headless run in: an auto-mode classifier would judge each Agent call.
-    args: ["--permission-mode", "default", "--tools", tools.join(",")],
+    args: ["--permission-mode", "default"],
     files: { [`agents/${MARKER_AGENT}.md`]: markerAgentFile() },
     answer: async (body2, current) => {
-      const opening = textOf2(body2.messages?.[0]?.content);
+      const opening = textOf(body2.messages?.[0]?.content);
       const agent = spawnOf(opening);
       if (agent) {
         if (!spawned.some((each) => each.type === agent.type && each.background === agent.background)) spawned.push({ ...agent, body: body2 });
@@ -10007,7 +9772,19 @@ async function captureTools(names, outer) {
     signal: outer
   });
   if (main2 === void 0) throw new Error("the installed claude sent no request");
-  return deriveCapture({ version: run2.version, listed, main: main2, spawned });
+  const capture = deriveCapture({ version: run2.version, listed, main: main2, spawned });
+  const missing = [...tools].filter((name) => !capture.tools.some((tool) => tool.name === name));
+  if (missing.length > 0) throw new Error(`Claude Code did not expose requested native tools: ${missing.join(", ")}`);
+  const select = (sets) => ({
+    foreground: sets.foreground.filter((name) => tools.has(name)),
+    background: sets.background.filter((name) => tools.has(name))
+  });
+  return {
+    ...capture,
+    tools: capture.tools.filter((tool) => tools.has(tool.name)),
+    offered: Object.fromEntries(Object.entries(capture.offered).map(([type, sets]) => [type, select(sets)])),
+    custom: select(capture.custom)
+  };
 }
 
 // helper/main.ts

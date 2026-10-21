@@ -4,8 +4,10 @@ A Claude Code mod that runs models from other subscriptions, APIs and local
 servers as ordinary Claude Code session and subagent models. Claude Code keeps
 its own tools, permissions, transcript, compaction and agents; the mod answers
 each routed request with a direct call to the provider you selected. It works
-inside the normal `claude` command through supported plugin hooks. It registers
-no MCP tools and needs no launcher, proxy or gateway.
+inside the normal `claude` command through supported plugin hooks. Release
+0.11.0 removes every mod-owned agent type; Claude Code built-ins and user-supplied
+agent files remain native. It registers no MCP tools and needs no launcher, proxy
+or gateway.
 
 **Each conversation stays on its own provider family.** A Codex session's
 subagents, skills, compaction, titles, permission judgments, web search and
@@ -22,10 +24,6 @@ Providers:
   Model ids `<provider>/<model>` or an alias. See `example.rice-multi-models.json`.
 - **OpenCode Zen and OpenCode Go**: `/rice-models opencode write` declares every model
   each one serves, in its own protocol, with the key from OpenCode's login.
-- **Agent CLIs as workers**: Antigravity (`agy`, Gemini) and Grok (`grok`) run their own loop and
-  tools. Model ids `agy/<model>` and `grok/<model>`; agent types `rice-multi-models:agy`,
-  `agy-write`, `grok`, `grok-write` (registered when the CLI is installed).
-
 For switching between saved Anthropic OAuth accounts in one session, use the
 companion [rice-session-accounts](https://github.com/moabualruz/rice-session-accounts).
 
@@ -65,17 +63,24 @@ Anthropic's native models.
 | --- | --- |
 | `/model codex/...` and ask for a subagent | The subagent runs on the same Codex model |
 | Agent tool `model: haiku`, `sonnet`, `opus` or `fable` in a routed session | That tier inside the session's family (see `tiers` below), not Claude |
+| Agent tool `model` argument with an exact provider id | Rejected by Claude Code before hooks; it accepts only `haiku`, `sonnet`, `opus` or `fable` |
 | Built-in agents with their own default (Explore uses haiku) | The session's family |
-| An agent file with `model: openrouter/some-model` | Exactly that model |
-| Agent type `rice-multi-models:<family>`, e.g. `rice-multi-models:openrouter` | That family's default model |
-| Agent type `rice-multi-models:claude` | Native Claude; `model` picks haiku, sonnet, opus or fable |
+| A custom agent file with `model: openrouter/some-model` | Exactly that model |
 | A skill with `model: haiku` (or another alias) or `context: fork` | The family of the conversation that runs it |
 | A skill with `model: provider/model` | Exactly that model |
 | A session on native Claude | Claude Code's own behavior, unchanged |
 
-So the model only crosses to another family when you ask for it. The main prompt
-gets a short section listing the session's families and agent types; no tools
-are added.
+Claude Code's built-in agents and user-supplied agent files stay native. The mod
+registers no agent types of its own. Global, project, and plugin agent files keep
+their frontmatter, aliases, tools, and prompt; a file without `model` or with a
+native Claude model keeps Claude Code's normal resolution.
+
+To route a custom agent to an exact model, put its full id in the agent
+frontmatter, for example `model: codex/gpt-6.1-sol`. That id reaches the engine
+unchanged and `agent.spawn` routes the resulting step. The Agent tool argument
+itself accepts only `haiku`, `sonnet`, `opus`, or `fable`, not an exact provider
+id. The main prompt gets a short section listing discovered families and
+models; no tools are added.
 
 Map tiers to specific models per family in `rice-multi-models.json`:
 
@@ -116,6 +121,7 @@ These come from what Claude Code exposes to plugins today:
   - An agent type the engine lists only in some sessions (claude-code-guide is not listed to a headless run without an account) has no captured prompt; a routed step of it is refused.
   - SubagentHandback is offered only in auto mode, where every Agent call passes the engine's own classifier, so the capture cannot start one; the mod keeps its own definition of that tool (the engine's name and input shape).
   - A headless foreground subagent is offered a few more tools than a background one, and an interactive session's subagents get the background set; the mod follows that.
+- **Auxiliary prompt text.** Session titles, auto-mode permission judgments, WebFetch extraction, and Stop or SubagentStop prompt evaluators still use text written by this mod. The headless probes did not expose the native title or permission-judge prompts. Stop and SubagentStop system blocks matched across marker runs, but the complete requests differed and no independent byte-for-byte verification succeeded. The WebFetch probe did not reach a successful page extraction request. No native prompt was substituted without that proof.
 - **A long step shows a stale label.** After a compaction or a subagent spawn the engine's spinner keeps reading "Running SessionStart hooks..." for the whole next routed step, which can take minutes on a large context. The session is working; the label is the engine's.
 - **Auto-mode handoff review.** When a subagent finishes while its parent is in
   auto mode, Claude Code reviews the report with its own classifier, which uses
@@ -184,8 +190,6 @@ See the [provider research](docs/research/provider-web-search-20261016.md).
 | Codex / ChatGPT | Codex CLI and a ChatGPT account with access | `codex login`; reuse `$CODEX_HOME/auth.json` or the default `~/.codex/auth.json` |
 | OpenCode Zen / Go | OpenCode CLI login, plus Zen credit or an active Go subscription | `opencode auth login`, then `/rice-models opencode write` |
 | Declared API / local endpoint | Endpoint, model definitions and an auth command, or `auth: "none"` for a local server | `~/.claude/rice-multi-models.json`; approve the provider when prompted |
-| Antigravity worker | Installed `agy` CLI and its own account | Sign in through `agy`; the CLI worker controls its own tools |
-| Grok worker | Installed `grok` CLI and its own account | `grok login`; the CLI worker controls its own tools |
 
 `/rice-models setup codex` installs the pinned official Codex CLI into the mod's
 own state folder (never globally) and shows its login command.
@@ -216,9 +220,9 @@ is not imported.
 | Where | How |
 | --- | --- |
 | Main session | `/model <id>` or `claude --model <id>` with an id from `/rice-models models` |
-| Your own subagent type | `model: <id>` in its agent file (`.claude/agents/*.md`) |
-| Ad hoc | agent types `rice-multi-models:codex`, `rice-multi-models:codex-explore`, `rice-multi-models:<family>`, `rice-multi-models:claude` |
-| Mixed | a Claude session with routed subagents, or a routed session with `rice-multi-models:claude` subagents |
+| Your own subagent type | `model: provider/model` in its agent frontmatter (`.claude/agents/*.md`), for example `model: codex/gpt-6.1-sol` |
+| Ad hoc | Create or choose an agent definition with the desired exact `model` id in frontmatter |
+| Mixed | A Claude session with routed subagents, or a routed session with Claude subagents whose agent frontmatter names a Claude model id |
 
 `/effort` and `--effort` reach the selected provider. `/rice-models effort <level>`,
 `/rice-models transport auto|ws|sse` and `/rice-models helper session|once` change
@@ -227,10 +231,10 @@ them for the session.
 ### Discovery and picker
 
 Every session start runs bounded discovery: Codex's authenticated models
-endpoint, approved declared providers' `/models` APIs, and the installed worker
-CLIs. Unapproved providers are not contacted. Reported context, input and output
-limits, modalities, efforts and tool support are kept as reported; `null` means
-not reported. `/rice-models refresh` fetches a new snapshot.
+endpoint and approved declared providers' `/models` APIs. Unapproved providers
+are not contacted. Reported context, input and output limits, modalities, efforts
+and tool support are kept as reported; `null` means not reported.
+`/rice-models refresh` fetches a new snapshot.
 
 The `/model` picker gets one row per discovered model in `~/.claude/settings.json`
 (`modelPicker`). Rows you wrote or edited are kept, no row claims another model's
@@ -245,17 +249,6 @@ provider's own usage report for the previous request plus the messages added
 since, and stops a request that would exceed 95% of the reported input bound.
 Before a model switch, a switch whose context exceeds the destination's reported
 bound is denied.
-
-## Workers (Antigravity, Grok)
-
-A worker step runs the CLI headless with the newest user turn: its narration, reasoning and
-actions (`▸ view_file ...`) stream as thinking, and its final response is the answer (a
-subagent's report). Each conversation keeps the CLI's own session, so a follow-up resumes it.
-The read-only types run in the CLI's plan mode; the `-write` types allow file edits
-(accept-edits). Neither skips the CLI's permission checks: a command the CLI would ask about
-is refused in headless mode. As the main session model (`/model agy/gemini-3.8-flash-high`),
-`/rice-models workers read|write` picks the mode. Sign in with the CLI first (`agy`, `grok login`).
-In a worker session, subagents that ask for a native alias run on the same worker.
 
 ## Declared providers
 
@@ -393,7 +386,7 @@ claude plugin update rice-multi-models@rice-mods
 
 0.9.1 and later register no MCP tools. If you followed older instructions that used the
 `mcp__rice-multi-models__*` tools or a separate startup launcher, use `/rice-models
-models` and the `rice-multi-models:<family>` agent types instead, and start the
+models` and put exact provider/model ids in your custom agent frontmatter, then start the
 ordinary `claude` command.
 
 ## Requirements and platform scope

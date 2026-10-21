@@ -5,7 +5,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, ModelCompleteResult, ModelUsage, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
-import { BUILTIN_AGENTS, HANDBACK_TOOL, identityLine, isFork, toolFilter } from './agents'
+import { AGENT_PERMISSION_MODES, BUILTIN_AGENTS, HANDBACK_TOOL, identityLine, isFork, toolFilter } from './agents'
 import type { AgentDef } from './agents'
 import { anchoredEstimate, reportedInput } from './budget'
 import type { UsageAnchor } from './budget'
@@ -34,7 +34,7 @@ import type { FamilyLine } from './discovery'
 import type { CandidateRoute } from './discovery'
 import { approvalQuestion, CONFIG_FILE, emptyLoaded, estimateTokens, loadText, providerLines, remoteOf, TRUST_PREFIX } from './providers'
 import type { Loaded, Remote } from './providers'
-import { definitionOf, rewriteMain, systemFor, withIdentity } from './prompts'
+import { contested, definitionOf, rewriteMain, systemFor, withIdentity } from './prompts'
 import type { PromptsPort } from './prompts'
 import { splitTarget } from './protocol'
 import type { ApiMessage, Effort, Limits, RemoteTool, StepRequest, StepWire, Transport } from './protocol'
@@ -62,15 +62,10 @@ import { createEvaluatorSources, registerEvaluatorSources } from './evaluator-so
 
 const PLUGIN = 'rice-multi-models'
 /** Who the requests to declared providers say they come from (OpenCode Go asks each client to name itself). */
-const USER_AGENT = 'rice-multi-models/0.10.0 (claude-code)'
-const PROVIDERS: Readonly<Record<string, string>> = { codex: 'OpenAI Codex (ChatGPT subscription)', agy: 'Antigravity (agy CLI)', grok: 'Grok (grok CLI)' }
-/** Agent CLIs that run their own loop and tools: their label, default model, and what a user asks for to use them. */
-const WORKERS: Readonly<Record<string, { label: string; ask: string }>> = {
-  agy: { label: 'Antigravity (Gemini)', ask: 'Antigravity or Gemini' },
-  grok: { label: 'Grok Build', ask: 'Grok' },
-}
+const USER_AGENT = 'rice-multi-models/0.11.0 (claude-code)'
+const PROVIDERS: Readonly<Record<string, string>> = { codex: 'OpenAI Codex (ChatGPT subscription)' }
 const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
-const prefsAtom = atom({ plugin: 'rice-multi-models', key: 'prefs' } as const, { effort: null, transport: 'auto', helper: 'session', workers: 'read' })
+const prefsAtom = atom({ plugin: 'rice-multi-models', key: 'prefs' } as const, { effort: null, transport: 'auto', helper: 'session' })
 /** The main transcript's file, as the engine's classic hooks name it; a compaction cites it in its summary message. */
 const transcriptAtom = atom({ plugin: 'rice-multi-models', key: 'transcript' } as const, { path: null })
 
@@ -78,6 +73,8 @@ const memory = createMemory()
 const described = new Map<string, Described>()
 /** The model each subagent loop last ran on, for its compaction. */
 const agentModels = new Map<string, string>()
+/** Effective permission-mode overrides from unambiguous native agent frontmatter, by spawned agent id. */
+const agentPermissionModes = new Map<string, string>()
 const webToolGate = createToolGate()
 const toolModes = new Map<string, { mode?: string; agentId?: string }>()
 let permissionDefaults: Promise<unknown> | undefined
@@ -86,21 +83,14 @@ let loadedPermissionContext: string | undefined
 /** Whether the loaded context includes instruction files (CLAUDE.md and its kin). */
 let loadedInstructionFiles = false
 let permissionRevision = 0
-/** The agent types this mod registers, by their full name, with what they run on. */
+/** Agent definitions observed from Claude Code or user plugins, by their full type name. */
 const registered = new Map<string, AgentDef>()
-const unverifiedRegistered = new Set<string>()
 let runtime: Runtime = {}
 let helperSupervision: Promise<void> | undefined
 let helperReadiness: Promise<void> | undefined
 let codexDefaults: { model?: string; effort?: Effort } = {}
 let limits: Limits | undefined
 let lastStep: { model: string; who: string; ms: number; transport: string } | undefined
-/** Each conversation's worker run to resume (`main` or a subagent's id). */
-const resumes = new Map<string, string>()
-/** Whether each registered worker agent type may edit files. */
-const workerWrites = new Map<string, boolean>()
-/** The family each of this mod's family agent types runs on, by full type name. */
-const familyTypes = new Map<string, string>()
 /** Each conversation's last provider-reported request size, for the input-budget guard. */
 const usageAnchors = new Map<string, UsageAnchor>()
 /** The main model last recorded for this session, so a resume on another model can say so once. */
@@ -126,7 +116,6 @@ const reportedToolFallbacks = new Set<string>()
 let interactiveSession: boolean | undefined
 /** Whether each spawned agent runs in the background, by its agent id. */
 const spawnBackground = new Map<string, boolean>()
-let agentRegistration = Promise.resolve()
 let seenTranscriptPath: string | undefined
 
 async function auxiliaryOwner($: EngineInterface) {
@@ -223,25 +212,24 @@ const familyPorts: FamilyPorts = {
   defaultModel: family => familyDefault(family),
 }
 
-/** Native provider families with a fresh catalogue (CLI workers are their own agent types). */
+/** Native provider families with a fresh catalogue. */
 function routedFamilies(): string[] {
   const fresh = new Set(catalogue.providers.filter(provider => provider.status === 'fresh').map(provider => provider.provider))
   const families = new Set<string>()
   for (const entry of catalogue.models) {
     if (entry.execution !== 'native provider') continue
     const family = entry.model.slice(0, entry.model.indexOf('/'))
-    if (family && fresh.has(family) && !Object.hasOwn(WORKERS, family)) families.add(family)
+    if (family && fresh.has(family)) families.add(family)
   }
   return [...families].sort()
 }
 
 function familyLines(): FamilyLine[] {
-  const typeOf = (family: string) => [...familyTypes].find(([, owner]) => owner === family)?.[0]
   const lines: FamilyLine[] = routedFamilies().map(family => ({
-    family, label: PROVIDERS[family] ?? family, type: typeOf(family), model: familyDefault(family),
+    family, label: PROVIDERS[family] ?? family, model: familyDefault(family),
     tiers: Object.fromEntries(Object.entries(tiers()[family] ?? {}).filter(([tier]) => tier !== 'default')),
   }))
-  return lines.length ? [...lines, { family: CLAUDE_FAMILY, label: 'Claude (Anthropic)', type: typeOf(CLAUDE_FAMILY) }] : []
+  return lines.length ? [...lines, { family: CLAUDE_FAMILY, label: 'Claude (Anthropic)' }] : []
 }
 
 async function refreshCatalogue($: EngineInterface): Promise<void> {
@@ -449,102 +437,6 @@ async function readCodexDefaults($: EngineInterface): Promise<{ model?: string; 
   }
 }
 
-/** Registers this mod's agent types, one registration at a time. */
-function registerAgents($: EngineInterface): Promise<void> {
-  agentRegistration = agentRegistration.catch(() => {}).then(() => registerAgentTypes($))
-  return agentRegistration
-}
-
-async function registerAgentTypes($: EngineInterface): Promise<void> {
-  const model = defaultModel('codex')
-  // The general-purpose and Explore prompts these types run on are the installed claude's own. Until they are read
-  // the types are not offered; a capture is started, and they are registered when it ends.
-  // Startup never fails for want of them: without the session's tool list nothing is read and the types wait.
-  const names = await $.tool.list().then(builtinNames, () => undefined)
-  const native = names && await readyTools($, names).catch(() => undefined)
-  const general = native && builtinPrompt(native, 'general-purpose')
-  const explore = native && builtinPrompt(native, 'Explore')
-  if (names && !native && (model || routedFamilies().length)) void stepTools($, names).then(capture => capture instanceof Error ? undefined : registerAgents($))
-  const agents: { name: string; description: string; def: AgentDef }[] = [
-    ...(general ? [{
-      name: 'codex',
-      description: `A general-purpose subagent running on ${model} (OpenAI Codex via the ChatGPT subscription), with Claude Code's tools. Give it a complete, self-contained task.`,
-      def: { prompt: general },
-    }] : []),
-    ...(explore ? [{
-      name: 'codex-explore',
-      description: `A read-only search agent running on ${model}: finds code and files and reports where they are. Say how thorough to be.`,
-      def: { prompt: explore, tools: ['Read', 'Glob', 'Grep', 'Bash', 'WebFetch', 'WebSearch'] },
-    }] : []),
-  ]
-  if (model) for (const agent of agents) {
-    await $.agent.register({ name: agent.name, description: agent.description, prompt: agent.def.prompt, model, ...(agent.def.tools ? { tools: agent.def.tools } : {}) })
-    // The definition's model makes a spawn of this type keep its own family.
-    registered.set(`${PLUGIN}:${agent.name}`, { ...agent.def, model })
-  }
-  familyTypes.clear()
-  if (model && general) familyTypes.set(`${PLUGIN}:codex`, 'codex')
-  for (const family of general ? routedFamilies() : []) {
-    if (family === 'codex') continue
-    const familyModel = familyDefault(family)
-    if (!familyModel) continue
-    const name = `${PLUGIN}:${family}`
-    await $.agent.register({ name: family, description: `A general-purpose subagent on the ${family} provider family (${familyModel}), with Claude Code's tools. Choose it only when the user or session instructions ask for ${family}; the Agent model alias picks the tier.`, prompt: general!, model: familyModel })
-    registered.set(name, { prompt: general!, model: familyModel })
-    familyTypes.set(name, family)
-  }
-  if (familyTypes.size && general) await $.agent.register({ name: 'claude', description: "A general-purpose subagent on Anthropic's Claude models. Choose it only when the user or session instructions ask for Claude; the Agent model alias (haiku, sonnet, opus, fable) picks the model.", prompt: general, model: 'sonnet' })
-  // A type registered earlier in this process stays offered after a refresh
-  // that finds no routed family; it must still mean native Claude.
-  familyTypes.set(`${PLUGIN}:claude`, CLAUDE_FAMILY)
-  for (const [worker, info] of Object.entries(WORKERS)) {
-    const workerModel = defaultModel(worker)
-    if (!workerModel || !catalogue.models.some(entry => entry.model === workerModel && entry.execution === 'CLI worker')) continue
-    for (const write of [false, true]) {
-      const name = write ? `${worker}-write` : worker
-      const can = write ? 'reads, runs its own tools and may edit files (accept-edits)' : 'reads and plans only (plan mode)'
-      const prompt = `You are ${info.label} working for a Claude Code session. Do the task you are given with your own tools, then answer with a complete report of what you found or changed; that report is all the caller reads.`
-      await $.agent.register({ name, description: `Runs ${info.label} on ${workerModel} as a worker with its own tools; it ${can}. Use it when the user asks for ${info.ask}.`, prompt, model: workerModel, tools: [] })
-      registered.set(`${PLUGIN}:${name}`, { prompt, tools: [], model: workerModel })
-      workerWrites.set(`${PLUGIN}:${name}`, write)
-    }
-  }
-}
-
-/**
- * A worker step's request: no Claude system prompt or tools (the CLI brings its own), the agent's own
- * instructions when it has a definition, the transcript for its user turns, the session's directory, the
- * conversation's run to resume, and whether the run may edit files.
- */
-async function buildWorkerRequest($: EngineInterface, e: TurnStepInput, transcript: readonly ApiMessage[]): Promise<StepRequest> {
-  const who = e.agentId ?? 'main'
-  let system = ''
-  let write = (await read($, prefsAtom)).workers === 'write'
-  if (e.agentId !== undefined) {
-    const type = (await $.agent.list()).find(each => each.id === e.agentId)?.type
-    if (type && unverifiedRegistered.has(type)) throw new Error('The registered worker has no successfully accepted native prompt definition.')
-    const def = (type && registered.get(type)) || (await definitionOf(promptsPort($), memory, type))
-    system = def?.prompt ?? ''
-    write = type ? (workerWrites.get(type) ?? false) : false
-  }
-  const prefs = await read($, prefsAtom)
-  const effort = e.effort ?? prefs.effort ?? undefined
-  const resume = resumes.get(who)
-
-  return {
-    target: e.model,
-    system,
-    tools: [],
-    transcript,
-    ...(effort ? { effort } : {}),
-    who,
-    session: await $.session.id(),
-    cwd: await $.session.cwd(),
-    ...(resume ? { resume } : {}),
-    workerWrite: write,
-  }
-}
-
 /**
  * Whose prompt a subagent's step follows: its own agent type's and definition, or for a fork the conversation it
  * forks, the nearest ancestor that is not a fork (no type when that is main).
@@ -559,7 +451,6 @@ async function promptOwner($: EngineInterface, agentId: string) {
     source = parent === undefined ? undefined : agents.find(each => each.id === parent)
   }
   const type = fork ? source?.type : agent?.type
-  if (type && unverifiedRegistered.has(type)) throw new Error('The registered agent has no successfully accepted native prompt definition.')
   const def = (type && registered.get(type)) || (await definitionOf(promptsPort($), memory, type))
   return { agent, fork, type, def, route: fork && type === undefined ? undefined : { type, label: '' } }
 }
@@ -632,7 +523,6 @@ async function permissionInstructions($: EngineInterface, model: string, agentId
   if (agentId) {
     const agent = (await $.agent.list()).find(each => each.id === agentId)
     if (!agent) throw new Error('The permission conversation is unavailable.')
-    if (unverifiedRegistered.has(agent.type)) throw new Error('The permission conversation has no successfully accepted native prompt definition.')
     const owner = await promptOwner($, agentId)
     omitClaudeMd = owner.def?.omitClaudeMd === true
     const target = targetOf(model)
@@ -715,17 +605,14 @@ async function* routedStep($: EngineInterface, e: TurnStepInput): AsyncGenerator
   $.ui.log(`${PLUGIN}: step ${who} ${e.model} index=${e.index} effort=${e.effort ?? 'unset'}`, { to: 'debug' })
   const assembler = createAssembler(e.model)
   let handback: string | undefined
-  let deliver = false
   let anchorMessages: number | undefined
   try {
     const transcript = await $.session.messages(e.agentId === undefined ? { as: 'api' } : { as: 'api', agentId: e.agentId })
     if (!Array.isArray(transcript)) throw new Error(`the transcript of ${who} is unreadable (${transcript.deny})`)
     if (e.agentId !== undefined && !carriesTask(transcript as ApiMessage[])) throw new Error(`the task of ${who} is not readable by plugins (subagent transcripts need session persistence); nothing was sent`)
     anchorMessages = transcript.length
-    const isWorker = Object.hasOwn(WORKERS, targetOf(e.model)?.provider ?? '') && !targetOf(e.model)?.remote
-    const built = isWorker ? { req: await buildWorkerRequest($, e, transcript as ApiMessage[]), ...(e.agentId !== undefined && handbackState(transcript as ApiMessage[], HANDBACK_TOOL.name) === 'offered' ? { handback: HANDBACK_TOOL.name } : {}) } : await buildRequest($, e, transcript as ApiMessage[])
+    const built = await buildRequest($, e, transcript as ApiMessage[])
     handback = built.handback
-    deliver = isWorker
     const remote = targetOf(e.model)?.remote
     if (remote) {
       const refused = await approval($, remote)
@@ -740,7 +627,6 @@ async function* routedStep($: EngineInterface, e: TurnStepInput): AsyncGenerator
     let firstTool: string | undefined
     for await (const event of helperStep(helperPort($), await wireFor($, built.req))) {
       if (event.type === 'signature') reasoning.push({ thinking: event.thinking, signature: event.signature })
-      else if (event.type === 'resume') setCapped(resumes, who, event.key)
       else if (event.type === 'limits') {
         limits = event.limits
         limitsObservedAt = await $.clock.now()
@@ -759,7 +645,7 @@ async function* routedStep($: EngineInterface, e: TurnStepInput): AsyncGenerator
   } catch (error) {
     assembler.feed({ type: 'error', kind: 'request', text: `rice-multi-models: ${error instanceof Error ? error.message : String(error)}` })
   }
-  const end = assembler.end(handback ? { handback, deliver } : {})
+  const end = assembler.end(handback ? { handback } : {})
   const reported = end.failure === undefined ? reportedInput(end.usage) : undefined
   if (reported !== undefined && anchorMessages !== undefined) setCapped(usageAnchors, who, { model: e.model, tokens: reported, messages: anchorMessages })
   if (end.failure !== undefined && e.agentId !== undefined) $.ui.toast(end.failure.split('\n')[0] ?? end.failure)
@@ -1054,14 +940,6 @@ function candidateRoute(model: string): CandidateRoute | undefined {
       codexSubscriptionQuota: true,
     }
   }
-  if (target.provider === 'agy' || target.provider === 'grok') {
-    return {
-      source: `${target.provider} installed worker`,
-      execution: 'CLI worker',
-      identity: JSON.stringify({ kind: 'cli-worker', provider: target.provider, model: target.model }),
-      codexSubscriptionQuota: false,
-    }
-  }
   return undefined
 }
 
@@ -1107,7 +985,7 @@ async function writePicker($: EngineInterface): Promise<string> {
 
 async function setupCommand($: EngineInterface, action: string | undefined): Promise<string> {
   if (action === 'native') return 'Start the normal claude command. This mod uses supported plugin hooks; separate launchers are no longer installed. Use /rice-models setup repair to check the local runtime.'
-  if (action && !['repair', 'codex'].includes(action)) return 'Usage: /rice-models setup [repair|codex]. Optional agy/grok CLIs require their vendor-supported installers; no global install is performed.'
+  if (action && !['repair', 'codex'].includes(action)) return 'Usage: /rice-models setup [repair|codex]. No global install is performed.'
   runtime = await detectRuntime($)
   if (runtime.error) {
     await syncNativeContext($, true)
@@ -1125,7 +1003,6 @@ async function setupCommand($: EngineInterface, action: string | undefined): Pro
   codexDefaults = await readCodexDefaults($)
   await loadProviders($)
   await refreshCatalogue($)
-  await registerAgents($)
   await ensureHelper($)
   const rows = routedRows()
   return setupSummary(runtime, await syncPicker($, runtime, rows), rows.length, defaultModel('codex'))
@@ -1213,7 +1090,6 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
     toolCaptureFailure = undefined
     await loadProviders($)
     await refreshCatalogue($)
-    await registerAgents($)
     await syncPicker($, runtime, routedRows())
     return `${loaded.errors.length > 0 ? `${loaded.path} does not validate; no declared provider routes:\n${loaded.errors.join('\n')}` : providerLines(loaded, await approvedSet($)).join('\n')}\n\n${await discoveryText($, 'models')}`
   }
@@ -1237,13 +1113,6 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
 
     return `Routed models think at ${value} effort in this session, unless a request sets its own.`
   }
-  if (first === 'workers') {
-    if (value !== 'read' && value !== 'write') return 'Usage: /rice-models workers read|write (for agy/... or grok/... as the session model)'
-    const workers: 'read' | 'write' = value
-    await update($, prefsAtom, prefs => ({ ...prefs, workers }))
-
-    return workers === 'write' ? 'A worker model in this session may edit files (accept-edits).' : 'A worker model in this session only reads and plans.'
-  }
   if (first === 'helper') {
     if (value !== 'session' && value !== 'once') return 'Usage: /rice-models helper session|once'
     const helper: 'session' | 'once' = value
@@ -1259,7 +1128,7 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
     return `Routed requests use ${value === 'auto' ? 'a WebSocket, falling back to server-sent events' : value === 'ws' ? 'a WebSocket only' : 'server-sent events only'}.`
   }
 
-  return 'Usage: /rice-models [setup [repair|codex] | search [setup|add|remove|priority] | doctor | status | models | picker [write] | providers | approve <provider> | refresh | reload | opencode [zen|go] [write] | effort <level> | transport auto|ws|sse | helper session|once | workers read|write]'
+  return 'Usage: /rice-models [setup [repair|codex] | search [setup|add|remove|priority] | doctor | status | models | picker [write] | providers | approve <provider> | refresh | reload | opencode [zen|go] [write] | effort <level> | transport auto|ws|sse | helper session|once]'
 }
 
 export const register: Register = on => {
@@ -1325,13 +1194,12 @@ export const register: Register = on => {
     await $.command.register({
       name: 'rice-models',
       description: 'Native model setup, repair, read-only doctor, candidates, approvals and preferences',
-      argumentHint: '[setup [repair|codex] | search [setup|add|remove|priority] | doctor | status | models | picker [write] | providers | approve <provider> | refresh | reload | opencode [zen|go] [write] | effort <level> | transport auto|ws|sse | helper session|once | workers read|write]',
+      argumentHint: '[setup [repair|codex] | search [setup|add|remove|priority] | doctor | status | models | picker [write] | providers | approve <provider> | refresh | reload | opencode [zen|go] [write] | effort <level> | transport auto|ws|sse | helper session|once]',
     })
     runtime = await detectRuntime($)
     codexDefaults = await readCodexDefaults($)
     await loadProviders($)
     await refreshCatalogue($)
-    await registerAgents($)
     // A nested claude process can migrate settings; run it before any judgment
     // is pending so its settings change cannot invalidate one.
     let routedMain = false
@@ -1380,8 +1248,7 @@ export const register: Register = on => {
   on('prompt.compose', async ($, e, next) => {
     const answer = await next(e)
     const families = familyLines()
-    const workers = [...registered.keys()].filter(type => workerWrites.has(type)).map(type => ({ type, label: WORKERS[type.slice(PLUGIN.length + 1).replace(/-write$/, '')]?.label ?? type }))
-    return families.length || workers.length ? { ...answer, sections: withDiscoverySection(answer.sections, discoveryGuidance(families, workers)) } : answer
+    return families.length ? { ...answer, sections: withDiscoverySection(answer.sections, discoveryGuidance(families)) } : answer
   })
 
   on('classic.ConfigChange', async ($, e, next) => { permissionRevision++; loadedPermissionContext = undefined; loadedInstructionFiles = false; $.ui.invalidate('prompt.context'); return next(e) })
@@ -1406,13 +1273,11 @@ export const register: Register = on => {
       const type = result.value.agent
       const actual = next.trace.find(link => link.plugin === 'engine' && link.tier === 'core' && ['returned', 'passed'].includes(link.outcome) && link.returned?.value?.agent === type)?.received
       if (actual) {
-        unverifiedRegistered.delete(type)
         registered.set(type, { name: actual.name, prompt: actual.prompt, model: actual.model, tools: actual.tools, disallowedTools: actual.disallowedTools,
           ...(typeof actual.effort === 'string' ? { effort: actual.effort } : {}), ...(actual.omitClaudeMd ? { omitClaudeMd: true } : {}), ...(actual.hooks ? { hooks: actual.hooks } : {}),
         })
       } else {
         registered.delete(type)
-        unverifiedRegistered.add(type)
       }
     }
     return result
@@ -1423,7 +1288,10 @@ export const register: Register = on => {
     // session's nonce survives in the process environment.
     if (!permissionContextNonce) permissionContextNonce = await $.env.get('RICE_MULTI_MODELS_PERMISSION_CONTEXT_NONCE') ?? ''
     const context = consumePermissionContext(result.additionalContext ?? [], { nonce: permissionContextNonce, sessionId: await $.session.id(), toolUseId: e.tool_use_id })
-    if (context.proof) toolModes.set(e.tool_use_id, { mode: context.proof.mode, agentId: context.proof.agentId })
+    if (context.proof) {
+      const override = context.proof.agentId === undefined ? undefined : agentPermissionModes.get(context.proof.agentId)
+      toolModes.set(e.tool_use_id, { mode: override ?? context.proof.mode, agentId: context.proof.agentId })
+    }
     return { ...result, additionalContext: context.remaining }
   })
 
@@ -1508,13 +1376,16 @@ export const register: Register = on => {
     const parentModel = e.parentAgentId === undefined
       ? stepModel(e.parentModel, await $.session.model(), false, tiers(), familyPorts)
       : agentModels.get(e.parentAgentId) ?? e.parentModel
-    const decision = spawnDecision({ parentModel, requested: e.model, subagentType: e.subagentType, definitionModel: definition?.model, fork: e.fork, familyTypes }, tiers(), familyPorts)
-    if (familyTypes.has(e.subagentType) && decision.family !== CLAUDE_FAMILY && decision.model === undefined) return { deny: `${PLUGIN}: ${decision.reason}; nothing was started` }
+    const decision = spawnDecision({ parentModel, requested: e.model, definitionModel: definition?.model, fork: e.fork }, tiers(), familyPorts)
     $.ui.log(`${PLUGIN}: spawn ${e.subagentType} from ${parentModel}: ${decision.model ?? 'native resolution'} (${decision.reason})`, { to: 'debug' })
     const result = await next(decision.model !== undefined && decision.model !== e.model ? { ...e, model: decision.model } : e)
     if (result.agentId) {
       setCapped(spawnDecisions, result.agentId, decision)
       setCapped(spawnBackground, result.agentId, e.background)
+      if (!registered.has(e.subagentType) && definition?.permissionMode && AGENT_PERMISSION_MODES.has(definition.permissionMode)
+        && !(await contested(promptsPort($), memory, e.subagentType))) {
+        setCapped(agentPermissionModes, result.agentId, definition.permissionMode)
+      }
     }
     return result
   })

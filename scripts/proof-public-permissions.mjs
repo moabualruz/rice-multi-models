@@ -86,7 +86,7 @@ try {
   const close = source.lastIndexOf('\n}')
   assert.ok(close > 0)
   source = source.slice(0, close) + `
-  on('state.get', {plugin:'rice-multi-models',key:'prefs'}, () => ({value:{value:{effort:null,transport:'sse',helper:'once',workers:'read'},version:0}}))
+  on('state.get', {plugin:'rice-multi-models',key:'prefs'}, () => ({value:{value:{effort:null,transport:'sse',helper:'once'},version:0}}))
   on('process.run', async ($, e, next) => {
     if (!e.argv.includes('discover')) return next(e)
     return {value:{exitCode:0,stdout:JSON.stringify({models:[],providers:[]}),stderr:'',isStdoutTruncated:false,isStderrTruncated:false}}

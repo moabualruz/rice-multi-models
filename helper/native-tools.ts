@@ -13,8 +13,10 @@ const TOOL_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/
 
 /** Runs the capture for the session's built-in tools; rejects when the installed claude does not behave as expected. */
 export async function captureTools(names: readonly string[], outer?: AbortSignal): Promise<NativeCapture> {
-  // The Agent tool starts the agents whose prompts are read.
-  const tools = [...new Set([...names.filter(name => TOOL_NAME.test(name)), 'Agent'])].sort()
+  // The Agent tool starts the agents whose prompts are read. Capture against
+  // Claude Code's default native surface, then select this session's names: an
+  // explicit --tools list changes its own dynamic tool descriptions.
+  const tools = new Set([...names.filter(name => TOOL_NAME.test(name)), 'Agent'])
   let main: Record<string, unknown> | undefined
   let listed: string[] = []
   let expected: number | undefined
@@ -23,7 +25,7 @@ export async function captureTools(names: readonly string[], outer?: AbortSignal
     label: 'tools',
     script: [MAIN_MARK],
     // Default mode, which some versions do not start a headless run in: an auto-mode classifier would judge each Agent call.
-    args: ['--permission-mode', 'default', '--tools', tools.join(',')],
+    args: ['--permission-mode', 'default'],
     files: { [`agents/${MARKER_AGENT}.md`]: markerAgentFile() },
     answer: async (body, current) => {
       const opening = textOf((body.messages as { content?: unknown }[] | undefined)?.[0]?.content)
@@ -52,5 +54,17 @@ export async function captureTools(names: readonly string[], outer?: AbortSignal
     signal: outer,
   })
   if (main === undefined) throw new Error('the installed claude sent no request')
-  return deriveCapture({ version: run.version, listed, main, spawned })
+  const capture = deriveCapture({ version: run.version, listed, main, spawned })
+  const missing = [...tools].filter(name => !capture.tools.some(tool => tool.name === name))
+  if (missing.length > 0) throw new Error(`Claude Code did not expose requested native tools: ${missing.join(', ')}`)
+  const select = (sets: { readonly foreground: readonly string[]; readonly background: readonly string[] }) => ({
+    foreground: sets.foreground.filter(name => tools.has(name)),
+    background: sets.background.filter(name => tools.has(name)),
+  })
+  return {
+    ...capture,
+    tools: capture.tools.filter(tool => tools.has(tool.name)),
+    offered: Object.fromEntries(Object.entries(capture.offered).map(([type, sets]) => [type, select(sets)])),
+    custom: select(capture.custom),
+  }
 }

@@ -124,12 +124,12 @@ test('runtime text reparses exactly with safe params, aliases, auth and approval
   expect(effective.text).not.toContain('Bearer ')
 })
 
-test('unavailable snapshots, CLI workers and unconfigured providers add no routes', () => {
+test('unavailable snapshots and unconfigured providers add no routes', () => {
   const loaded = source({ manual: {} })
   const unavailable = snapshot(discovered('stale'))
   unavailable.providers[0]!.status = 'unavailable'
   expect(runtimeConfig(loaded, unavailable).config).toEqual(loaded.config)
-  const effective = runtimeConfig(loaded, snapshot(discovered('worker', {}, { execution: 'CLI worker' }), discovered('alien', {}, { model: 'other/alien' })))
+  const effective = runtimeConfig(loaded, snapshot(discovered('alien', {}, { model: 'other/alien' })))
   expect(effective.config).toEqual(loaded.config)
   const invalid = loadText('/invalid/config.json', '{')
   expect(runtimeConfig(invalid, snapshot(discovered('m')))).toBe(invalid)

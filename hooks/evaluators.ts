@@ -37,21 +37,6 @@ export type StopHookResult = { block?: string; preventContinuation?: true; stopR
 export type HookOutcome = { result: StopHookResult; error?: string }
 export type EvaluatorCompletion = { isAnswered: boolean; text?: string }
 
-// Native 2.1.301 ett -> _2r/Pct: lifecycle, planning and interactive tools
-// stay out of the verifier. Bash/Edit/Write are still governed by dontAsk and
-// the original permission rules, as they are in the native evaluator.
-const EVALUATOR_EXCLUDED = new Set([
-  'StructuredOutput', 'Agent', 'Task', 'Poll', 'ExitPlanMode', 'EnterPlanMode',
-  'memory_list', 'memory_read', 'memory_write', 'AskUserQuestion', 'ConnectGitHub',
-  'OfferChromeSetup', 'propose_skills', 'WaitForMcpServers', 'RefreshMcpTools',
-  'Workflow', 'ScheduleWakeup', 'ReadNotifications', 'ProposeGoal', 'PublishPlugin',
-  'EndConversation', 'AppifactRepl',
-])
-
-export function evaluatorTools(names: readonly string[]): string[] {
-  return names.filter(name => !EVALUATOR_EXCLUDED.has(name))
-}
-
 const object = (value: unknown): Record<string, unknown> | undefined => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
 const nonempty = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0
 
@@ -148,13 +133,13 @@ export function evaluatorRequest(hook: PlannedEvaluator, event: EvaluatorEvent, 
 }
 
 /** A failed evaluation reports a hook error, with no inference fallback. */
-export function evaluatorAnswer(type: PlannedEvaluator['type'], completion: EvaluatorCompletion): HookOutcome {
+export function evaluatorAnswer(completion: EvaluatorCompletion): HookOutcome {
   if (!completion.isAnswered || typeof completion.text !== 'string') return { result: {}, error: 'The selected provider did not complete the hook evaluation.' }
   try {
     const value = object(JSON.parse(completion.text))
     if (!value || typeof value.ok !== 'boolean' || typeof value.reason !== 'string' || value.impossible !== undefined && typeof value.impossible !== 'boolean'
       || Object.keys(value).some(key => !['ok', 'reason', 'impossible'].includes(key)) || !value.ok && !value.reason.trim()) throw new Error('Invalid verdict')
-    return { result: value.ok || type === 'prompt' && value.impossible === true ? {} : { block: value.reason } }
+    return { result: value.ok || value.impossible === true ? {} : { block: value.reason } }
   } catch { return { result: {}, error: 'The selected provider returned an invalid hook evaluation.' } }
 }
 
@@ -185,19 +170,18 @@ export function commandHookResult(output: { exitCode: number; stdout: string; st
 export type EvaluatorPort = {
   command(hook: PlannedCommand, event: EvaluatorEvent, signal: AbortSignal): Promise<HookOutcome>
   prompt(hook: PlannedEvaluator, request: StepRequest, signal: AbortSignal): Promise<EvaluatorCompletion>
-  /** A genuine tool-using agent; its host owns deadline, stopping and cleanup. */
-  agent(hook: PlannedEvaluator, event: EvaluatorEvent, owner: EvaluatorOwner, signal: AbortSignal): Promise<EvaluatorCompletion>
 }
 
 /** Native matching hooks run concurrently; aggregate in native type/source order. */
 export async function runStopEvaluators(plan: EvaluatorPlan, event: EvaluatorEvent, owner: EvaluatorOwner, port: EvaluatorPort, signal: AbortSignal): Promise<{ result: StopHookResult; errors: string[] }> {
   signal.throwIfAborted()
   if (plan.errors.length) throw new Error('Loaded hooks cannot be replaced without losing configured behavior.')
+  if (plan.hooks.some(hook => hook.type === 'agent')) throw new Error('Agent-type evaluators must run through Claude Code.')
   const outcomes = await Promise.all(plan.hooks.map(async hook => {
     signal.throwIfAborted()
     try {
       const outcome = hook.type === 'command' ? await port.command(hook, event, signal)
-        : evaluatorAnswer(hook.type, hook.type === 'prompt' ? await port.prompt(hook, evaluatorRequest(hook, event, owner), signal) : await port.agent(hook, event, owner, signal))
+        : evaluatorAnswer(await port.prompt(hook, evaluatorRequest(hook, event, owner), signal))
       signal.throwIfAborted()
       return outcome
     } catch {

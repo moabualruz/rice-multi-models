@@ -8,13 +8,11 @@ import type { Limits } from '../hooks/protocol'
 const baseRows: PickerRow[] = [
   { model: 'codex/gpt-6.1-sol', label: 'Sol (Codex)' },
   { model: 'local/qwen-3', label: 'Qwen (local)', description: 'openai endpoint http://127.0.0.1:11434 via rice-multi-models' },
-  { model: 'agy/gemini-3.8-flash-high', label: 'Gemini (Antigravity)', description: 'Antigravity CLI as a worker with its own tools' },
-  { model: 'grok/grok-build', label: 'Grok Build', description: 'Grok CLI as a worker with its own tools' },
 ]
 
 const families = [
-  { family: 'codex', label: 'OpenAI Codex (ChatGPT subscription)', type: 'rice-multi-models:codex', model: 'codex/gpt-6.1-sol', tiers: { haiku: 'codex/gpt-6.1-mini' } },
-  { family: 'claude', label: 'Claude (Anthropic)', type: 'rice-multi-models:claude' },
+  { family: 'codex', label: 'OpenAI Codex (ChatGPT subscription)', model: 'codex/gpt-6.1-sol', tiers: { haiku: 'codex/gpt-6.1-mini' } },
+  { family: 'claude', label: 'Claude (Anthropic)' },
 ]
 
 test('discovery section replaces its own id once and leaves all other section order intact', () => {
@@ -33,13 +31,16 @@ test('discovery section replaces its own id once and leaves all other section or
 })
 
 test('family guidance keeps each conversation in its family and names explicit native choices only', () => {
-  const text = discoveryGuidance(families, [{ type: 'rice-multi-models:agy', label: 'Antigravity (Gemini)' }])
+  const text = discoveryGuidance(families)
   expect(text).toContain('Each conversation stays on its own provider family')
-  expect(text).toContain('pick a tier inside the current family; they never switch provider')
+  expect(text).toContain('pick a tier inside the current family and never switch provider')
   expect(text).toContain('only when the user or session instructions ask for it')
-  expect(text).toContain('OpenAI Codex (ChatGPT subscription): codex/gpt-6.1-sol (tiers: haiku -> codex/gpt-6.1-mini); agent type rice-multi-models:codex')
-  expect(text).toContain('Claude (Anthropic): native Claude models; agent type rice-multi-models:claude')
-  expect(text).toContain('CLI worker agent type rice-multi-models:agy')
+  expect(text).toContain('OpenAI Codex (ChatGPT subscription): codex/gpt-6.1-sol (tiers: haiku -> codex/gpt-6.1-mini)')
+  expect(text).toContain('Claude (Anthropic): native Claude models')
+  expect(text).toContain('model argument accepts only haiku, sonnet, opus or fable')
+  expect(text).toContain('host rejects other ids before hooks')
+  expect(text).toContain('custom agent definition\'s model to an exact provider/model id')
+  expect(text).toContain('model: codex/gpt-6.1-sol')
   expect(text).toContain('never switch providers to get around them')
   expect(text).not.toMatch(/mcp__|Luna|AirFVR/)
 })
@@ -89,16 +90,14 @@ test('empty and unavailable catalogues never manufacture a default candidate', (
   }
 })
 
-test('model candidates distinguish native providers from the supplied CLI workers', () => {
+test('model candidates use only supplied native providers, including configured custom namespaces', () => {
   const rows = candidates(baseRows)
-  expect(rows.map(row => row.model)).toEqual(['codex/gpt-6.1-sol', 'local/qwen-3', 'agy/gemini-3.8-flash-high', 'grok/grok-build'])
+  expect(rows.map(row => row.model)).toEqual(['codex/gpt-6.1-sol', 'local/qwen-3'])
   expect(modelExecution('local/qwen-3', rows)).toBe('native provider')
-  expect(modelExecution('agy/gemini-3.8-flash-high', rows)).toBe('CLI worker')
-  expect(modelExecution('grok/grok-build', rows)).toBe('CLI worker')
-  const configured = candidates([...baseRows, { model: 'agy/review-model', label: 'Configured Antigravity namespace' }], model => model === 'agy/review-model'
-    ? { source: 'configured provider', execution: 'native provider', identity: 'configured:agy/review-model', codexSubscriptionQuota: false }
+  const configured = candidates([...baseRows, { model: 'fixture/review-model', label: 'Configured provider namespace' }], model => model === 'fixture/review-model'
+    ? { source: 'configured provider', execution: 'native provider', identity: 'configured:fixture/review-model', codexSubscriptionQuota: false }
     : undefined)
-  expect(modelExecution('agy/review-model', configured)).toBe('native provider')
+  expect(modelExecution('fixture/review-model', configured)).toBe('native provider')
   expect(modelExecution('local/not-supplied', rows)).toBeUndefined()
   expect(modelIsCandidate('local/not-supplied', rows)).toBe(false)
 })
@@ -118,11 +117,10 @@ test('model report is candidate-only and does not expose provider endpoint descr
   const secretLikeUrl = 'https://user:private-token@example.invalid/v1'
   const rows = candidates([
     { model: 'local/qwen-3', label: 'Qwen', description: `openai endpoint ${secretLikeUrl} via rice-multi-models` },
-    { model: 'agy/model-a', label: 'Worker', description: 'Antigravity CLI as a worker with its own tools' },
   ])
   const report = modelsReport(rows, [{ provider: 'local', approved: false }], { status: 'unavailable', windows: [] })
   expect(report).toContain('candidate, not live-entitlement proof')
-  expect(report).toContain('CLI worker')
+  expect(report).toContain('native provider')
   expect(report).not.toContain(secretLikeUrl)
   expect(report).not.toContain('private-token')
   expect(report).not.toContain('auth.json')

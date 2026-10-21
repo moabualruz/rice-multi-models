@@ -12,7 +12,6 @@ mock.module('claude-code', () => ({
   update: async (_host: unknown, atom: { value: unknown }, change: (value: unknown) => unknown) => { atom.value = change(atom.value) },
 }))
 mock.module(`${root}/helper/codex.ts`, () => ({ codexStep: async function* (_req: unknown, model: string) { helperBranches.push(`codex:${model}`); yield { type: 'text', text: `fixture: codex ${model}` } } }))
-mock.module(`${root}/helper/harness.ts`, () => ({ harnessStep: async function* (_req: unknown, provider: string, model: string) { helperBranches.push(`worker:${provider}/${model}`); yield { type: 'text', text: `fixture: worker ${provider}/${model}` } } }))
 mock.module(`${root}/helper/styx/step.ts`, () => ({ createStepper: () => ({ step: async function* (wire: any) { helperBranches.push(`configured:${wire.req.target}`); yield { type: 'text', text: `fixture: configured ${wire.req.target}` } } }) }))
 const { register } = await import(`${root}/hooks/register.ts`)
 const { runStep, offeredTools } = await import(`${root}/helper/run.ts`)
@@ -55,18 +54,16 @@ const discoveries: { argv: string[]; input: { configText: string; approved: stri
 let discoveryOverride: ModelCatalogue | undefined
 let discoveryUnavailable = false
 const observedAt = 1_800_000_000_000
-const discoveredModel = (model: string, source = 'Codex authenticated models endpoint', execution: 'native provider' | 'CLI worker' = 'native provider'): ModelCatalogue['models'][number] => ({ model, label: `Fixture ${model}`, execution, source, observedAt, metadata: unknownMetadata() })
+const discoveredModel = (model: string, source = 'Codex authenticated models endpoint'): ModelCatalogue['models'][number] => ({ model, label: `Fixture ${model}`, execution: 'native provider', source, observedAt, metadata: unknownMetadata() })
 const freshCatalogue = (configText: string): ModelCatalogue => {
   const providers = JSON.parse(configText || '{"providers":{}}').providers ?? {}
   const models = Object.keys(providers).includes('codex') ? [] : [discoveredModel('codex/gpt-6.1-sol')]
   for (const [id, declared] of Object.entries(providers)) {
     for (const model of Object.keys((declared as any).models ?? {})) models.push(discoveredModel(`${id}/${model}`, 'configured provider'))
   }
-  if (agyInstalled && !Object.hasOwn(providers, 'agy')) models.push(discoveredModel('agy/review-model', 'agy installed worker', 'CLI worker'))
   return { models, providers: [...new Set(models.map(entry => entry.model.split('/')[0]!))].map(provider => ({ provider, status: 'fresh', source: 'fixture discovery boundary', observedAt })) }
 }
 let approvalAskCount = 0
-let agyInstalled = false
 let emitLimits = false
 let completionStop = 'end_turn'
 // The engine's compaction text as the helper would capture it, stood in for by an owned fixture of the same structure.
@@ -130,7 +127,7 @@ const host: any = {
         return toolCaptureFails ? { exitCode: 1, stdout: JSON.stringify({ ok: false, error: 'fixture tool capture failure' }), stderr: '' } : { exitCode: 0, stdout: JSON.stringify({ ok: true, capture: fixtureTools }), stderr: '' }
       }
       if (argv[0] === 'node') return { exitCode: 0, stdout: JSON.stringify({ executable: '/fixture/node', version: '22.20.0' }), stderr: '' }
-      if (argv[2] === 'doctor') return { exitCode: 0, stdout: JSON.stringify({ node: { executable: '/fixture/node', version: '22.20.0', supported: true }, platform: 'linux', home: '/fixture-home', configDir: '/fixture-home/.claude', codexHome: '/fixture-home/.codex', opencodeAuthFile: '/fixture-home/opencode-auth.json', auth: { codex: false, opencode: false }, clis: agyInstalled ? { agy: '/fixture/agy' } : {} }), stderr: '' }
+      if (argv[2] === 'doctor') return { exitCode: 0, stdout: JSON.stringify({ node: { executable: '/fixture/node', version: '22.20.0', supported: true }, platform: 'linux', home: '/fixture-home', configDir: '/fixture-home/.claude', codexHome: '/fixture-home/.codex', opencodeAuthFile: '/fixture-home/opencode-auth.json', auth: { codex: false, opencode: false }, clis: {} }), stderr: '' }
       if (argv[2] === 'sync-picker') return { exitCode: 0, stdout: JSON.stringify({ ok: true, changed: false, count: 1, path: '/fixture-home/.claude/settings.json' }), stderr: '' }
       return { exitCode: 1, stdout: '', stderr: '' }
     },
@@ -267,19 +264,12 @@ test('empty or failed discovery removes all candidates without a default or cach
   }
 })
 
-test('subagents of a routed parent stay in its family unless a family type chooses another', async () => {
+test('subagents and aliases of a routed parent stay in its family', async () => {
   await reload({})
   const explore = await spawn('codex/gpt-6.1-sol', 'Explore', 'haiku')
   expect(explore.received.model).toBe('codex/gpt-6.1-sol')
   const plain = await spawn('codex/gpt-6.1-sol', 'general-purpose')
   expect(plain.received.model).toBe('codex/gpt-6.1-sol')
-  const claude = await spawn('codex/gpt-6.1-sol', 'rice-multi-models:claude', 'opus')
-  expect(claude.received.model).toBe('opus')
-  expect(defs.get('rice-multi-models:claude')).toMatchObject({ model: 'sonnet' })
-  // A child of an explicitly placed Claude agent stays on Claude.
-  for await (const _chunk of hook('turn.step')(host, { agentId: claude.id, model: 'claude-opus-5-5', turnId: 'claude-parent', index: 0 }, async function* () { return { native: true } })) { /* drain */ }
-  const native = await spawn('sonnet', 'Explore', 'haiku', claude.id)
-  expect(native.received.model).toBe('haiku')
   // The engine reports a remapped child's own alias as the parent model; its
   // effective family decides its children.
   for await (const _chunk of hook('turn.step')(host, { agentId: explore.id, model: 'haiku', turnId: 'explore-parent', index: 0 }, async function* () { throw new Error('unsafe native step') })) { /* drain */ }
@@ -287,20 +277,6 @@ test('subagents of a routed parent stay in its family unless a family type choos
   expect(grandchild.received.model).toBe('codex/gpt-6.1-sol')
   const fork = await hook('agent.spawn')(host, { ...spawnInput('codex/gpt-6.1-sol', 'fork', 'haiku'), fork: true }, async (e: any) => ({ model: e.model, agentId: 'fork-agent' }))
   expect(fork.model).toBe('haiku')
-})
-
-test('an explicitly placed Claude child runs natively while unspawned native aliases stay in the owner family', async () => {
-  const claude = await spawn('codex/gpt-6.1-sol', 'rice-multi-models:claude', 'opus')
-  const native = hook('turn.step')(host, { agentId: claude.id, model: 'claude-opus-5-5', turnId: 'claude-turn', index: 0 }, async function* () { return { native: true } })
-  expect(await native.next()).toEqual({ value: { native: true }, done: true })
-  const forkedSkill = `forked-skill-${agents.length}`
-  agents.push({ id: forkedSkill, type: 'general-purpose', description: 'forked skill', status: 'running' })
-  approvalAnswer = 'Allow'
-  const before = wires.length
-  const routed = hook('turn.step')(host, { agentId: forkedSkill, model: 'claude-haiku-4-5', turnId: 'fork-turn', index: 0 }, async function* () { throw new Error('unsafe native step') })
-  for await (const _chunk of routed) { /* drain */ }
-  expect(wires.length).toBe(before + 1)
-  expect(wires.at(-1).req.target).toBe('codex/gpt-6.1-sol')
 })
 
 test('fresh discovered input and context bounds refuse oversized routed turns before helper dispatch', async () => {
@@ -509,13 +485,6 @@ test('subagent compaction fails closed for unknown models and follows the last n
   const compacted = await hook('session.compact')(host, input, next)
   expect(compacted.messages[0].text).toContain('fixture response')
   expect(wires.at(-1).req.who).toBe(routed.id)
-  const claude = await spawn('codex/gpt-6.1-sol', 'rice-multi-models:claude', 'sonnet')
-  const generator = hook('turn.step')(host, { agentId: claude.id, model: 'sonnet', turnId: 'native-turn', index: 0 }, async function* () { return { native: true } })
-  const result = await generator.next()
-  expect(result.value).toEqual({ native: true })
-  expect(result.done).toBe(true)
-  expect(await hook('session.compact')(host, { ...input, agentId: claude.id }, next)).toBe(native)
-  expect(nativeCalls).toBe(1)
 })
 
 test('tagged built-in route switches use the exact inference target bounds', async () => {
@@ -587,12 +556,11 @@ test('model switch denies context exceeding fresh exact destination bounds witho
 
 test('switch guard does not invent bounds for unknown, stale, worker or native Claude destinations', async () => {
   try {
-    for (const [execution, status, metadata] of [
-      ['native provider', 'fresh', {}],
-      ['native provider', 'unavailable', { contextWindow: 32000 }],
-      ['CLI worker', 'fresh', { contextWindow: 32000 }],
+    for (const [status, metadata] of [
+      ['fresh', {}],
+      ['unavailable', { contextWindow: 32000 }],
     ] as const) {
-      const model = discoveredModel('codex/unknown', 'fixture', execution)
+      const model = discoveredModel('codex/unknown', 'fixture')
       model.metadata = { ...unknownMetadata(), ...metadata }
       discoveryOverride = { models: [model], providers: [{ provider: 'codex', status, source: 'fixture unknown switch bounds', observedAt }] }
       await reload({})
@@ -630,8 +598,7 @@ test('the mod registers no tools and its family guidance is idempotent and nativ
   expect(second).toEqual(first)
   const section = first.sections.at(-1)
   expect(section).toMatchObject({ id: 'rice-multi-models:discovery', scope: 'session' })
-  expect(section.text).toContain('rice-multi-models:claude')
-  expect(section.text).toContain('rice-multi-models:codex')
+  expect(section.text).toContain('model: codex/gpt-6.1-sol')
   expect(section.text).not.toContain('mcp__')
   expect(processRunCount).toBe(runs)
   expect(toolDefs.size).toBe(0)
@@ -642,8 +609,8 @@ test('the mod registers no tools and its family guidance is idempotent and nativ
   expect(offered.some((entry: any) => entry.name.startsWith('mcp__rice-multi-models__'))).toBe(false)
 })
 
-test('configured codex, agy and grok prefixes resolve before built-in helper branches', async () => {
-  for (const [providerId, model] of [['codex', 'gpt-6.1-sol'], ['agy', 'review-model'], ['grok', 'review-model']]) {
+test('configured provider ids resolve through the generic provider stepper', async () => {
+  for (const [providerId, model] of [['codex', 'gpt-6.1-sol'], ['fixture', 'review-model'], ['local', 'review-model']]) {
     await reload({ [providerId!]: provider(model!) })
     const report = await models()
     const candidate = report.models.find((item: any) => item.model === `${providerId}/${model}`)
@@ -657,32 +624,42 @@ test('configured codex, agy and grok prefixes resolve before built-in helper bra
   }
 })
 
-test('declared provider families get their own native agent type', async () => {
-  await reload({ local: provider('qwen') })
-  expect(defs.get('rice-multi-models:local')).toMatchObject({ model: 'local/qwen' })
-  const chosen = await spawn('codex/gpt-6.1-sol', 'rice-multi-models:local', 'haiku')
-  expect(chosen.received.model).toBe('local/qwen')
-  const inFamily = await spawn('local/qwen', 'Explore', 'haiku')
-  expect(inFamily.received.model).toBe('local/qwen')
-})
-
-test('spawning a declared provider child does not approve it and denial stays before the helper', async () => {
+test('leaves exact custom agent frontmatter model resolution to Claude Code', async () => {
   store.clear()
   await reload({ local: provider('qwen') })
-  approvalAnswer = 'Keep it off'
-  const asks = approvalAskCount
-  const before = wires.length
-  const refreshes = discoveries.length
-  const chosen = await spawn('codex/gpt-6.1-sol', 'rice-multi-models:local')
-  expect(chosen.received.model).toBe('local/qwen')
-  expect(approvalAskCount).toBe(asks)
-  expect(store.size).toBe(0)
-  expect(wires.length).toBe(before)
-  expect(discoveries.length).toBe(refreshes)
-  const refused = await step('general-purpose', 'local/qwen')
-  expect(approvalAskCount).toBeGreaterThan(asks)
-  expect(wires.length).toBe(before)
-  expect(JSON.stringify(refused.result)).toContain('not approved')
+  const name = 'local-review'
+  const oldCwd = host.session.cwd
+  const project = `${root}/fixture-${name}`
+  host.session.cwd = async () => project
+  const directory = `${project}/.claude/agents`
+  fixtureDirs.set(directory, [{ name: `${name}.md`, kind: 'file' }])
+  fixtureFiles.set(`${directory}/${name}.md`, `---\nname: ${name}\ndescription: Review source\nmodel: local/qwen\n---\nReview source only.\n`)
+  try {
+    approvalAnswer = 'Keep it off'
+    const asks = approvalAskCount
+    const before = wires.length
+    const refreshes = discoveries.length
+    let received: any
+    const agentId = `spawned-agent-${agents.length}`
+    const chosen = await hook('agent.spawn')(host, spawnInput('codex/gpt-6.1-sol', name), async (event: any) => {
+      received = event
+      agents.push({ id: agentId, type: event.subagentType, description: event.description, status: 'running' })
+      return { model: 'local/qwen', agentId }
+    })
+    expect(received.model).toBeUndefined()
+    // The fixture's downstream response simulates host resolution; this test only proves the plugin leaves it untouched.
+    expect(chosen.model).toBe('local/qwen')
+    expect(approvalAskCount).toBe(asks)
+    expect(store.size).toBe(0)
+    expect(wires.length).toBe(before)
+    expect(discoveries.length).toBe(refreshes)
+    const refused = await step(name, 'local/qwen')
+    expect(approvalAskCount).toBeGreaterThan(asks)
+    expect(wires.length).toBe(before)
+    expect(JSON.stringify(refused.result)).toContain('not approved')
+  } finally {
+    host.session.cwd = oldCwd
+  }
 })
 
 test('configured Codex-prefix providers report explicit configured source', async () => {
@@ -706,17 +683,14 @@ test('configured Codex-prefix providers do not inherit subscription quota', asyn
   expect(entry.usageLimits).toEqual({ status: 'unavailable', windows: [] })
 })
 
-test('declared provider turns do not rediscover the installed worker catalogue', async () => {
-  agyInstalled = true
+test('declared provider turns do not repeat discovery', async () => {
   store.clear()
-  await command('setup repair')
   await reload({ local: provider('qwen') })
   const beforeTurn = discoveries.length
   const beforeWires = wires.length
   approvalAnswer = 'Keep it off'
   const refused = await step('general-purpose', 'local/qwen')
   expect(discoveries.length).toBe(beforeTurn)
-  expect(processCalls.some(argv => argv[0] === '/fixture/agy')).toBe(false)
   expect(wires.length).toBe(beforeWires)
   expect(JSON.stringify(refused.result)).toContain('not approved')
 })
@@ -749,18 +723,9 @@ test('status diagnostics never expose provider endpoints', async () => {
   expect(status).not.toContain(endpoint)
 })
 
-test("the mod's own agent types keep their registered family under any parent", async () => {
+test('plugin registration creates no rice-multi-models agent definitions', async () => {
   await reload({ fixture: provider('model') })
-  try {
-    const explore = await spawn('fixture/model', 'rice-multi-models:codex-explore')
-    expect(explore.received.model).toBeUndefined()
-    const codex = await spawn('fixture/model', 'rice-multi-models:codex')
-    expect(codex.received.model).toBe('codex/gpt-6.1-sol')
-    const claude = await spawn('fixture/model', 'rice-multi-models:claude')
-    expect(claude.received.model).toBeUndefined()
-  } finally {
-    await reload({})
-  }
+  expect([...defs.keys()].filter(name => name.startsWith('rice-multi-models:'))).toEqual([])
 })
 
 test('a declared model whose config does not validate is refused instead of sent to Claude', async () => {
@@ -816,13 +781,7 @@ test("routed steps send the installed claude's tool definitions, and a subagent 
   expect(explore.system).toBe(`FIXTURE EXPLORE PROMPT${FIXTURE_TAIL}`)
   // Explore is offered what the engine offers Explore.
   expect(explore.tools.map((tool: any) => tool.name)).toEqual(['Read'])
-  // The mod's own agent types run on the engine's prompts, inside the engine's text like any agent file.
-  expect(defs.get('rice-multi-models:codex').prompt).toBe('FIXTURE GENERAL PURPOSE PROMPT')
-  expect(defs.get('rice-multi-models:codex-explore').prompt).toBe('FIXTURE EXPLORE PROMPT')
-  expect(defs.get('rice-multi-models:claude').prompt).toBe('FIXTURE GENERAL PURPOSE PROMPT')
-  const codex = (await step('rice-multi-models:codex', 'codex/gpt-6.1-sol'), wires.at(-1).req)
-  expect(codex.system).toBe(`FIXTURE GENERAL PURPOSE PROMPT${FIXTURE_TAIL}`)
-  expect(JSON.stringify([general, explore, codex].map(req => req.system))).not.toContain('styx')
+  expect(JSON.stringify([general, explore].map(req => req.system))).not.toContain('styx')
   const status = await command('status')
   expect(status).toContain("Tool definitions and agent prompts: Claude Code's own, read from the installed claude 2.1.296 (built-in agent types Explore, general-purpose)")
 })

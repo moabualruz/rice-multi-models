@@ -123,7 +123,7 @@ async function readParsed<T>(io: PromptsPort, s: Session, path: string, parse: (
 }
 
 // The `.claude/agents` directories of the project and of the configuration directory, in Claude Code's order.
-const ownAgentDirs = async (io: PromptsPort) => [`${await io.cwd()}/.claude/agents`, `${await io.configDir()}/agents`]
+const ownAgentDirs = async (io: PromptsPort) => [...new Set([`${await io.cwd()}/.claude/agents`, `${await io.configDir()}/agents`])]
 
 // The agents directories Claude Code may read the definition of `type` from, in its order: a plugin agent
 // `<plugin>:<name>` in its plugin's `agents`, any other in the session's `.claude/agents`, then in the

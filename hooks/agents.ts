@@ -80,10 +80,12 @@ export type AgentDef = {
   model?: string
   effort?: string
   isolation?: string
+  permissionMode?: string
   omitClaudeMd?: true
   hooks?: Record<string, unknown>
   prompt: string
 }
+export const AGENT_PERMISSION_MODES = new Set(['acceptEdits', 'auto', 'bypassPermissions', 'default', 'dontAsk', 'plan'])
 export type Parsed<T> = T | { error: string }
 // installed_plugins.json's `plugins`: each `<name>@<marketplace>` with its installs.
 type InstalledPlugins = Readonly<Record<string, readonly unknown[]>>
@@ -175,7 +177,7 @@ export function parseAgentFile(text: string): Parsed<AgentDef> {
   }
   for (const key of bare) if ((fields.get(key) as string[]).length === 0) fields.delete(key)
   const def: AgentDef = { prompt: lines.slice(close + 1).join('\n').trim() }
-  for (const key of ['name', 'description', 'model', 'effort', 'isolation'] as const) {
+  for (const key of ['name', 'description', 'model', 'effort', 'isolation', 'permissionMode'] as const) {
     const v = fields.get(key)
     if (Array.isArray(v)) return { error: `${key} must be text, not a list` }
     if (v !== undefined) def[key] = v
