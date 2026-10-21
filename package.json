@@ -20,8 +20,9 @@
     "test:search": "node scripts/proof-public-web-search.mjs && node scripts/proof-public-web-fetch.mjs",
     "test:evaluators": "node scripts/proof-public-evaluator-sources.mjs && node scripts/proof-public-evaluators.mjs",
     "test:titles": "node scripts/proof-public-titles.mjs",
-    "check": "bun run test && bun run typecheck && npm run typecheck:hooks && npm run build:check && npm run test:node && npm run test:install && npm run test:native && npm run test:routing && npm run test:phases && npm run test:compaction && npm run test:tools && npm run test:permissions && npm run test:permission-mode && npm run test:search && npm run test:evaluators && npm run test:titles && git diff --check",
-    "test:phases": "node scripts/proof-native-adapter.mjs"
+    "check": "bun run test && bun run typecheck && npm run typecheck:hooks && npm run build:check && npm run test:node && npm run test:install && npm run test:native && npm run test:routing && npm run test:phases && npm run test:compaction && npm run test:tools && npm run test:agent-model && npm run test:permissions && npm run test:permission-mode && npm run test:search && npm run test:evaluators && npm run test:titles && git diff --check",
+    "test:phases": "node scripts/proof-native-adapter.mjs",
+    "test:agent-model": "node scripts/proof-public-agent-model.mjs"
   },
   "devDependencies": {
     "@types/bun": "1.3.14",

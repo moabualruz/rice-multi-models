@@ -163,7 +163,7 @@ try {
   for (const directory of ['.claude-plugin', 'hooks', 'types', 'dist', 'scripts']) cpSync(join(root, directory), join(plugin, directory), { recursive: true })
   const file = join(plugin, 'hooks/register.ts')
   let source = readFileSync(file, 'utf8')
-  const decisionLine = '    const decision = spawnDecision({ parentModel, requested: e.model, definitionModel: definition?.model, fork: e.fork }, tiers(), familyPorts)'
+  const decisionLine = '    const decision = spawnDecision({ parentModel, requested: picked.requested, definitionModel: definition?.model, fork: e.fork }, tiers(), familyPorts)'
   assert.ok(source.includes(decisionLine), 'production spawn decision boundary')
   source = source.replace(decisionLine, `${decisionLine}\n    await $.fs.write(${JSON.stringify(spawnEvidence)},JSON.stringify({ type:e.subagentType, requested:e.model??null, definitionModel:definition?.model??null, selected:decision.model??null, reason:decision.reason }))`)
   const close = source.lastIndexOf('\n}')
@@ -215,6 +215,7 @@ try {
     for (const tool of tools) {
       const captured = capturedByName.get(tool.name) ?? independentlySent.get(tool.name)
       const schema = captured?.input_schema ?? fallbackSchemas[tool.name] ?? looseSchema
+      if (tool.name === 'Agent') continue
       assert.deepEqual(tool.schema, schema, `${stage} ${tool.name} input schema matches the capture, native request, or documented fallback`)
       assert.equal(typeof tool.description, 'string', `${stage} ${tool.name} retains its session description`)
     }
@@ -227,8 +228,17 @@ try {
       const live = byName(wire.live, name)
       const captured = byName(capture.tools, name)
       assert.ok(live && captured, `${wire.who} live session and capture include ${name}`)
-      assert.equal(sent.description, live.description, `${wire.who} ${name} description follows the live session`)
-      assert.deepEqual(sent.schema, captured.input_schema, `${wire.who} ${name} schema comes from the capture`)
+      // The mod adds only a marked suffix to the Agent description and the discovered ids to the model enum.
+      const [engineText, suffix] = name === 'Agent' ? sent.description.split('\n\n[rice-multi-models]') : [sent.description, undefined]
+      assert.equal(engineText, live.description.split('\n\n[rice-multi-models]')[0], `${wire.who} ${name} description follows the live session`)
+      if (name === 'Agent') {
+        assert.ok(suffix?.includes('codex/owned-public') && suffix.includes('codex/owned-child'), 'the Agent description names the discovered ids')
+        const expected = structuredClone(captured.input_schema)
+        expected.properties.model.enum = [...expected.properties.model.enum, 'codex/owned-child', 'codex/owned-public']
+        assert.deepEqual(sent.schema, expected, `${wire.who} Agent schema is the capture with the discovered ids added to model`)
+      } else {
+        assert.deepEqual(sent.schema, captured.input_schema, `${wire.who} ${name} schema comes from the capture`)
+      }
     }
   }
   for (const name of ['Agent', 'ListAgents']) assert.ok(byName(main.tools, name), `the routed main offers ${name}`)
