@@ -99,7 +99,7 @@ parent's own model. Entries naming a model from another family are ignored.
 | `/compact` and automatic compaction | Claude Code's own summary prompt (with your `/compact` instructions in its slot) over the conversation as real messages, answered by the selected provider with its reported output bound; the engine's own summary message wording, citing the transcript file; a bounded tail of recent messages and their tool pairs kept verbatim; a failed or unreadable-prompt compaction keeps the original transcript |
 | Session titles | Selected provider, local fallback, manual names kept |
 | Auto-mode permission judgments | Selected provider with your effective auto-mode policy; native rules, hooks and managed limits still decide first |
-| WebFetch | Page fetched directly, extracted by the selected provider |
+| WebFetch | Provider hosted retrieval, configured fetch services, Claude Code native WebFetch, then direct selected-provider extraction |
 | WebSearch | Selected provider's own search, then your saved search services, then Claude's native search with the session's account |
 | Stop / SubagentStop prompt hooks | Selected provider |
 | Plugin auxiliary calls (`model.complete`, `classify`, `fork`) | The main conversation's family |
@@ -176,6 +176,46 @@ Other compatible endpoints opt in with the model's `"webSearch": "native"`
 setting; `"off"` skips that provider's search. Domain filters and result limits
 are kept; a provider that cannot honor them hands the query to the next option.
 See the [provider research](docs/research/provider-web-search-20261016.md).
+
+## WebFetch
+
+WebFetch follows this order and stops at the first successful result:
+
+1. **Provider hosted fetch**, only where a supported protocol and exact official endpoint provide it. This mod supports Anthropic Messages `web_fetch` at `https://api.anthropic.com` and Google Gemini GenerateContent URL Context at `https://generativelanguage.googleapis.com`. A compatible server hosted elsewhere is not assumed to implement either tool.
+2. **Configured fetch services**, tried serially by ascending priority.
+3. **Claude Code native WebFetch**, using the current session's host authorization and HTTP handle.
+4. **`direct-selected-extraction`**, only after Claude Code native WebFetch is unavailable. The mod resolves the page destination, rejects non-public addresses, pins each connection to a checked address, manually follows and rechecks redirects, bounds the response, then asks the selected provider to extract from the fetched text. This is a recovery tier, not provider-native fetch: the mod itself retrieves the page.
+
+Claude Code's native permission processing still runs first. The hook gates the exact checked WebFetch input before replacing the engine implementation. A broad permission rule or a URL supplied by a caller does not skip that native gate. An unsafe or unresolved destination fails closed. Provider output that has started is not switched to another tier after a later provider error. Valid empty page content is a successful terminal result.
+
+### Configured fetch services
+
+Save version 1 configuration in `<CLAUDE_CONFIG_DIR>/rice-multi-models/fetch.json` (or `~/.claude/rice-multi-models/fetch.json` when `CLAUDE_CONFIG_DIR` is unset). The file is read for each WebFetch call. Each endpoint receives a JSON POST with `url` and `maxBytes`; successful responses must be JSON objects with the same `url`, string `content`, and optional string `contentType`. Redirects are rejected and response bodies are limited.
+
+```json
+{
+  "version": 1,
+  "endpoints": [
+    {
+      "name": "self-hosted",
+      "url": "https://fetch.example/api/fetch",
+      "priority": 10,
+      "auth": { "env": "FETCH_SERVICE_TOKEN" }
+    },
+    {
+      "name": "hosted-backup",
+      "url": "https://fetch-backup.example/v1/fetch",
+      "priority": 20
+    }
+  ]
+}
+```
+
+`auth` may reference an environment variable by name or an absolute credential-helper command. The referenced secret value is read only at request time, is sent only to that endpoint as a Bearer token, and is not returned by status state. Authenticated endpoints must use HTTPS. Do not put a credential value in the JSON file or URL. Endpoint priorities are nonnegative integers; ties retain file order. An empty `content` string is a valid success and prevents later services from being tried.
+
+The pure hook-side state interface is exported from `hooks/fetch-config.ts` as `fetchTierConfigState(config, providerNative)`. It accepts a parsed `FetchConfig` and a boolean indicating whether the selected provider has a verified hosted URL-fetch contract. It returns the runtime tier order, includes configured service names and priorities in sorted order, and excludes all credential references and values. When `providerNative` is false, the provider-native tier is omitted. The final two entries are always `native-fallback` and `direct-selected-extraction`.
+
+Protocol support is intentionally narrow. Anthropic Messages has a hosted `web_fetch` server tool. Gemini URL Context retrieves supplied URLs and returns model-generated text with URL retrieval metadata, rather than raw page text. OpenAI Responses web search is not treated as arbitrary URL fetch. OpenCode's `webfetch` is an application tool, and Ollama's web fetch is a separate REST endpoint; neither is a provider-protocol tool in this chain. The current Bedrock Converse adapter has no hosted fetch contract. Bedrock Mantle Responses is a separate API surface.
 
 ## Provider setup
 

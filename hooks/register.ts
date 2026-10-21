@@ -51,6 +51,7 @@ import { searchConfigurationCommand } from './search-config'
 import type { SearchConfigurationResult, SearchEdit } from './search-config'
 import { runNativeSearch } from './native-search'
 import { NativeFetchUnavailable, runNativeFetch } from './native-fetch'
+import { runNativeThenDirect } from './web-fetch-fallback'
 import type { ToolSearchOutcome } from '../helper/search/tool-search'
 import type { WebFetchOutcome } from '../helper/web-fetch'
 import { createToolGate } from './tool-gate'
@@ -1462,18 +1463,31 @@ export const register: Register = on => {
         if (!('kind' in outcome)) return { result: outcome }
         if (outcome.kind !== 'native-fallback' || typeof outcome.url !== 'string' || typeof outcome.prompt !== 'string') return { deny: `${PLUGIN}: invalid WebFetch fallback request` }
         try {
-          return { result: await runNativeFetch({ url: outcome.url, prompt: outcome.prompt, ...(outcome.offset === undefined ? {} : { offset: outcome.offset }) }, { authorize: () => $.session.authorize(), fetch: (url, init) => $.http.fetch(url, init) }, next.signal) }
+          const final = await runNativeThenDirect(
+            () => runNativeFetch({ url: outcome.url, prompt: outcome.prompt, ...(outcome.offset === undefined ? {} : { offset: outcome.offset }) }, {
+              authorize: () => $.session.authorize(),
+              fetch: (url, init) => $.http.fetch(url, init),
+              checkDestination: async url => {
+                const checked = await $.process.run([runtime.executable!, helperFile($.plugin.root), 'web-fetch-check-destination'], { stdin: JSON.stringify({ url }), timeoutMs: 15_000 })
+                next.signal.throwIfAborted()
+                if (checked.exitCode !== 0 || checked.isStdoutTruncated || checked.stdout.trim() !== JSON.stringify({ ok: true })) throw new Error('WebFetch destination could not be verified.')
+              },
+            }, next.signal),
+            async () => {
+              const fetchInput = gate.input as Omit<PublicWebFetchInput, 'wire'>
+              const direct = await $.process.run([runtime.executable!, helperFile($.plugin.root), 'web-fetch-direct'], { stdin: JSON.stringify({ ...fetchInput, wire }), timeoutMs: 120_000 })
+              next.signal.throwIfAborted()
+              if (direct.exitCode !== 0 || direct.isStdoutTruncated) throw new NativeFetchUnavailable('response', 'Native and direct WebFetch tiers were unavailable.')
+              const directOutcome = JSON.parse(direct.stdout) as WebFetchOutcome
+              if (!directOutcome || typeof directOutcome !== 'object' || 'kind' in directOutcome || typeof directOutcome.result !== 'string') throw new NativeFetchUnavailable('response', 'Direct WebFetch returned an invalid result.')
+              return directOutcome
+            }, next.signal,
+          )
+          return { result: final.result }
         } catch (error) {
           next.signal.throwIfAborted()
-          if (!(error instanceof NativeFetchUnavailable)) throw error
-          if (error.code === 'security') return { deny: `${PLUGIN}: native WebFetch returned an unsafe or unverifiable destination; no result was returned` }
-          const fetchInput = gate.input as Omit<PublicWebFetchInput, 'wire'>
-          const direct = await $.process.run([runtime.executable, helperFile($.plugin.root), 'web-fetch-direct'], { stdin: JSON.stringify({ ...fetchInput, wire }), timeoutMs: 120_000 })
-          next.signal.throwIfAborted()
-          if (direct.exitCode !== 0 || direct.isStdoutTruncated) return { deny: `${PLUGIN}: native and direct WebFetch tiers were unavailable; no result was returned` }
-          const directOutcome = JSON.parse(direct.stdout) as WebFetchOutcome
-          if (!directOutcome || typeof directOutcome !== 'object' || 'kind' in directOutcome || typeof directOutcome.result !== 'string') return { deny: `${PLUGIN}: invalid direct WebFetch result` }
-          return { result: directOutcome }
+          if (error instanceof NativeFetchUnavailable && error.code === 'security') return { deny: `${PLUGIN}: native WebFetch returned an unsafe or unverifiable destination; no result was returned` }
+          throw error
         }
       }
       const outcome = JSON.parse(run.stdout) as ToolSearchOutcome

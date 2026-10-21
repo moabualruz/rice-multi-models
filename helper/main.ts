@@ -16,6 +16,7 @@ import { runToolSearch } from './search/tool-search.ts'
 import { runDirectWebFetch, runWebFetch } from './web-fetch.ts'
 import { captureCompaction } from './native-compaction.ts'
 import { captureTools } from './native-tools.ts'
+import { resolveAndCheck } from './native/destination.ts'
 
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = []
@@ -86,6 +87,21 @@ export async function main(lifetime?: AbortSignal): Promise<void> {
     const result = await searchConfiguration(JSON.parse(await readStdin()))
     process.stdout.write(`${JSON.stringify(result)}\n`)
     if (!result.ok) process.exitCode = 1
+  } else if (mode === 'web-fetch-check-destination') {
+    const controller = new AbortController()
+    const abort = () => controller.abort()
+    for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.on(signal, abort)
+    lifetime?.addEventListener('abort', abort, { once: true })
+    if (lifetime?.aborted) abort()
+    try {
+      const input = JSON.parse(await readStdin()) as { url?: unknown }
+      if (typeof input.url !== 'string' || input.url.length > 2000) throw new Error('Invalid destination check input.')
+      await resolveAndCheck(new URL(input.url), controller.signal)
+      process.stdout.write(`${JSON.stringify({ ok: true })}\n`)
+    } finally {
+      lifetime?.removeEventListener('abort', abort)
+      for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.off(signal, abort)
+    }
   } else if (mode === 'tool-search' || mode === 'web-fetch' || mode === 'web-fetch-direct') {
     const controller = new AbortController()
     const abort = () => controller.abort()

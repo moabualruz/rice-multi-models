@@ -124,18 +124,24 @@ async function bodyOf(response: Response, signal: AbortSignal): Promise<Buffer> 
 
 async function extract(events: AsyncIterable<StepEvent>, signal: AbortSignal): Promise<string> {
   let text = '', bytes = 0, count = 0, finished = false
-  for await (const event of events) {
-    signal.throwIfAborted()
-    if (++count > 2048 || (bytes += Buffer.byteLength(JSON.stringify(event))) > 2 * 1024 * 1024) throw new WebFetchUnavailable('extraction', 'WebFetch extraction response exceeds its size limit.')
-    if (event.type === 'error' || event.type === 'tool_use') throw new WebFetchUnavailable('extraction', 'The selected provider could not extract the fetched page.')
-    if (event.type === 'text') text += event.text
-    if (event.type === 'stop') {
-      if (event.reason !== 'end_turn' && event.reason !== 'stop_sequence') throw new WebFetchUnavailable('extraction', 'The selected provider returned an incomplete page extraction.')
-      finished = true
+  try {
+    for await (const event of events) {
+      signal.throwIfAborted()
+      if (++count > 2048 || (bytes += Buffer.byteLength(JSON.stringify(event))) > 2 * 1024 * 1024) throw new WebFetchUnavailable('extraction', 'WebFetch extraction response exceeds its size limit.', !!text)
+      if (event.type === 'error' || event.type === 'tool_use') throw new WebFetchUnavailable('extraction', 'The selected provider could not extract the fetched page.', !!text)
+      if (event.type === 'text') text += event.text
+      if (event.type === 'stop') {
+        if (event.reason !== 'end_turn' && event.reason !== 'stop_sequence') throw new WebFetchUnavailable('extraction', 'The selected provider returned an incomplete page extraction.', !!text)
+        finished = true
+      }
     }
+  } catch (error) {
+    signal.throwIfAborted()
+    if (text && !(error instanceof WebFetchUnavailable && error.terminal)) throw new WebFetchUnavailable('extraction', 'Selected-provider extraction failed after output began.', true)
+    throw error
   }
   signal.throwIfAborted()
-  if (!finished || !text.trim()) throw new WebFetchUnavailable('extraction', 'The selected provider did not finish extracting the fetched page.')
+  if (!finished || !text.trim()) throw new WebFetchUnavailable('extraction', 'The selected provider did not finish extracting the fetched page.', !!text)
   return text
 }
 

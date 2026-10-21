@@ -208,6 +208,17 @@ test('provider-native partial output is terminal and does not switch to another 
   expect(configured).toBe(0)
 })
 
+test('configured-service extraction failure after partial output is terminal', async () => {
+  let calls = 0
+  const run = create({ configured: async asked => ({ url: asked, content: 'Published page evidence', contentType: 'text/plain', status: 200 }), step: async function* () {
+    calls++
+    yield { type: 'text', text: 'Partial extraction' }
+    yield { type: 'error', kind: 'request', text: 'Provider failed after output' }
+  } })
+  await expect(run(input, signal())).rejects.toMatchObject({ phase: 'extraction', terminal: true })
+  expect(calls).toBe(1)
+})
+
 test('engine WebFetch follows configured services and direct selected extraction is the final fallback', async () => {
   let direct = 0, extracted = 0
   const serviceFailure = create({ configured: async () => { throw new Error('service offline') }, request: async () => { direct++; return new Response('unexpected direct request') } })
