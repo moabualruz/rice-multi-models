@@ -123,7 +123,22 @@ async function readParsed<T>(io: PromptsPort, s: Session, path: string, parse: (
 }
 
 // The `.claude/agents` directories of the project and of the configuration directory, in Claude Code's order.
-const ownAgentDirs = async (io: PromptsPort) => [...new Set([`${await io.cwd()}/.claude/agents`, `${await io.configDir()}/agents`])]
+// Windows accepts both slash styles, so compare normalized keys while preserving paths for host file I/O.
+const directoryKey = (path: string) => {
+  const normalized = path.replaceAll('\\', '/')
+  const prefix = normalized.startsWith('//') ? '//' : ''
+  return prefix + normalized.slice(prefix.length).replace(/\/+/g, '/')
+}
+const ownAgentDirs = async (io: PromptsPort) => {
+  const paths = [`${await io.cwd()}/.claude/agents`, `${await io.configDir()}/agents`]
+  const seen = new Set<string>()
+  return paths.filter(path => {
+    const key = directoryKey(path)
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
 
 // The agents directories Claude Code may read the definition of `type` from, in its order: a plugin agent
 // `<plugin>:<name>` in its plugin's `agents`, any other in the session's `.claude/agents`, then in the

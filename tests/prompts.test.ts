@@ -61,6 +61,22 @@ test('a shared project and config agent directory is listed once', async () => {
   expect(await contested(sharedIo, session(), 'project-review')).toBe(false)
 })
 
+test('Windows slash variants of one agent directory are listed once', async () => {
+  let listed = 0
+  const windowsIo = {
+    ...io,
+    cwd: async () => String.raw`C:\fixture\project`,
+    configDir: async () => String.raw`C:\fixture\project\.claude`,
+    listDir: async () => {
+      listed++
+      return [{ name: 'owned-agent.md', kind: 'file' as const }]
+    },
+    read: async () => '---\nname: owned-agent\ndescription: Owned agent\n---\nOwned prompt.\n',
+  }
+  expect(await contested(windowsIo, session(), 'owned-agent')).toBe(false)
+  expect(listed).toBe(1)
+})
+
 test('custom frontmatter preserves exact and alias models for native resolution', async () => {
   const s = session()
   expect((await definitionOf(io, s, 'exact-review'))?.model).toBe('local/qwen')
