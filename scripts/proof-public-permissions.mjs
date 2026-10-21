@@ -38,6 +38,10 @@ const server = createServer(async (request, response) => {
   let raw = ''; for await (const bytes of request) raw += bytes
   let body; try { body = JSON.parse(raw) } catch {}
   const path = request.url.split('?')[0]
+  if (path === '/fetch') {
+    requests.push({ phase, method: request.method, path, configuredFetch: true, requested: body?.url, credentialFree: !request.headers.authorization && !request.headers['x-api-key'] })
+    return json(response, { url: body?.url, content: '<h1>OWNED_REWRITTEN_FETCH</h1><p>Owned page evidence.</p>', contentType: 'text/html' })
+  }
   if (path === '/selected/v1/responses') {
     const classifier = raw.includes('pendingAction'), search = body?.tools?.some(tool => tool.type === 'web_search') === true
     requests.push({ phase, method: request.method, path, model: body?.model, classifier, search, rewrittenSearch: raw.includes('OWNED_REWRITTEN_SEARCH'), rewrittenFetch: raw.includes('OWNED_REWRITTEN_FETCH'), completeInstructions: raw.includes('OWNED_LONG_INSTRUCTIONS_START') && raw.includes('OWNED_LONG_INSTRUCTIONS_END'), noTools: !body?.tools?.length, strictSchema: body?.text?.format?.type === 'json_schema', credentialFree: !request.headers.authorization && !request.headers['x-api-key'] })
@@ -58,8 +62,8 @@ const compile = source => {
 }
 try {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
-  const base = `http://127.0.0.1:${server.address().port}`
-  mkdirSync(plugin); mkdirSync(config); mkdirSync(join(plugin, 'scripts'))
+  const base = `http://127.0.0.1:${server.address().port}`, rewrittenPage = 'https://93.184.216.34/rewritten'
+  mkdirSync(plugin); mkdirSync(config); mkdirSync(join(plugin, 'scripts')); mkdirSync(join(config, 'rice-multi-models'))
   for (const directory of ['.claude-plugin', 'hooks', 'types', 'dist']) cpSync(join(root, directory), join(plugin, directory), { recursive: true })
   cpSync(join(root, 'scripts/permission-context.mjs'), join(plugin, 'scripts/permission-context.mjs'))
   for (const path of ['hooks/register.ts', 'hooks/permission.ts', 'hooks/permission-context.ts', 'hooks/tool-gate.ts', 'hooks/hooks.json', 'scripts/permission-context.mjs', 'dist/helper.mjs', 'dist/helper.meta.json']) sourceHashes[path] = hash(readFileSync(join(root, path)))
@@ -68,6 +72,7 @@ try {
   writeFileSync(join(config, '.claude.json'), JSON.stringify(nativeProfile))
   writeFileSync(join(config, 'CLAUDE.md'), 'OWNED_LONG_INSTRUCTIONS_START\n' + 'Preserve the exact owner approval gate.\n'.repeat(1500) + 'OWNED_LONG_INSTRUCTIONS_END\n')
   writeFileSync(join(config, 'rice-multi-models.json'), JSON.stringify({ providers: { selected: { kind: 'responses', baseUrl: `${base}/selected/v1`, allowHttp: true, auth: 'none', models: { main: { webSearch: 'native', maxOutputTokens: 4096, contextWindow: 500000 } } } } }))
+  writeFileSync(join(config, 'rice-multi-models/fetch.json'), JSON.stringify({ version: 1, endpoints: [{ name: 'owned-fetch', url: `${base}/fetch`, priority: 0 }] }))
   const key = join(fixture, 'page.key'), cert = join(fixture, 'page.crt'), openssl = join(fixture, 'openssl.cnf')
   writeFileSync(openssl, '[req]\ndistinguished_name=dn\nx509_extensions=extensions\nprompt=no\n[dn]\nCN=127.0.0.1\n[extensions]\nsubjectAltName=IP:127.0.0.1\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,digitalSignature,keyEncipherment,keyCertSign\n')
   const certificate = spawnSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key, '-out', cert, '-days', '1', '-config', openssl], { encoding: 'utf8', timeout: 10000 })
@@ -94,7 +99,7 @@ try {
 ` + source.slice(close)
   const driver = `const record=async($,row)=>{const path=${JSON.stringify(eventsFile)};const rows=await $.fs.exists(path)?JSON.parse(await $.fs.read(path)):[];rows.push(row);await $.fs.write(path,JSON.stringify(rows));};
   export const register=on=>{
-    on('classic.PreToolUse',async($,e,next)=>{const result=await next(e);const test=JSON.parse(await $.fs.read(${JSON.stringify(phaseFile)}));if(!test.rewrite)return result;const updatedInput=test.call.tool==='WebSearch'?{query:'OWNED_REWRITTEN_SEARCH',allowed_domains:['docs.example']}:{url:${JSON.stringify(page)},prompt:'Extract OWNED_REWRITTEN_FETCH'};await record($,{event:'classic-rewrite',tool:test.call.tool,input:updatedInput});return{...result,updatedInput};});
+    on('classic.PreToolUse',async($,e,next)=>{const result=await next(e);const test=JSON.parse(await $.fs.read(${JSON.stringify(phaseFile)}));if(!test.rewrite)return result;const updatedInput=test.call.tool==='WebSearch'?{query:'OWNED_REWRITTEN_SEARCH',allowed_domains:['docs.example']}:{url:${JSON.stringify(rewrittenPage)},prompt:'Extract OWNED_REWRITTEN_FETCH'};await record($,{event:'classic-rewrite',tool:test.call.tool,input:updatedInput});return{...result,updatedInput};});
     on('turn.step',async function*($,e){const test=JSON.parse(await $.fs.read(${JSON.stringify(phaseFile)}));let result;try{result=await $.tool.call(test.call);}catch(error){result={deny:'Native call refused: '+String(error?.message||error).slice(0,400),callError:true};}await record($,{event:'tool-result',result});const answer='OWNED_PERMISSIONS '+JSON.stringify(result);yield{kind:'text',index:0,text:answer};yield{kind:'stop',stopReason:'end_turn',usage:null};return{turnId:e.turnId,index:e.index,answer,toolUses:[],stopReason:'end_turn',usage:null};});
   };`
   compile(driver)
@@ -115,7 +120,7 @@ try {
     { name: 'native-deny', mode: 'auto', call: bash, permissions: { deny: ['Bash'] }, classifier: 0, approved: false },
     { name: 'forced-ask', mode: 'auto', call: bash, permissions: { ask: ['Bash'] }, classifier: 0, approved: false },
     { name: 'search-allowed-rewritten', mode: 'default', call: { tool: 'WebSearch', query: 'OWNED_ORIGINAL_SEARCH' }, permissions: { allow: ['WebSearch'] }, rewrite: true, approved: true },
-    { name: 'fetch-allowed-rewritten', mode: 'default', call: { tool: 'WebFetch', url: 'https://original.example/page', prompt: 'OWNED_ORIGINAL_FETCH' }, permissions: { allow: ['WebFetch(domain:127.0.0.1)'] }, rewrite: true, approved: true },
+    { name: 'fetch-allowed-rewritten', mode: 'default', call: { tool: 'WebFetch', url: 'https://original.example/page', prompt: 'OWNED_ORIGINAL_FETCH' }, permissions: { allow: ['WebFetch(domain:93.184.216.34)'] }, rewrite: true, approved: true },
     { name: 'search-ask-headless', mode: 'default', call: { tool: 'WebSearch', query: 'OWNED_ASK_SEARCH' }, permissions: { ask: ['WebSearch'] }, approved: false },
     { name: 'fetch-ask-headless', mode: 'default', call: { tool: 'WebFetch', url: page, prompt: 'OWNED_ASK_FETCH' }, permissions: { ask: ['WebFetch'] }, approved: false },
   ]
@@ -151,7 +156,7 @@ try {
       assert.notEqual(result.isError, true, phase + ' successful typed tool result')
       if (test.call.tool === 'Bash') assert.ok(result.result?.stdout?.includes('OWNED_CLASSIFIER_MARKER'), 'real Bash prints selected-classifier marker')
       if (test.call.tool === 'WebSearch') { assert.equal(result.result?.query, 'OWNED_REWRITTEN_SEARCH'); assert.ok(selected.some(row => row.search && row.rewrittenSearch)) }
-      if (test.call.tool === 'WebFetch') { assert.equal(result.result?.url, page); assert.equal(result.result?.result, 'OWNED_SELECTED_EXTRACTION'); if (!interactive) assert.ok(selected.some(row => row.rewrittenFetch)); assert.ok(requests.slice(start).some(row => row.page && row.path === '/rewritten')) }
+      if (test.call.tool === 'WebFetch') { assert.equal(result.result?.url, rewrittenPage); assert.equal(result.result?.result, 'OWNED_SELECTED_EXTRACTION'); if (!interactive) assert.ok(selected.some(row => row.rewrittenFetch)); assert.ok(requests.slice(start).some(row => row.configuredFetch && row.requested === rewrittenPage)) }
     } else {
       assert.ok(result.deny || result.isError, phase + ' does not execute')
       assert.equal(selected.length, 0, phase + ' sends no selected-provider request')
@@ -161,7 +166,7 @@ try {
     const namingPosts = requests.slice(start).filter(row => row.native && row.method === 'POST' && row.nativeNaming).length
     console.log(JSON.stringify({ phase, passed: true, selectedRequests: selected.length, permissionNativePostCount: 0, nativeNamingPosts: namingPosts }))
   }
-  assert.ok(requests.filter(row => row.path === '/selected/v1/responses' || row.page).every(row => row.credentialFree), 'synthetic provider and page never receive account credentials')
+  assert.ok(requests.filter(row => row.path === '/selected/v1/responses' || row.configuredFetch || row.page).every(row => row.credentialFree), 'synthetic provider, configured fetch service and page never receive account credentials')
   const nativeNamingPosts = requests.filter(row => row.native && row.method === 'POST' && row.nativeNaming).length
   console.log(JSON.stringify({ publicPermissions: true, productionHelper: true, interactive, cases: runs.length, nativeNamingPosts, noObservedNativeInference: nativeNamingPosts === 0, coverage: 'exercised permission and web calls only', fixture, sourceHashes }))
 } catch (error) {
