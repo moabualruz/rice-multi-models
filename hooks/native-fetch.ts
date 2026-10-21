@@ -1,13 +1,11 @@
 import type { PublicWebFetchInput, PublicWebFetchResult } from './web-fetch.ts'
-import { DestinationSafetyError, resolveAddresses, resolveAndCheck } from '../helper/native/destination.ts'
-import type { AddressResolver } from '../helper/native/destination.ts'
 import { parseWebFetchContent, webFetchToolType } from '../helper/native/web-fetch.ts'
 
 /** Native Claude operations stay on the host authorization and HTTP handles. */
 export type NativeFetchContext = {
   authorize: () => Promise<{ handle: string; kind: 'bearer' | 'api-key' } | null>
   fetch: (url: string, init: { method?: string; headers?: Record<string, string>; body?: string; auth?: string }) => Promise<{ status: number; ok: boolean; text: string }>
-  resolve?: AddressResolver
+  checkDestination: (url: string) => Promise<void>
 }
 
 export class NativeFetchUnavailable extends Error {
@@ -66,10 +64,9 @@ export async function runNativeFetch(input: Omit<PublicWebFetchInput, 'wire'>, c
     || input.offset !== undefined && (!Number.isSafeInteger(input.offset) || input.offset < 0)) throw new NativeFetchUnavailable('response', 'Native Claude WebFetch received invalid input.')
   let requested: URL
   try { requested = new URL(input.url) } catch { throw new NativeFetchUnavailable('response', 'Native Claude WebFetch received an invalid URL.') }
-  const resolver = context.resolve ?? resolveAddresses
-  try { await resolveAndCheck(requested, signal, resolver) } catch (error) {
+  try { await wait(context.checkDestination(requested.href), signal) } catch {
     signal.throwIfAborted()
-    throw new NativeFetchUnavailable('security', error instanceof DestinationSafetyError ? error.message : 'Native Claude WebFetch could not verify the destination.')
+    throw new NativeFetchUnavailable('security', 'Native Claude WebFetch could not verify the destination.')
   }
   const started = Date.now(), check = () => {
     signal.throwIfAborted()
@@ -115,9 +112,9 @@ export async function runNativeFetch(input: Omit<PublicWebFetchInput, 'wire'>, c
   }
   check()
   if (!called || !completed || !document || message.stop_reason !== 'end_turn' && message.stop_reason !== 'stop_sequence') throw new NativeFetchUnavailable('response', 'Native Claude WebFetch did not finish successfully.')
-  try { await resolveAndCheck(new URL(document.url), signal, resolver) } catch (error) {
+  try { await wait(context.checkDestination(document.url), signal) } catch {
     signal.throwIfAborted()
-    throw new NativeFetchUnavailable('security', error instanceof DestinationSafetyError ? error.message : 'Native Claude WebFetch returned an unverifiable source URL.')
+    throw new NativeFetchUnavailable('security', 'Native Claude WebFetch returned an unverifiable source URL.')
   }
   const result = text.trim() || document.text
   return { bytes: Buffer.byteLength(document.text), code: 200, codeText: 'OK', result, durationMs: Math.max(0, Date.now() - started), url: document.url }

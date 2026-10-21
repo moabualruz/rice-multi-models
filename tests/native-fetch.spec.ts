@@ -13,7 +13,7 @@ const answer = { type: 'message', stop_reason: 'end_turn', content: [
 ] }
 const context = (messages: unknown[] = [answer], models: unknown = modelList) => ({
   authorize: async () => ({ handle: authHandle, kind: 'bearer' as const }),
-  resolve: async () => [{ address: '93.184.216.34', family: 4 as const }],
+  checkDestination: async (destination: string) => { if (new URL(destination).hostname === '127.0.0.1') throw new Error('unsafe fixture destination') },
   fetch: async (asked: string, init: { method?: string; body?: string; auth?: string }) => {
     expect(init.auth).toBe(authHandle)
     if (asked.endsWith('/v1/models?limit=1000')) return { status: 200, ok: true, text: JSON.stringify(models) }
