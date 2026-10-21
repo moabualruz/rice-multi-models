@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        claude: ['2.1.301', '2.1.302']
+        claude: ['2.1.301', '2.1.302', '2.1.306']
     env:
       CLAUDE_VERSION: ${{ matrix.claude }}
     steps:

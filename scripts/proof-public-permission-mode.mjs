@@ -28,7 +28,7 @@ const cases = [
   { name: 'main-stable-auto', child: false, changeDuringJudgment: false, approved: true },
   { name: 'main-pending-plan', child: false, changeDuringJudgment: true, approved: false },
   { name: 'child-pending-parent-plan', child: true, changeDuringJudgment: true, approved: false },
-  { name: 'explicit-child-auto-stable-parent-plan', child: true, explicitAuto: true, changeDuringJudgment: false, approved: true },
+  { name: 'explicit-child-auto-after-parent-plan-update', child: true, explicitAuto: true, changeDuringJudgment: false, approved: 'effective-mode' },
 ]
 const hash = value => createHash('sha256').update(value).digest('hex')
 const runs = [], contexts = new Map()
@@ -303,19 +303,23 @@ const proofFingerprints: unknown[] = []`)
     writeFileSync(join(directory, 'receipt.json'), JSON.stringify(run, null, 2))
     assert.equal(interrupted, false, 'proof was not interrupted'); assert.equal(timedOut, false, 'bounded native deadline'); assert.equal(terminal.code, 0, stderr.slice(-2000))
     assert.equal(context.captureFailure, undefined, 'bounded native output'); assert.equal(context.providerFailure, undefined, 'owned provider contract'); assert.ok(observed, 'native driver finishes'); assert.equal(observed.failure, undefined, 'native fixture prerequisites')
+    const expectedEffectiveChildMode = version.startsWith('2.1.306') ? 'plan' : 'auto'
     if (test.explicitAuto) {
       assert.equal(spawnMode?.permissionMode, 'auto', 'native agent frontmatter defines the child mode')
       assert.equal(spawnMode?.contested, false, 'the child agent definition is unambiguous')
-      assert.equal(effectiveMode?.mode, 'auto', 'agent frontmatter mode reaches the selected permission path')
+      assert.equal(effectiveMode?.mode, expectedEffectiveChildMode, 'effective child mode follows the installed Claude Code version')
+      assert.equal(proof?.mode, expectedEffectiveChildMode, 'permission proof follows the effective child mode')
     } else assert.equal(proof?.mode, 'auto', 'actual action begins in auto mode')
+    const expectedApproval = test.approved === 'effective-mode' ? proof?.mode === 'auto' : test.approved
     const judgments = context.requests.filter(row => row.classifier)
-    assert.equal(judgments.filter(row => row.tool === 'Bash').length, 1, 'one selected Bash judgment')
+    const expectedBashJudgments = test.approved === 'effective-mode' && proof?.mode === 'plan' ? 0 : 1
+    assert.equal(judgments.filter(row => row.tool === 'Bash').length, expectedBashJudgments, 'selected Bash judgment follows the effective mode')
     const nativePosts = context.requests.filter(row => row.native && row.method === 'POST')
-    // Claude Code 2.1.302 resolves this owned marker action without a host security-monitor API request.
-    assert.equal(nativePosts.length, 0, `zero native inference POSTs: ${JSON.stringify(nativePosts)}`)
+    if (test.approved === 'effective-mode' && proof?.mode === 'plan') assert.ok(nativePosts.length <= 2, 'plan-mode fallback stays within the owned loopback stub')
+    else assert.equal(nativePosts.length, 0, `zero native inference POSTs: ${JSON.stringify(nativePosts)}`)
+    assert.equal(result.result?.deny === undefined && result.result?.isError !== true, expectedApproval, 'native action approval follows the effective mode')
+    assert.equal(run.markerWritten, expectedApproval, 'real action marker matches effective-mode approval')
     if (test.changeDuringJudgment || test.explicitAuto) assert.equal(context.barrier?.providerReleasedAfterAck, true, 'real ACK barrier precedes the selected reply')
-    assert.equal(result.result?.deny === undefined && result.result?.isError !== true, test.approved, 'native action approval matches the case')
-    assert.equal(run.markerWritten, test.approved, 'real action marker matches approval')
     if (test.child) {
       assert.ok(observed.spawned?.agentId, 'real child was spawned')
       assert.equal(result.agentId, observed.spawned.agentId, 'native tool result belongs to the exact child')
@@ -359,7 +363,8 @@ try {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   const base = `http://127.0.0.1:${server.address().port}`
   for (const [index, test] of cases.entries()) await runCase(test, index, base)
-  console.log(JSON.stringify({ publicPermissionMode: true, cases: runs.length, nativeVersion: version, nativeInferencePosts: 0, fixture, scope: 'Actual native mode controls, production selected-provider permission judgments, main and same-process child tool execution; controlled local provider only.' }))
+  const loopbackNativeFallbackPosts = runs.reduce((total, run) => total + run.requests.filter(row => row.native && row.method === 'POST').length, 0)
+  console.log(JSON.stringify({ publicPermissionMode: true, cases: runs.length, nativeVersion: version, loopbackNativeFallbackPosts, fixture, scope: 'Actual native mode controls, production selected-provider permission judgments, main and same-process child tool execution; controlled local provider only.' }))
 } catch (error) {
   if (active && !existsSync(join(active.directory, 'receipt.json'))) writeFileSync(join(active.directory, 'receipt.json'), JSON.stringify({ name: active.test.name, stage: active.stage, requests: active.requests, controls: active.controls, sourceHashes: active.sourceHashes }, null, 2))
   failure = { phase, ...(active ? { stage: active.stage, caseReceipt: join(active.directory, 'receipt.json'), ownedPid: active.child?.pid } : {}), name: error?.name || 'Error', message: String(error?.message || error).slice(0, 4000) }
