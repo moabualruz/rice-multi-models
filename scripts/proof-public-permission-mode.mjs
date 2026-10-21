@@ -88,18 +88,6 @@ function respondText(response, text) {
   respond(response, [{ id: 'msg_owned_mode', type: 'message', content: [{ type: 'output_text', text, annotations: [] }] }], text)
 }
 
-function respondAnthropicText(response, model, text) {
-  response.writeHead(200, { 'content-type': 'text/event-stream' })
-  const send = (type, value) => response.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...value })}\n\n`)
-  send('message_start', { message: { id: 'msg_owned_security_monitor', type: 'message', role: 'assistant', model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 1 } } })
-  send('content_block_start', { index: 0, content_block: { type: 'text', text: '' } })
-  send('content_block_delta', { index: 0, delta: { type: 'text_delta', text } })
-  send('content_block_stop', { index: 0 })
-  send('message_delta', { delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 3 } })
-  send('message_stop', {})
-  response.end()
-}
-
 function judgmentInput(body) {
   for (const message of body.input ?? []) {
     const text = typeof message.content === 'string' ? [message.content] : (message.content ?? []).map(block => block.text).filter(value => typeof value === 'string')
@@ -135,21 +123,8 @@ const server = createServer(async (request, response) => {
     // A native request keeps a short, nonsecret summary so a failure names what reached Claude.
     const system = native ? (typeof body?.system === 'string' ? body.system : Array.isArray(body?.system) ? body.system.map(block => block?.text ?? '').join(' ') : '') : ''
     const row = { method: request.method, path: match[2], classifier, native, credentialFree: !request.headers.authorization && !request.headers['x-api-key'],
-      ...(native && body ? { model: body.model, tools: (body.tools ?? []).length, system: system.slice(0, 160), lastUser: JSON.stringify(body.messages?.at(-1)?.content ?? '').slice(0, 200), outputFormat: body.output_config?.format ?? body.text?.format ?? null } : {}) }
+      ...(native && body ? { model: body.model, tools: (body.tools ?? []).length, system: system.slice(0, 160), lastUser: JSON.stringify(body.messages?.at(-1)?.content ?? '').slice(0, 200) } : {}) }
     context.requests.push(row)
-    if (match[2] === 'native/v1/messages') {
-      const transcript = JSON.stringify(body?.messages ?? [])
-      assert.equal(request.method, 'POST', 'native security-monitor fixture receives only POST')
-      assert.equal(context.test.explicitAuto, true, 'native security-monitor fixture is limited to the explicit child-auto case')
-      assert.ok(system.includes('You are a security monitor for autonomous AI coding agents.'), 'native request is the host security monitor, not a conversation turn')
-      assert.ok(['claude-sonnet-5', 'selected/main'].includes(body.model), 'native security monitor uses only the expected fixture models')
-      assert.equal((body.tools ?? []).length, 0, 'native security monitor request has no tools')
-      assert.ok(transcript.includes(childConstraint), 'native security monitor sees the owned child constraint')
-      assert.ok(transcript.includes(command), 'native security monitor sees only the exact owned marker command')
-      row.nativeKind = 'host-security-monitor'
-      row.fixtureResponse = 'local-allow-for-owned-marker'
-      return respondAnthropicText(response, body.model, JSON.stringify({ decision: 'allow', reason: 'The exact owned marker action was requested.' }))
-    }
     if (match[2] !== 'selected/v1/responses') return json(response, { type: 'error', error: { type: 'rate_limit_error', message: 'Owned exhausted native subscription' } }, 429)
     assert.equal(row.credentialFree, true, 'synthetic selected provider receives no credentials')
     if (classifier) {
@@ -336,12 +311,8 @@ const proofFingerprints: unknown[] = []`)
     const judgments = context.requests.filter(row => row.classifier)
     assert.equal(judgments.filter(row => row.tool === 'Bash').length, 1, 'one selected Bash judgment')
     const nativePosts = context.requests.filter(row => row.native && row.method === 'POST')
-    const nativeMonitors = nativePosts.filter(row => row.nativeKind === 'host-security-monitor' && row.fixtureResponse === 'local-allow-for-owned-marker')
-    const ordinaryNativePosts = nativePosts.filter(row => row.nativeKind !== 'host-security-monitor')
-    assert.equal(ordinaryNativePosts.length, 0, `zero ordinary native inference POSTs: ${JSON.stringify(ordinaryNativePosts)}`)
-    assert.equal(nativeMonitors.length, nativePosts.length, 'every native POST is an exact local security-monitor fixture request')
-    if (test.explicitAuto) assert.ok(nativeMonitors.length > 0, 'host security monitor receives its isolated fixture response')
-    else assert.equal(nativeMonitors.length, 0, 'non-child cases do not use native security-monitor inference')
+    // Claude Code 2.1.302 resolves this owned marker action without a host security-monitor API request.
+    assert.equal(nativePosts.length, 0, `zero native inference POSTs: ${JSON.stringify(nativePosts)}`)
     if (test.changeDuringJudgment || test.explicitAuto) assert.equal(context.barrier?.providerReleasedAfterAck, true, 'real ACK barrier precedes the selected reply')
     assert.equal(result.result?.deny === undefined && result.result?.isError !== true, test.approved, 'native action approval matches the case')
     assert.equal(run.markerWritten, test.approved, 'real action marker matches approval')
@@ -353,7 +324,7 @@ const proofFingerprints: unknown[] = []`)
       assert.equal(observed.stopped?.result?.task_id, observed.spawned.agentId, 'cleanup names the exact owned child')
       assert.ok(observed.stopped.result.message.includes('Successfully stopped'), 'owned child stop is confirmed')
     } else assert.equal(proof.agentId, undefined, 'main mode proof has no child identity')
-    console.log(JSON.stringify({ phase, passed: true, selectedJudgments: judgments.length, nativeInferencePosts: ordinaryNativePosts.length, nativeSecurityMonitorPosts: nativeMonitors.length, ...(test.child ? { ownedChild: observed.spawned.agentId, stopped: true } : {}) }))
+    console.log(JSON.stringify({ phase, passed: true, selectedJudgments: judgments.length, nativeInferencePosts: nativePosts.length, ...(test.child ? { ownedChild: observed.spawned.agentId, stopped: true } : {}) }))
     context.stage = 'complete'
   } finally {
     clearTimeout(timer); await cleanup(context)
