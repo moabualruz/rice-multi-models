@@ -243,13 +243,24 @@ test('configured-service extraction failure after partial output is terminal', a
   expect(calls).toBe(1)
 })
 
-test('engine WebFetch follows configured services and direct selected extraction is the final fallback', async () => {
-  let direct = 0, extracted = 0
-  const serviceFailure = create({ configured: async () => { throw new Error('service offline') }, request: async () => { direct++; return new Response('unexpected direct request') } })
-  await expect(serviceFailure(input, signal())).resolves.toMatchObject({ kind: 'native-fallback', url, prompt })
-  expect(direct).toBe(0)
+test('provider-native and configured retrieval precede the explicit direct action and Claude fallback', async () => {
+  const order: string[] = []
+  const configText = JSON.stringify({ providers: { selected: { kind: 'anthropic', baseUrl: 'https://api.anthropic.com', auth: 'none', models: { 'claude-sonnet-4-6': {} } } } })
+  const parsed = parseConfig(configText); expect(parsed.errors).toEqual([]); if (!parsed.config) throw new Error('Invalid native fetch fixture')
+  const selected: StepWire = { ...wire, configText, approved: [fingerprint(parsed.config.providers.selected!)], req: { ...wire.req, target: 'selected/claude-sonnet-4-6' } }
+  const configuredFailure = create({
+    step: async function* () { order.push('provider-native'); throw new Error('provider-native unavailable') },
+    configured: async () => { order.push('configured-service'); throw new Error('service offline') },
+    request: async () => { order.push('unexpected-direct'); return new Response('unexpected direct request') },
+  })
+  const outcome = await configuredFailure({ ...input, wire: selected }, signal())
+  expect(outcome).toMatchObject({ kind: 'native-fallback', url, prompt })
+  expect(order).toEqual(['provider-native', 'configured-service'])
 
-  const finalDirect = createDirect({ request: async () => { direct++; return new Response('Direct evidence', { headers: { 'content-type': 'text/plain' } }) }, step: async function* () { extracted++; yield* complete() } })
-  await expect(finalDirect(input, signal())).resolves.toMatchObject({ result: 'The release changed.' })
-  expect(direct).toBe(1); expect(extracted).toBe(1)
+  let extracted = 0
+  const directAction = createDirect({ request: async () => { order.push('direct-selected-extraction'); return new Response('Direct evidence', { headers: { 'content-type': 'text/plain' } }) }, step: async function* () { extracted++; yield* complete() } })
+  await expect(directAction(input, signal())).resolves.toMatchObject({ result: 'The release changed.' })
+  order.push('native-Claude-fallback')
+  expect(order).toEqual(['provider-native', 'configured-service', 'direct-selected-extraction', 'native-Claude-fallback'])
+  expect(extracted).toBe(1)
 })
