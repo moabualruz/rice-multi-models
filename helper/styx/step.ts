@@ -13,8 +13,8 @@ import { mintToolId } from '../../hooks/protocol'
 import type { ProviderStatus, StepEvent, StepWire, Usage, Wire } from '../../hooks/protocol'
 import { coalesce } from '../../hooks/coalesce'
 import { createKeys } from './auth'
-import { createHash } from 'node:crypto'
 import type { Runner } from './auth'
+import { cacheIdentityKey } from './cache-identity'
 import { joinUrl, parseJson } from './codec'
 import type { Codec, Decoded } from './codec'
 import { CODECS } from './codecs'
@@ -154,11 +154,23 @@ export function createStepper(env: Env) {
     const codec = CODECS[m.kind]
     let key = await keys.get(p, approved)
     if ('error' in key) return yield* refuse(key.error)
-    const conversationKey = createHash('sha256').update(`${req.session}:${req.who}`).digest('hex')
+    const conversationKey = cacheIdentityKey({
+      providerId: p.id,
+      providerKind: p.kind,
+      endpointOrigin: p.origin,
+      modelKind: m.kind,
+      modelId: m.id,
+      session: req.session,
+      owner: req.who,
+    })
     let enc: ReturnType<Codec['encode']>
     try {
       enc = codec.encode({ system: req.system, messages: normalize(req.transcript, m.vision, ids.of(p.id), thinking.sealed(owner)), tools: req.tools, ...(req.effort === undefined ? {} : { effort: req.effort }), cacheKey: conversationKey }, p, m)
       enc.body = nativeConstraints(enc.body, m, req.native)
+      const body = parseJson(enc.body)
+      if (isObject(body) && Object.hasOwn(body, 'prompt_cache_key') && body['prompt_cache_key'] !== conversationKey) {
+        return yield* refuse('rice-multi-models: prompt_cache_key overrides are not accepted; cache identity is scoped automatically')
+      }
     } catch (error) {
       return yield* refuse(error instanceof Error ? error.message : 'rice-multi-models: request policy could not be encoded')
     }
