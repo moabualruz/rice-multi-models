@@ -6474,7 +6474,7 @@ async function* codexStep(req, model2, signal, options = {}) {
         arm();
         const push = (event) => {
           ttfb ??= Date.now() - started;
-          if (event.type === "tool_use") {
+          if (event.type === "text" || event.type === "thinking" || event.type === "search_sources" || event.type === "tool_use") {
             committed = true;
             flush();
           }
