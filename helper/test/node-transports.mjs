@@ -125,6 +125,58 @@ for (const transport of ['sse', 'ws']) {
   })
 }
 
+test('compiled HTTP stream cancellation closes the provider connection without replay', async () => {
+  let calls = 0
+  let acknowledge
+  const received = new Promise(resolve => { acknowledge = resolve })
+  let providerClosed
+  const closed = new Promise(resolve => { providerClosed = resolve })
+  const server = createServer((request, response) => {
+    calls += 1
+    request.resume()
+    request.once('end', async () => {
+      response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
+      response.on('close', providerClosed)
+      for (const event of [
+        created,
+        { type: 'response.output_item.added', output_index: 0, item: { id: 'msg_node', type: 'message', content: [] } },
+        { type: 'response.output_text.delta', output_index: 0, delta: 'cancel me' },
+      ]) response.write(`data: ${JSON.stringify(event)}\n\n`)
+      await received
+    })
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  const controller = new AbortController()
+  const iterator = runtime.codexStep({ ...req, transport: 'sse' }, 'test', controller.signal, {
+    authFile,
+    httpUrl: `http://127.0.0.1:${server.address().port}/responses`,
+  })[Symbol.asyncIterator]()
+  let timer
+  try {
+    const first = await Promise.race([
+      iterator.next(),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('first text was not delivered before cancellation handshake')), 2000) }),
+    ])
+    clearTimeout(timer)
+    assert.deepEqual(first, { done: false, value: { type: 'text', text: 'cancel me' } })
+    acknowledge()
+    await iterator.return()
+    await Promise.race([
+      closed,
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('provider connection stayed open after cancellation')), 2000) }),
+    ])
+    clearTimeout(timer)
+    assert.equal(calls, 1)
+  } finally {
+    clearTimeout(timer)
+    acknowledge()
+    controller.abort()
+    await iterator.return().catch(() => undefined)
+    server.closeAllConnections()
+    await new Promise(resolve => server.close(resolve))
+  }
+})
+
 test('compiled HTTP retries a connection reset before response headers', async () => {
   let calls = 0
   const server = createServer(async (request, response) => {

@@ -213,14 +213,16 @@ test('WebSocket policy close 1008 is permanent', async () => {
   expect(error.text).toContain('1 attempt')
 })
 
-test('discarded attempt text never leaks into the restarted answer', async () => {
+test('visible attempt text is preserved and a transient failure is not replayed', async () => {
   const result = await fake([{ events: [created,
     { type: 'response.output_item.added', output_index: 0, item: { type: 'message' } },
-    { type: 'response.output_text.delta', output_index: 0, delta: 'DISCARDED' },
+    { type: 'response.output_text.delta', output_index: 0, delta: 'partial' },
     { type: 'response.failed' },
   ] }, {}])
-  expect(result.calls).toBe(2)
-  expect(result.events.filter(event => event.type === 'text')).toEqual([{ type: 'text', text: 'OK' }])
+  expect(result.calls).toBe(1)
+  expect(result.events.filter(event => event.type === 'text')).toEqual([{ type: 'text', text: 'partial' }])
+  expect(result.events.some(event => event.type === 'error')).toBe(true)
+  expect(result.events.some(event => event.type === 'stop')).toBe(false)
 })
 
 test('final stream failures redact the actual login even when echoed as a short unlabelled value', async () => {

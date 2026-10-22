@@ -365,7 +365,7 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
         arm()
         const push = (event: StepEvent) => {
           ttfb ??= Date.now() - started
-          if (event.type === 'tool_use') {
+          if (event.type === 'text' || event.type === 'thinking' || event.type === 'search_sources' || event.type === 'tool_use') {
             committed = true
             flush()
           }
