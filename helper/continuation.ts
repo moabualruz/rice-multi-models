@@ -22,13 +22,19 @@ export function continuationOutput() {
   const content: ({ type: string } & Record<string, unknown>)[] = []
   const blocks: Placed[] = []
   let text: { type: 'text'; text: string } | undefined
-  return { content, blocks, feed(event: StepEvent) {
+  let sealedText: typeof text
+  let replayable = true
+  const seal = () => { sealedText = text }
+  return { content, blocks, seal, replayable: () => replayable, feed(event: StepEvent) {
     if (event.type === 'text') {
+      // A hidden signature does not split native text. Reject an opaque position
+      // inside that merged block rather than silently replaying it after all text.
+      if (text && text === sealedText) replayable = false
       if (text) text.text += event.text
       else { text = { type: 'text', text: event.text }; content.push(text) }
     } else if (event.type === 'thinking') text = undefined
     else if (event.type === 'tool_use') { text = undefined; content.push({ type: 'tool_use', id: event.id, name: event.name, input: event.input }) }
-    else if (event.type === 'signature') blocks.push({ at: content.length, block: { type: 'thinking', thinking: event.thinking, signature: event.signature } })
+    else if (event.type === 'signature') { seal(); blocks.push({ at: content.length, block: { type: 'thinking', thinking: event.thinking, signature: event.signature } }) }
   } }
 }
 const hex = (value: unknown) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)

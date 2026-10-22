@@ -3718,13 +3718,28 @@ var require_websocket_server = __commonJS({
 import { realpathSync } from "node:fs";
 
 // helper/continuation-lock.ts
-import { open, lstat, unlink, mkdir } from "node:fs/promises";
-import { dirname, isAbsolute, join } from "node:path";
+import { open, lstat, unlink, mkdir, realpath } from "node:fs/promises";
+import { isAbsolute, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 async function continuationLock(configDir, lifetime) {
-  if (!isAbsolute(configDir) || /[\0\r\n]/.test(configDir)) throw new Error("Invalid continuation lock directory");
-  const file = join(configDir, "rice-multi-models", "continuation.lock");
-  await mkdir(dirname(file), { recursive: true, mode: 448 });
+  if (!isAbsolute(configDir) || /[\0\r\n]/.test(configDir) || configDir.split(/[\\/]/).includes("..")) throw new Error("Invalid continuation lock directory");
+  let directory;
+  try {
+    const rootPath = resolve(configDir);
+    const root = await lstat(rootPath);
+    if (!root.isDirectory() || root.isSymbolicLink()) throw new Error("directory");
+    directory = join(await realpath(rootPath), "rice-multi-models");
+    try {
+      await mkdir(directory, { mode: 448 });
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+    }
+    const owned = await lstat(directory);
+    if (!owned.isDirectory() || owned.isSymbolicLink() || process.platform !== "win32" && (owned.mode & 18 || process.getuid && owned.uid !== process.getuid())) throw new Error("directory");
+  } catch {
+    throw new Error("Continuation lock directory unavailable or unsafe; no durable read/write was performed");
+  }
+  const file = join(directory, "continuation.lock");
   let handle;
   const deadline = Date.now() + 1e3;
   while (!handle) {
@@ -3739,8 +3754,8 @@ async function continuationLock(configDir, lifetime) {
   const held = await handle.stat();
   let release = () => {
   };
-  const ended = new Promise((resolve2) => {
-    release = resolve2;
+  const ended = new Promise((resolve3) => {
+    release = resolve3;
   });
   const stop2 = () => release();
   for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.once(signal, stop2);
@@ -4172,11 +4187,11 @@ function inputBudget(m) {
 
 // hooks/names.ts
 var overlay = (m, a) => ({ ...m, overrides: a.params ?? {}, headers: { ...m.headers, ...a.headers }, effort: a.effort ?? m.effort, cache: "cache" in a ? a.cache : m.cache });
-function resolve(config, name) {
+function resolve2(config, name) {
   if (NATIVE_MODELS.includes(name)) return { kind: "native", model: name, label: name };
   const alias = own(config.aliases, name);
   if (alias !== void 0) {
-    const t = resolve(config, alias.target);
+    const t = resolve2(config, alias.target);
     if (t === void 0) return void 0;
     return t.kind === "remote" ? { ...t, model: overlay(t.model, alias), label: name } : { ...t, label: name };
   }
@@ -4225,8 +4240,14 @@ function continuationOutput() {
   const content2 = [];
   const blocks2 = [];
   let text2;
-  return { content: content2, blocks: blocks2, feed(event) {
+  let sealedText;
+  let replayable = true;
+  const seal = () => {
+    sealedText = text2;
+  };
+  return { content: content2, blocks: blocks2, seal, replayable: () => replayable, feed(event) {
     if (event.type === "text") {
+      if (text2 && text2 === sealedText) replayable = false;
       if (text2) text2.text += event.text;
       else {
         text2 = { type: "text", text: event.text };
@@ -4236,7 +4257,10 @@ function continuationOutput() {
     else if (event.type === "tool_use") {
       text2 = void 0;
       content2.push({ type: "tool_use", id: event.id, name: event.name, input: event.input });
-    } else if (event.type === "signature") blocks2.push({ at: content2.length, block: { type: "thinking", thinking: event.thinking, signature: event.signature } });
+    } else if (event.type === "signature") {
+      seal();
+      blocks2.push({ at: content2.length, block: { type: "thinking", thinking: event.thinking, signature: event.signature } });
+    }
   } };
 }
 var hex = (value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
@@ -4826,14 +4850,14 @@ function retryDelay(failure, attempt, random = Math.random) {
 }
 function waitForRetry(ms, signal) {
   signal.throwIfAborted();
-  return new Promise((resolve2, reject) => {
+  return new Promise((resolve3, reject) => {
     const abort = () => {
       clearTimeout(timer);
       reject(signal.reason);
     };
     const timer = setTimeout(() => {
       signal.removeEventListener("abort", abort);
-      resolve2();
+      resolve3();
     }, ms);
     signal.addEventListener("abort", abort, { once: true });
     if (signal.aborted) abort();
@@ -5726,8 +5750,8 @@ async function fromResponses(stream, model2, emit = () => {
       }
       response.accept(step.value);
       if (response.stopPending && !deadline) {
-        deadline = new Promise((resolve2) => {
-          timer = setTimeout(() => resolve2("late"), STOP_USAGE_WAIT_MS);
+        deadline = new Promise((resolve3) => {
+          timer = setTimeout(() => resolve3("late"), STOP_USAGE_WAIT_MS);
         });
       }
     }
@@ -5774,7 +5798,7 @@ function estimateInputTokens(request2) {
 
 // helper/openai/auth.ts
 import { spawn as spawn2 } from "node:child_process";
-import { readFile, realpath } from "node:fs/promises";
+import { readFile, realpath as realpath2 } from "node:fs/promises";
 import path2 from "node:path";
 import { createInterface } from "node:readline";
 
@@ -6025,7 +6049,7 @@ async function waitForAuth(pending, signal) {
   }
 }
 async function renewAuth(authFile, rejected, options = {}) {
-  const filename = await realpath(authFile);
+  const filename = await realpath2(authFile);
   let pending = refreshing.get(filename);
   if (!pending) {
     pending = refreshIfUnchanged(filename, rejected, options).finally(
@@ -6185,7 +6209,7 @@ var CodexSocket = class _CodexSocket {
     const socket = new wrapper_default(url, { headers: headers2, followRedirects: false });
     socket.on("error", () => {
     });
-    return new Promise((resolve2, reject) => {
+    return new Promise((resolve3, reject) => {
       const cleanup = () => {
         clearTimeout(timer);
         signal?.removeEventListener("abort", abort);
@@ -6201,7 +6225,7 @@ var CodexSocket = class _CodexSocket {
       const abort = () => fail(signal?.reason);
       const opened = () => {
         cleanup();
-        resolve2(new _CodexSocket(socket));
+        resolve3(new _CodexSocket(socket));
       };
       const refused = (event) => {
         const message = "message" in event && typeof event.message === "string" ? event.message : "";
@@ -6280,8 +6304,8 @@ var CodexSocket = class _CodexSocket {
               continue;
             }
             if (done) break;
-            await new Promise((resolve2) => {
-              wake = resolve2;
+            await new Promise((resolve3) => {
+              wake = resolve3;
             });
           }
           if (failure) throw failure;
@@ -6347,11 +6371,11 @@ var AccountSteps = class {
     });
     const account = this.accounts.get(key) ?? { active: 0, waiting: [] };
     this.accounts.set(key, account);
-    return new Promise((resolve2, reject) => {
+    return new Promise((resolve3, reject) => {
       const grant = () => {
         account.active++;
         let released = false;
-        resolve2(() => {
+        resolve3(() => {
           if (released) return;
           released = true;
           account.active--;
@@ -6406,8 +6430,8 @@ async function postStream(url, headers2, body2, signal) {
   signal.addEventListener("abort", abort, { once: true });
   if (signal.aborted) abort();
   try {
-    incoming = await new Promise((resolve2, reject) => {
-      outgoing.once("response", resolve2);
+    incoming = await new Promise((resolve3, reject) => {
+      outgoing.once("response", resolve3);
       outgoing.once("error", reject);
       outgoing.end(body2);
     });
@@ -6616,8 +6640,8 @@ var Channel = class {
         continue;
       }
       if (this.closed) return;
-      await new Promise((resolve2) => {
-        this.wake = resolve2;
+      await new Promise((resolve3) => {
+        this.wake = resolve3;
       });
     }
   }
@@ -6781,7 +6805,7 @@ async function* codexStep(req, model2, signal, options = {}) {
             reasoning: response.multi_usage?.reasoning_tokens
           });
           if (scope && stopOf(response, mapper.toolCalls()) === "tool_use") {
-            const record4 = createContinuation(original, "codex-responses", scope, request2, continuationCalls, output?.blocks ?? [], Date.now(), output?.content);
+            const record4 = output?.replayable() ? createContinuation(original, "codex-responses", scope, request2, continuationCalls, output.blocks, Date.now(), output.content) : void 0;
             if (record4) queue.push({ type: "continuation", record: record4 });
             else if (output?.blocks.length) queue.push({ type: "continuation_status", status: "opaque-state-not-retained" });
           }
@@ -8025,15 +8049,21 @@ function assembler(codec, provider2, ids, mint = mintToolId, captureContinuation
   return {
     feed(ds) {
       const out = [];
+      const emit = (event) => {
+        out.push(event);
+        output?.feed(event);
+      };
       for (const d of ds) {
         if (failure !== void 0) break;
         if (d.t === "text" || d.t === "thinking") {
           if (d.t === "text" && !inText) before++;
           inText = d.t === "text";
-          out.push({ type: d.t, text: d.text });
-        } else if (d.t === "sealed") turn.blocks.push({ at: before, block: d.block });
-        else if (d.t === "native_block") out.push({ type: "native_block", block: d.block });
-        else if (d.t === "search_sources") out.push({ type: "search_sources", sources: d.sources, searched: d.searched });
+          emit({ type: d.t, text: d.text });
+        } else if (d.t === "sealed") {
+          turn.blocks.push({ at: before, block: d.block });
+          output?.seal();
+        } else if (d.t === "native_block") emit({ type: "native_block", block: d.block });
+        else if (d.t === "search_sources") emit({ type: "search_sources", sources: d.sources, searched: d.searched });
         else if (d.t === "usage") usage = { in: d.in, out: d.out, cacheRead: d.cacheRead, cacheWrite: d.cacheWrite, ...d.reasoning === void 0 ? {} : { reasoning: d.reasoning } };
         else if (d.t === "finish") finish = finishToken(d.reason);
         else if (d.t === "error") failure = d.message;
@@ -8048,11 +8078,10 @@ function assembler(codec, provider2, ids, mint = mintToolId, captureContinuation
             turn.tools.push({ id: id2, name: d.name, input, ...d.id === void 0 ? {} : { providerId: d.id } });
             before++;
             inText = false;
-            out.push({ type: "tool_use", id: id2, name: d.name, input });
+            emit({ type: "tool_use", id: id2, name: d.name, input });
           }
         }
       }
-      for (const event of out) output?.feed(event);
       return out;
     },
     // `cut` is the transport's failure text, when the response was cut short.
@@ -8069,7 +8098,8 @@ function assembler(codec, provider2, ids, mint = mintToolId, captureContinuation
     },
     failed: () => failure !== void 0,
     usage: () => usage,
-    turn: () => turn
+    turn: () => turn,
+    replayable: () => output?.replayable() ?? true
   };
 }
 async function errorBody({ body: body2, cancel }) {
@@ -8093,7 +8123,7 @@ function createStepper(env) {
     let effort = "-";
     let notes = "";
     const config = configOf(w.configText);
-    const t = config === void 0 ? void 0 : resolve(config, req.target);
+    const t = config === void 0 ? void 0 : resolve2(config, req.target);
     const close = (events, finish, u, extra = "") => {
       const st = {
         type: "stats",
@@ -8131,7 +8161,7 @@ function createStepper(env) {
       owner: req.who
     };
     const conversationKey = cacheIdentityKey(identity);
-    const scope = continuationScope(identity, p.baseUrl);
+    const scope = req.continuation ? continuationScope(identity, p.baseUrl) : conversationKey;
     const restored = restoreContinuations(req, m.kind, scope, env.now());
     for (const record4 of restored) {
       for (const call of record4.calls) if (call.providerId !== void 0) ids.remember(scope, call.id, call.providerId);
@@ -8196,7 +8226,7 @@ function createStepper(env) {
       if (blocks2.length > 0) notes += ` thinking=${blocks2.length}`;
     }
     if (req.continuation && end.finish !== "error" && end.events.some((event) => event.type === "stop" && event.reason === "tool_use")) {
-      const record4 = createContinuation(req, m.kind, scope, enc.body, asm.turn().tools, blocks2, env.now(), asm.turn().content);
+      const record4 = asm.replayable() ? createContinuation(req, m.kind, scope, enc.body, asm.turn().tools, blocks2, env.now(), asm.turn().content) : void 0;
       if (record4) yield { type: "continuation", record: record4 };
       else if (blocks2.length) yield { type: "continuation_status", status: "opaque-state-not-retained" };
     }
@@ -8214,7 +8244,7 @@ function createStepper(env) {
 import { createConnection } from "node:net";
 async function reachable(hostname, port, signal) {
   if (signal.aborted) return { kind: "reset", detail: "aborted" };
-  return new Promise((resolve2) => {
+  return new Promise((resolve3) => {
     const socket = createConnection({ host: hostname.replace(/^\[|\]$/g, ""), port });
     let done = false;
     const finish = (cut) => {
@@ -8223,7 +8253,7 @@ async function reachable(hostname, port, signal) {
       clearTimeout(timer);
       signal.removeEventListener("abort", abort);
       socket.destroy();
-      resolve2(cut);
+      resolve3(cut);
     };
     const abort = () => finish({ kind: "reset", detail: "aborted" });
     const timer = setTimeout(() => finish({ kind: "connect-timeout", detail: "" }), CONNECT_TIMEOUT_S * 1e3);
@@ -8296,9 +8326,9 @@ function startProcess(argv, cwd) {
   child.stderr.on("data", (chunk) => {
     stderr = (stderr + String(chunk)).slice(-4096);
   });
-  const exited = new Promise((resolve2, reject) => {
+  const exited = new Promise((resolve3, reject) => {
     child.once("error", reject);
-    child.once("close", (code2) => resolve2(code2 ?? 1));
+    child.once("close", (code2) => resolve3(code2 ?? 1));
   });
   void exited.catch(() => {
   });
@@ -8350,7 +8380,7 @@ function offeredTools(req) {
 async function* runStep(wire, signal, options = {}) {
   const target = splitTarget(wire.req.target);
   const parsed = wire.configText.trim() === "" ? void 0 : parseConfig(wire.configText);
-  const configured = parsed?.config ? resolve(parsed.config, wire.req.target) : void 0;
+  const configured = parsed?.config ? resolve2(parsed.config, wire.req.target) : void 0;
   if (configured?.kind === "remote") {
     yield* styx().step({ ...wire, req: { ...wire.req, tools: offeredTools(wire.req) } }, signal);
     return;
@@ -8374,12 +8404,12 @@ import { tmpdir } from "node:os";
 import { join as join2 } from "node:path";
 
 // helper/core/local-socket.ts
-import { basename, dirname as dirname2 } from "node:path";
+import { basename, dirname } from "node:path";
 function withLocalSocketPath(socketPath, operation) {
   if (process.platform === "win32" || Buffer.byteLength(socketPath) < 100) return operation(socketPath);
   const cwd = process.cwd();
   try {
-    process.chdir(dirname2(socketPath));
+    process.chdir(dirname(socketPath));
     return operation(basename(socketPath));
   } finally {
     process.chdir(cwd);
@@ -8398,7 +8428,7 @@ async function writeEvent(response, event) {
   if (response.destroyed) throw new Error("caller disconnected");
   if (response.write(`${JSON.stringify(event)}
 `)) return;
-  await new Promise((resolve2, reject) => {
+  await new Promise((resolve3, reject) => {
     const cleanup = () => {
       response.off("drain", drained);
       response.off("close", closed);
@@ -8406,7 +8436,7 @@ async function writeEvent(response, event) {
     };
     const drained = () => {
       cleanup();
-      resolve2();
+      resolve3();
     };
     const closed = () => {
       cleanup();
@@ -8468,8 +8498,8 @@ function serve(lifetime) {
       };
       response.on("close", abort);
       let finished;
-      active.set(controller, new Promise((resolve2) => {
-        finished = resolve2;
+      active.set(controller, new Promise((resolve3) => {
+        finished = resolve3;
       }));
       inFlight += 1;
       const keepAlive = setInterval(() => {
@@ -8556,8 +8586,8 @@ async function client(socketPath, body2, lifetime) {
     else socket.once("connect", reached);
   });
   try {
-    const incoming = await new Promise((resolve2, reject) => {
-      outgoing.once("response", resolve2);
+    const incoming = await new Promise((resolve3, reject) => {
+      outgoing.once("response", resolve3);
       outgoing.once("error", reject);
       lifetime?.addEventListener("abort", stop2, { once: true });
       if (lifetime?.aborted) stop2();
@@ -8584,7 +8614,7 @@ async function client(socketPath, body2, lifetime) {
 }
 
 // helper/setup-info.ts
-import { access, mkdir as mkdir2, readFile as readFile2, realpath as realpath2 } from "node:fs/promises";
+import { access, mkdir as mkdir2, readFile as readFile2, realpath as realpath3 } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { constants } from "node:fs";
 import { homedir as homedir2 } from "node:os";
@@ -8635,8 +8665,8 @@ async function setupInfo(env = process.env) {
 var CODEX_VERSION = "0.162.1";
 var CODEX_INTEGRITY = "sha512-NWZdi/kxyjv/8EUGFupziGU38YyleugZRM4JXgY5XFH7FUmaFA33NZS2Bmq0HPazf7S3jJQQWsZ/jAK9jsrV3Q==";
 function run(argv, env, timeout) {
-  return new Promise((resolve2) => {
-    execFile(argv[0], argv.slice(1), { env, timeout, maxBuffer: 1024 * 1024, windowsHide: true }, (error, stdout) => resolve2({ code: error ? 1 : 0, stdout: String(stdout) }));
+  return new Promise((resolve3) => {
+    execFile(argv[0], argv.slice(1), { env, timeout, maxBuffer: 1024 * 1024, windowsHide: true }, (error, stdout) => resolve3({ code: error ? 1 : 0, stdout: String(stdout) }));
   });
 }
 async function setupCodex(env = process.env) {
@@ -8646,7 +8676,7 @@ async function setupCodex(env = process.env) {
   if (!["darwin", "linux", "win32"].includes(process.platform) || !["x64", "arm64"].includes(process.arch)) return { ok: false, installed: false, error: "The pinned official Codex CLI supports macOS, Linux and Windows x64/arm64 only. Install a vendor-supported CLI for your platform." };
   if (!info.clis.npm) return { ok: false, installed: false, error: "npm is missing. Install the official Node.js 22+ distribution with npm, then /rice-models setup codex." };
   try {
-    const npmPath = await realpath2(info.clis.npm);
+    const npmPath = await realpath3(info.clis.npm);
     const npmScript = npmPath.endsWith(".js") ? npmPath : path3.join(path3.dirname(npmPath), "node_modules", "npm", "bin", "npm-cli.js");
     if (!await exists(npmScript)) return { ok: false, installed: false, error: "Could not locate npm-cli.js in this Node distribution. Install official Node.js with npm, then retry /rice-models setup codex." };
     const npm = [process.execPath, npmScript];
@@ -8698,7 +8728,7 @@ async function readJson(file, absent) {
   }
 }
 var TRANSIENT2 = /* @__PURE__ */ new Set(["EPERM", "EACCES", "EBUSY"]);
-var pause = (ms) => new Promise((resolve2) => setTimeout(resolve2, ms));
+var pause = (ms) => new Promise((resolve3) => setTimeout(resolve3, ms));
 async function atomicWrite(file, data) {
   const temp = `${file}.${randomUUID()}.tmp`;
   try {
@@ -9383,7 +9413,7 @@ async function searchConfiguration(input) {
       } catch (error) {
         if (code(error) !== "EEXIST") throw error;
         if (Date.now() >= deadline) return { ok: false, error: "Another search configuration edit is running. Retry after it finishes; if no session is editing, remove the stale rice-multi-models/.search-config.lock directory." };
-        await new Promise((resolve2) => setTimeout(resolve2, 25));
+        await new Promise((resolve3) => setTimeout(resolve3, 25));
       }
     }
     const current = await read(file);
@@ -9845,7 +9875,7 @@ function createToolSearch(ports = {}) {
     signal.throwIfAborted();
     const policy = webSearchPolicy(input), started = io.now(), { wire, query } = input;
     const parsed = wire.configText.trim() ? parseConfig(wire.configText) : void 0;
-    const selected = parsed?.config ? resolve(parsed.config, wire.req.target) : void 0;
+    const selected = parsed?.config ? resolve2(parsed.config, wire.req.target) : void 0;
     const remote = selected?.kind === "remote" ? selected : void 0;
     const method = providerSearch(wire.req.target, remote, policy);
     const answer = (stage, sources, calls) => ({ kind: "answered", stage, result: publicWebSearchResult(query, sources, policy, (io.now() - started) / 1e3, calls) });
@@ -9993,7 +10023,7 @@ async function resolveAndCheck2(url, signal, resolver) {
 function pinnedRequest(url, init, destination) {
   const headers2 = Object.fromEntries(new Headers(init.headers).entries());
   const request2 = url.protocol === "https:" ? httpsRequest2 : httpRequest2;
-  return new Promise((resolve2, reject) => {
+  return new Promise((resolve3, reject) => {
     const client2 = request2(url, {
       method: init.method,
       headers: headers2,
@@ -10008,7 +10038,7 @@ function pinnedRequest(url, init, destination) {
       const responseHeaders = new Headers();
       for (const [name, value] of Object.entries(response.headers)) if (value !== void 0) responseHeaders.set(name, Array.isArray(value) ? value.join(", ") : String(value));
       const body2 = status === 204 || status === 205 || status === 304 ? null : Readable2.toWeb(response);
-      resolve2(new Response(body2, { status, headers: responseHeaders }));
+      resolve3(new Response(body2, { status, headers: responseHeaders }));
     });
     client2.once("error", reject);
     client2.end();
@@ -10100,7 +10130,7 @@ async function checkedProviderSource(value, signal, resolver) {
 }
 function providerProtocol(configText, target) {
   const parsed = parseConfig(configText);
-  const selected = parsed.config ? resolve(parsed.config, target) : void 0;
+  const selected = parsed.config ? resolve2(parsed.config, target) : void 0;
   if (selected?.kind !== "remote") return void 0;
   const modelId = selected.target.slice(selected.provider.id.length + 1);
   return fetchProviderProtocol(selected.model.kind, selected.provider.baseUrl, modelId);
@@ -10387,9 +10417,9 @@ async function version(env, cwd, signal) {
   child.stdout.on("data", (bytes) => {
     out += bytes;
   });
-  await new Promise((resolve2, reject) => {
+  await new Promise((resolve3, reject) => {
     child.once("error", reject);
-    child.once("close", (code2) => code2 === 0 ? resolve2() : reject(new Error(`claude --version exited ${code2}`)));
+    child.once("close", (code2) => code2 === 0 ? resolve3() : reject(new Error(`claude --version exited ${code2}`)));
   });
   const found = /^(\S+) \(Claude Code\)/.exec(out.trim())?.[1];
   if (!found) throw new Error("the installed claude did not report a version");
@@ -10428,8 +10458,8 @@ async function runNative(options) {
     events,
     event: (match) => {
       const seen = events.find(match);
-      return seen ? Promise.resolve(seen) : new Promise((resolve2) => {
-        waiting.push({ match, resolve: resolve2 });
+      return seen ? Promise.resolve(seen) : new Promise((resolve3) => {
+        waiting.push({ match, resolve: resolve3 });
       });
     }
   };
@@ -10467,9 +10497,9 @@ async function runNative(options) {
       await mkdir5(path6.dirname(file), { recursive: true });
       await writeFile2(file, text2);
     }
-    await new Promise((resolve2, reject) => {
+    await new Promise((resolve3, reject) => {
       server.once("error", reject);
-      server.listen(0, "127.0.0.1", resolve2);
+      server.listen(0, "127.0.0.1", resolve3);
     });
     const address2 = server.address();
     if (address2 === null || typeof address2 === "string") throw new Error("the loopback stub did not start");
@@ -10519,12 +10549,12 @@ async function runNative(options) {
       }
     });
     send(script[0]);
-    await new Promise((resolve2, reject) => {
-      finish = resolve2;
+    await new Promise((resolve3, reject) => {
+      finish = resolve3;
       running.once("error", reject);
       running.once("close", () => {
         closed = true;
-        results >= script.length || options.done?.(run2) ? resolve2() : reject(new Error(`the installed claude finished ${results} of ${script.length} capture steps`));
+        results >= script.length || options.done?.(run2) ? resolve3() : reject(new Error(`the installed claude finished ${results} of ${script.length} capture steps`));
       });
       signal.addEventListener("abort", () => reject(new Error("the capture was stopped")), { once: true });
     });
@@ -10532,16 +10562,16 @@ async function runNative(options) {
   } finally {
     if (child && !closed) {
       stop(child);
-      await new Promise((resolve2) => {
-        const timer = setTimeout(resolve2, 5e3);
+      await new Promise((resolve3) => {
+        const timer = setTimeout(resolve3, 5e3);
         child.once("close", () => {
           clearTimeout(timer);
-          resolve2();
+          resolve3();
         });
       });
     }
     server.closeAllConnections();
-    await new Promise((resolve2) => server.close(() => resolve2()));
+    await new Promise((resolve3) => server.close(() => resolve3()));
     await rm3(root, { recursive: true, force: true }).catch(() => {
     });
   }

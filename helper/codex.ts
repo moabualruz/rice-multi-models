@@ -416,7 +416,7 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
             reasoning: response.multi_usage?.reasoning_tokens,
           })
           if (scope && stopOf(response, mapper.toolCalls()) === 'tool_use') {
-            const record = createContinuation(original, 'codex-responses', scope, request, continuationCalls, output?.blocks ?? [], Date.now(), output?.content)
+            const record = output?.replayable() ? createContinuation(original, 'codex-responses', scope, request, continuationCalls, output.blocks, Date.now(), output.content) : undefined
             if (record) queue.push({ type: 'continuation', record })
             else if (output?.blocks.length) queue.push({ type: 'continuation_status', status: 'opaque-state-not-retained' })
           }

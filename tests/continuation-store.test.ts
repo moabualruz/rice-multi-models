@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { randomBytes } from 'node:crypto'
-import { clearContinuations, continuationRecords, saveContinuation } from '../hooks/continuation-store'
+import { clearContinuations, continuationRecords, saveContinuation, withContinuationStore } from '../hooks/continuation-store'
 import type { ContinuationStorePort } from '../hooks/continuation-store'
 import { CONTINUATION_BUDGET, continuationOwnerPrefix } from '../hooks/continuation'
 import type { ContinuationRecord } from '../hooks/continuation'
@@ -12,6 +12,27 @@ function memory() {
   const store: ContinuationStorePort = { async keys() { return [...map.keys()] }, async get(key) { return map.get(key) }, async set(key, value) { map.set(key, structuredClone(value)) }, async delete(key) { map.delete(key) } }
   return { map, store }
 }
+test('store wrapper holds the public iterator through the operation and releases on success, failure and denied acquisition', async () => {
+  for (const mode of ['success', 'failure', 'unavailable'] as const) {
+    let held = false, releases = 0, accessed = false
+    const child = {
+      async next() { held = mode !== 'unavailable'; return held ? { done: false, value: { stream: 'stdout', text: 'continuation-lock-acquired\n' } } : { done: true, value: { code: 2, signal: null } } },
+      async return() { held = false; releases++; return { done: true, value: { code: 0, signal: null } } },
+    }
+    const { store } = memory()
+    const host = { plugin: { root: '/owned/plugin' }, env: { get: async () => '/owned/config' }, process: { spawn: (request: { argv: string[] }) => { expect(request.argv).toEqual(['/owned/node', '/owned/plugin/dist/helper.mjs', 'continuation-lock', '/owned/config']); return child } }, store } as unknown as Parameters<typeof withContinuationStore>[0]
+    const result = withContinuationStore(host, '/owned/node', async port => {
+      accessed = true; expect(held).toBe(true)
+      await port.set('synthetic', true); expect(held).toBe(true)
+      if (mode === 'failure') throw new Error('synthetic operation failure')
+      return 'complete'
+    })
+    if (mode === 'success') expect(await result).toBe('complete')
+    else await expect(result).rejects.toThrow(mode === 'failure' ? 'synthetic operation failure' : 'lock unavailable')
+    expect(accessed).toBe(mode !== 'unavailable'); expect(held).toBe(false); expect(releases).toBe(1)
+  }
+})
+
 test('native store namespace separates owners/sessions and deletes expired records under the caller lock', async () => {
   const { map, store } = memory()
   expect(await saveContinuation(store, 'session-a', 'agent-a', value, now)).toBe('saved')
@@ -70,4 +91,6 @@ test('failed deletion is a failed clear, not a success receipt or best-effort cl
   await saveContinuation(store, 'session', 'owner', value, now)
   store.delete = async () => { throw new Error('synthetic native delete failure') }
   await expect(clearContinuations(store, 'session')).rejects.toThrow('synthetic native delete failure')
+  // A failed clear must still fence an already-dispatched writer from resurrecting the old session.
+  expect(await saveContinuation(store, 'session', 'owner', value, now)).toBe('cleared')
 })

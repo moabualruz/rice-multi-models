@@ -758,7 +758,7 @@ async function* routedStep($: EngineInterface, e: TurnStepInput, signal?: AbortS
       if (event.type === 'continuation') durable = event.record
       else if (event.type === 'continuation_status') {
         lastContinuationStatus = event.status
-        if (event.status === 'opaque-state-not-retained') throw new Error('Durable continuation blocked: signed plaintext or oversized protocol state cannot be retained; tool calls withheld')
+        if (event.status === 'opaque-state-not-retained') throw new Error('Durable continuation blocked: signed plaintext, oversized state or an unrepresentable opaque position cannot be retained; tool calls withheld')
       }
       else if (event.type === 'signature') reasoning.push({ thinking: event.thinking, signature: event.signature })
       else if (event.type === 'limits') {
@@ -1540,7 +1540,8 @@ export const register: Register = on => {
       lastContinuationStatus = 'clear-pending: deletion not confirmed'
       try {
         const hasRecords = (await $.store.keys()).some(key => key.startsWith(continuationSessionPrefix(e.sessionId)))
-        if (loaded.config?.continuation?.mode === 'durable' || hasRecords) {
+        const historyOnly = targetOf(await $.session.model())?.remote?.model.kind === 'openai'
+        if (hasRecords || loaded.config?.continuation?.mode === 'durable' && !historyOnly) {
           if (!runtime.executable) throw new Error('Native helper unavailable')
           await withContinuationStore($, runtime.executable, store => clearContinuations(store, e.sessionId))
         }

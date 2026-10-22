@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import { randomBytes } from 'node:crypto'
-import { mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, writeFile, rm, mkdir, symlink } from 'node:fs/promises'
+import { continuationLock } from '../continuation-lock'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:http'
@@ -31,6 +32,20 @@ const blocksFor = (adapter: ContinuationAdapter): Placed[] => [{ at: 0, block: a
     ? 'multi-openai:' + Buffer.from(JSON.stringify({ type: 'reasoning', id: 'rs_synthetic', encrypted_content: encrypted, summary: [] })).toString('base64url')
     : 'responses:' + JSON.stringify({ id: 'rs_synthetic', encrypted }) } }]
 const resumed = (records: readonly unknown[], extra: readonly ApiMessage[] = []): StepRequest => ({ ...req, transcript: [...req.transcript, { role: 'assistant', content: [{ type: 'tool_use', id: call.id, name: call.name, input: call.input }] }, { role: 'user', content: [{ type: 'tool_result', tool_use_id: call.id, content: 'PRIVATE_TOOL_RESULT_NOT_TO_PERSIST' }] }, ...extra], continuation: { ...req.continuation!, boundary: { turnId: 'native-turn-a', index: 1 }, records } })
+
+test('lock refuses symlinked plugin directories and cannot create an arbitrary missing config tree', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'rice-continuation-lock-path-'))
+  try {
+    const config = join(dir, 'config'), outside = join(dir, 'outside')
+    await mkdir(config); await mkdir(outside)
+    await symlink(outside, join(config, 'rice-multi-models'), process.platform === 'win32' ? 'junction' : 'dir')
+    await expect(continuationLock(config, AbortSignal.timeout(100))).rejects.toThrow('directory')
+    await expect(continuationLock(join(dir, 'missing', 'config'), AbortSignal.timeout(100))).rejects.toThrow('directory')
+    const clean = join(dir, 'clean-config'), alias = join(dir, 'config-link')
+    await mkdir(clean); await symlink(clean, alias, process.platform === 'win32' ? 'junction' : 'dir')
+    await expect(continuationLock(alias + '/', AbortSignal.timeout(100))).rejects.toThrow('directory')
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
 
 test('canonical config owns opt-in; there is no implicit retention duration or provider name allowlist', () => {
   expect(parseConfig('{}').config?.continuation).toBeUndefined()
@@ -171,6 +186,18 @@ test('Codex production translator restores encrypted state only for its exact ac
     expect(JSON.stringify(durable.record)).not.toContain(jwt)
     expect(JSON.stringify(durable.record)).not.toContain('synthetic-account-a')
   } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(dir, { recursive: true, force: true }) }
+})
+
+test('durability refuses a hidden opaque boundary inside text the native assembler merges', async () => {
+  const configText = JSON.stringify({ providers: { arbitrary: { kind: 'responses', baseUrl: endpoint, auth: 'none', models: { 'exact-model': { maxOutputTokens: 1024 } } } } })
+  const provider = parseConfig(configText).config!.providers['arbitrary']!
+  const output = [{ type: 'reasoning', id: 'rs_middle', encrypted_content: encrypted, summary: [] }, { type: 'function_call', id: 'fc_end', call_id: 'real_call', name: 'Read', arguments: '{}' }]
+  const fixture = [{ type: 'response.output_text.delta', output_index: 0, delta: 'before' }, { type: 'response.output_item.done', output_index: 1, item: output[0] }, { type: 'response.output_text.delta', output_index: 2, delta: 'after' }, { type: 'response.output_item.done', output_index: 3, item: output[1] }, { type: 'response.completed', response: { id: 'resp_middle', status: 'completed', output } }]
+  const stepper = createStepper({ now: () => now, log() {}, run: async () => ({ exitCode: 1, stdout: '' }), post: async () => ({ status: 200, cancel() {}, body: (async function* () { yield new TextEncoder().encode(fixture.map(event => 'data: ' + JSON.stringify(event) + '\n\n').join('')); return undefined })() }) })
+  const events: StepEvent[] = []
+  for await (const event of stepper.step({ req: { ...req, target: 'arbitrary/exact-model' }, configText, approved: [fingerprint(provider)] }, new AbortController().signal)) events.push(event)
+  expect(events.filter(event => event.type === 'continuation')).toEqual([])
+  expect(events).toContainEqual({ type: 'continuation_status', status: 'opaque-state-not-retained' })
 })
 
 test('production Responses decoder/stepper emits a minimal durable record only on complete successful tool output', async () => {

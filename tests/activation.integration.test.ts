@@ -2,6 +2,8 @@ import { expect, mock, test } from 'bun:test'
 import { fileURLToPath } from 'node:url'
 import { unknownMetadata, type ModelCatalogue } from '../hooks/catalogue'
 import { deriveTemplate, INSTRUCTIONS_MARK, SUMMARY_MARK } from '../hooks/native-compaction'
+import { parseConfig, fingerprint } from '../hooks/config'
+import { TRUST_PREFIX } from '../hooks/providers'
 
 const root = fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]$/, '')
 mock.module('claude-code', () => ({
@@ -496,6 +498,34 @@ test.each(['2.1.302', '2.1.306', '2.1.308'])('classifier capture and cached text
   expect(f.store.get(key)).toEqual({ ...template, version })
   expect(captures).toBe(2)
   expect(nativeCalls).toBe(0)
+})
+
+test.each(['off', 'history-only'])('%s dispatch performs no continuation store read or lock process', async mode => {
+  const f = contextFixture()
+  if (mode === 'history-only') {
+    const configText = JSON.stringify({ continuation: { mode: 'durable', maxAgeSeconds: 60 }, providers: { fixture: { kind: 'openai', baseUrl: 'https://fixture.invalid/v1', auth: 'none', models: { fresh: { contextWindow: 128000, maxOutputTokens: 4096 } } } } })
+    f.files.set('/empty-home/.claude/rice-multi-models.json', configText)
+    const provider = parseConfig(configText).config!.providers.fixture!
+    f.store.set(TRUST_PREFIX + fingerprint(provider), true)
+    f.selection.model = 'fixture/fresh'
+  }
+  await startContext(f)
+  const get = f.host.store.get
+  f.host.store.get = async (key: string) => { expect(key).not.toMatch(/^continuation(?:-|:)/); return get(key) }
+  f.host.session.messages = async () => [{ role: 'user', content: 'owned history' }]
+  f.host.prompt = { compose: async () => ({ sections: [{ id: 'base', text: 'owned system' }] }) }
+  const sent: any[] = []
+  f.host.process.spawn = async function* (input: any) {
+    expect(input.argv[2]).not.toBe('continuation-lock')
+    sent.push(JSON.parse(input.input).req)
+    yield { stream: 'stdout', text: JSON.stringify({ type: 'text', text: 'owned fast reply' }) + '\n' + JSON.stringify({ type: 'stop', reason: 'end_turn' }) + '\n' }
+    return { code: 0 }
+  }
+  const chunks: any[] = []
+  for await (const chunk of callbacks.get('turn.step')!(f.host, { model: f.selection.model, turnId: 'fast-path', index: 0, messageCount: 1 }, async function* () { throw new Error('no native fallback') })) chunks.push(chunk)
+  expect(sent).toHaveLength(1)
+  expect(chunks.at(-1)).toMatchObject({ kind: 'stop', stopReason: 'end_turn' })
+  expect(sent[0].continuation).toEqual(mode === 'off' ? undefined : { boundary: { turnId: 'fast-path', index: 0 }, maxAgeSeconds: 60, records: [] })
 })
 
 test('fork uses the last completed main request snapshot, not current context', async () => {

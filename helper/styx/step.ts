@@ -58,15 +58,16 @@ export function assembler(codec: Codec, provider: string, ids: ReturnType<typeof
   return {
     feed(ds: readonly Decoded[]): StepEvent[] {
       const out: StepEvent[] = []
+      const emit = (event: StepEvent) => { out.push(event); output?.feed(event) }
       for (const d of ds) {
         if (failure !== undefined) break
         if (d.t === 'text' || d.t === 'thinking') {
           if (d.t === 'text' && !inText) before++
           inText = d.t === 'text'
-          out.push({ type: d.t, text: d.text })
-        } else if (d.t === 'sealed') turn.blocks.push({ at: before, block: d.block })
-        else if (d.t === 'native_block') out.push({ type: 'native_block', block: d.block })
-        else if (d.t === 'search_sources') out.push({ type: 'search_sources', sources: d.sources, searched: d.searched })
+          emit({ type: d.t, text: d.text })
+        } else if (d.t === 'sealed') { turn.blocks.push({ at: before, block: d.block }); output?.seal() }
+        else if (d.t === 'native_block') emit({ type: 'native_block', block: d.block })
+        else if (d.t === 'search_sources') emit({ type: 'search_sources', sources: d.sources, searched: d.searched })
         else if (d.t === 'usage') usage = { in: d.in, out: d.out, cacheRead: d.cacheRead, cacheWrite: d.cacheWrite, ...(d.reasoning === undefined ? {} : { reasoning: d.reasoning }) }
         else if (d.t === 'finish') finish = finishToken(d.reason)
         else if (d.t === 'error') failure = d.message
@@ -81,11 +82,10 @@ export function assembler(codec: Codec, provider: string, ids: ReturnType<typeof
             turn.tools.push({ id, name: d.name, input, ...(d.id === undefined ? {} : { providerId: d.id }) })
             before++
             inText = false
-            out.push({ type: 'tool_use', id, name: d.name, input })
+            emit({ type: 'tool_use', id, name: d.name, input })
           }
         }
       }
-      for (const event of out) output?.feed(event)
       return out
     },
     // `cut` is the transport's failure text, when the response was cut short.
@@ -103,6 +103,7 @@ export function assembler(codec: Codec, provider: string, ids: ReturnType<typeof
     failed: () => failure !== undefined,
     usage: () => usage,
     turn: () => turn,
+    replayable: () => output?.replayable() ?? true,
   }
 }
 
@@ -169,7 +170,7 @@ export function createStepper(env: Env) {
       owner: req.who,
     }
     const conversationKey = cacheIdentityKey(identity)
-    const scope = continuationScope(identity, p.baseUrl)
+    const scope = req.continuation ? continuationScope(identity, p.baseUrl) : conversationKey
     // Durable candidates are verified against the immutable request prefix and completed native calls.
     const restored = restoreContinuations(req, m.kind, scope, env.now())
     for (const record of restored) {
@@ -240,7 +241,7 @@ export function createStepper(env: Env) {
       if (blocks.length > 0) notes += ` thinking=${blocks.length}`
     }
     if (req.continuation && end.finish !== 'error' && end.events.some(event => event.type === 'stop' && event.reason === 'tool_use')) {
-      const record = createContinuation(req, m.kind, scope, enc.body, asm.turn().tools, blocks, env.now(), asm.turn().content)
+      const record = asm.replayable() ? createContinuation(req, m.kind, scope, enc.body, asm.turn().tools, blocks, env.now(), asm.turn().content) : undefined
       if (record) yield { type: 'continuation', record }
       else if (blocks.length) yield { type: 'continuation_status', status: 'opaque-state-not-retained' }
     }

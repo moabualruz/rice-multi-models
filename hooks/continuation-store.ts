@@ -57,12 +57,13 @@ export async function saveContinuation(store: ContinuationStorePort, session: st
 export async function clearContinuations(store: ContinuationStorePort, session: string): Promise<number> {
   const prefix = continuationSessionPrefix(session)
   let count = 0
-  for (const key of await store.keys()) if (key.startsWith(prefix)) { await store.delete(key); count++ }
+  // Fence first: even a failed/aborted deletion must not admit a late writer.
   // A late dispatch cannot resurrect a cleared session. Reference-only retirement markers do not expire.
   // If their bounded allowance fills, block all later durable writes rather than evict an active owner.
   const retired = retiredKey(session)
   if (await usedBytes(store, retired) + bytes(retired) + 6 > CONTINUATION_BUDGET - 1024) await store.set(BLOCKED_KEY, true)
   else await store.set(retired, true)
+  for (const key of await store.keys()) if (key.startsWith(prefix)) { await store.delete(key); count++ }
   // A successful return means deletion was awaited, not scheduled as best effort.
   if ((await store.keys()).some(key => key.startsWith(prefix))) throw new Error('Continuation clear verification failed')
   return count
@@ -75,7 +76,7 @@ export async function withContinuationStore<T>($: EngineInterface, executable: s
   try {
     for (;;) {
       const piece = await child.next()
-      if (piece.done) throw new Error('Continuation store lock unavailable; durable mode is blocked')
+      if (piece.done) throw new Error('Continuation store lock unavailable; durable mode is blocked. Inspect the configured rice-multi-models/continuation.lock and stop confirmed holders before explicit stale-lock recovery; locks are never stolen. Off/history-only chat does not require this lock.')
       if (piece.value.stream === 'stdout') output = (output + piece.value.text).slice(-1000)
       if (output.includes('continuation-lock-acquired\n')) break
     }
