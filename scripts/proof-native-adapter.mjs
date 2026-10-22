@@ -267,7 +267,7 @@ try {
     assert.ok(compactBoundaries(session).some(event => event.compactMetadata?.trigger === 'manual'), 'manual compaction completes native transcript bookkeeping')
   }
   if (wants('classifier')) {
-    await run('classifier', ['--no-session-persistence', '--settings', JSON.stringify({ autoMode: { classifyAllShell: true }, skipAutoPermissionPrompt: true })], 'Print the owned classifier marker using Bash.', { permission: 'auto' })
+    await run('classifier', ['--no-session-persistence', '--settings', JSON.stringify({ autoMode: { classifyAllShell: true } })], 'Print the owned classifier marker using Bash.', { permission: 'auto' })
     const judgments = observations.filter(event => event.phase === 'classifier' && event.formatKeys.join() === 'decision,reason')
     assert.ok(judgments.length >= 1, 'the auto-mode permission judgment reached a direct provider with its decision/reason schema')
     assert.ok(judgments.every(event => event.family === 'a' && event.model === 'main'), 'the permission judgment uses the conversation provider')

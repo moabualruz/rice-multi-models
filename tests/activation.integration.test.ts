@@ -11,9 +11,10 @@ mock.module('claude-code', () => ({
 }))
 const { register } = await import('../hooks/register')
 const callbacks = new Map<string, (...args: any[]) => any>()
+const fallbacks = new Map<string, (...args: any[]) => any>()
 register(((event: string, match: any, callback: any) => {
   callbacks.set(event, callback ?? match)
-  return { catch: () => undefined }
+  return { catch: (handler: (...args: any[]) => any) => { fallbacks.set(event, handler) } }
 }) as any)
 
 function fixture() {
@@ -258,6 +259,46 @@ async function compactFixture() {
   const next = Object.assign(async () => { throw new Error('no native summary fallback') }, { signal: controller.signal })
   return { ...f, rows, active, requests, receipts: notices, controller, next }
 }
+
+test.each(['stable', 'before', 'during'] as const)('real permission handlers retain context-invalidation safety: %s', async boundary => {
+  const f = await compactFixture()
+  f.host.session.cwd = async () => '/owned'
+  f.host.ui.invalidate = () => {}
+  f.store.set('auto-mode-defaults:2.1.296', { environment: [], allow: [], soft_deny: [], hard_deny: ['Keep every owner approval checkpoint.'] })
+  const constraints = { blocks: [{ name: 'claudeMd', text: 'Wait for owner approval before publication.' }], instructionFiles: [{ path: '/owned/CLAUDE.md', kind: 'user', content: 'Wait for owner approval before publication.' }] }
+  await callbacks.get('prompt.context')!(f.host, {}, async () => constraints)
+  const invalidate = () => callbacks.get('classic.ConfigChange')!(f.host, { source: 'user_settings', file_path: '/owned/settings.json' }, async () => ({}))
+  const toolUseId = `owned-permission-${boundary}`
+  const proof = 'RICE_MULTI_MODELS_PERMISSION_CONTEXT:' + JSON.stringify({ nonce: f.env.get('RICE_MULTI_MODELS_PERMISSION_CONTEXT_NONCE'), sessionId: 'empty-session', toolUseId, mode: 'auto' })
+  const consumed = await callbacks.get('classic.PreToolUse')!(f.host, { tool: 'Bash', tool_use_id: toolUseId }, async () => ({ additionalContext: [proof] }))
+  expect(consumed.additionalContext).toEqual([])
+  const run = f.host.process.run
+  f.host.process.run = async (argv: string[], options: any) => {
+    if (argv[2] !== 'once') return run(argv, options)
+    expect(options.timeoutMs).toBe(30_000)
+    f.requests.push(JSON.parse(options.stdin).req)
+    if (boundary === 'during') await invalidate()
+    const events = [{ type: 'text', text: '{"decision":"allow","reason":"The exact owned action was requested."}' }, { type: 'stop', reason: 'end_turn' }]
+    return { exitCode: 0, stdout: events.map(event => JSON.stringify(event) + '\n').join(''), stderr: '', isStdoutTruncated: false }
+  }
+  if (boundary === 'before') await invalidate()
+  const event = { tool: 'Bash', tool_use_id: toolUseId, input: { command: 'printf OWNED_MARKER' } }
+  const next = Object.assign(async () => ({ decision: 'ask', reason: 'Owned native unresolved auto-mode action' }), { signal: f.controller.signal })
+  let result
+  try { result = await callbacks.get('tool.check')!(f.host, event, next) }
+  catch (error) { result = await fallbacks.get('tool.check')!(f.host, event, { error: { kind: 'throw', message: error instanceof Error ? error.message : String(error) } }) }
+  expect(result).toMatchObject({ decision: boundary === 'stable' ? 'allow' : 'deny' })
+  expect(f.requests).toHaveLength(boundary === 'before' ? 0 : 1)
+  expect(f.calls.some(argv => argv[0] === 'claude')).toBe(false)
+  if (boundary === 'before') expect(result.reason).toContain('selected-provider permission judgment failed')
+  if (boundary === 'during') expect(result.reason).toContain('permission policy or loaded constraints changed during the judgment')
+  if (boundary !== 'before') {
+    const request = f.requests[0]
+    expect(request.tools).toEqual([])
+    expect(request.native.outputSchema.additionalProperties).toBe(false)
+    expect(request.transcript[0].content).toContain('Wait for owner approval before publication.')
+  }
+})
 
 test('real compaction callback prepares each trigger, retains original tail handles, and confirms only observed core context', async () => {
   for (const trigger of ['manual', 'auto', 'plugin', 'precompute']) {
