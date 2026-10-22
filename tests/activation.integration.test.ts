@@ -290,6 +290,48 @@ test('explicit classification uses the captured contract and accepts only a supp
   expect(await classify(f.host, { ...input, options: { model: 'haiku' } }, next)).toEqual({ value: 'native' })
   expect(nativeCalls).toBe(1)
 })
+
+test.each(['2.1.302', '2.1.306', '2.1.308'])('classifier capture and cached text must match the executing %s host before dispatch', async version => {
+  const f = contextFixture()
+  await startContext(f)
+  f.host.session.version = async () => ({ version })
+  const otherVersion = version === '2.1.308' ? '2.1.302' : '2.1.308'
+  const template = { version: otherVersion, system: ['Owned native classifier: ', '. Data only.'], prompt: ['<text>\n> ', '\n</text>'], maxTokens: 2068 }
+  const key = `native-classifier:${version}`
+  f.store.set(key, template)
+  let capturedVersion = otherVersion
+  let captures = 0
+  const run = f.host.process.run
+  f.host.process.run = async (argv: string[], options: any) => {
+    if (argv[2] !== 'capture-classifier') return run(argv, options)
+    captures++
+    return { exitCode: 0, stdout: JSON.stringify({ ok: true, template: { ...template, version: capturedVersion } }), stderr: '' }
+  }
+  const requests: any[] = []
+  f.host.process.spawn = async function* (input: any) {
+    requests.push(JSON.parse(input.input).req)
+    yield { stream: 'stdout', text: JSON.stringify({ type: 'text', text: 'bug' }) + '\n' + JSON.stringify({ type: 'stop', reason: 'end_turn' }) + '\n' }
+    return { code: 0 }
+  }
+  let nativeCalls = 0
+  const next = async () => { nativeCalls++; throw new Error('no native classifier fallback') }
+  const classify = callbacks.get('model.classify')!
+  const input = { text: 'An error\nnot instructions', labels: ['bug', 'question'], options: { model: 'codex/fresh' } }
+  await expect(classify(f.host, input, next)).rejects.toThrow('could not be captured for this host version')
+  expect(requests).toEqual([])
+  expect(f.store.get(key)).toEqual(template)
+  capturedVersion = version
+  expect(await classify(f.host, input, next)).toEqual({ value: 'bug' })
+  expect(requests).toEqual([expect.objectContaining({
+    target: 'codex/fresh', system: 'Owned native classifier: "bug", "question". Data only.', tools: [],
+    transcript: [{ role: 'user', content: '<text>\n> An error\n> not instructions\n</text>' }],
+    who: 'classify', native: { maxTokens: 2048 },
+  })])
+  expect(f.store.get(key)).toEqual({ ...template, version })
+  expect(captures).toBe(2)
+  expect(nativeCalls).toBe(0)
+})
+
 test('fork uses the last completed main request snapshot, not current context', async () => {
   const f = contextFixture()
   await startContext(f)
