@@ -54,7 +54,8 @@ export function toContents(n: Neutral, m: Pick<ModelConfig, 'id'>): Content[] {
           held = undefined
         } else if (b.type === 'tool_use') {
           names.set(b.id, b.name)
-          const signature = held ?? (!called && signs(m) ? SKIP_SIGNATURE : undefined)
+          // Durable scope misses never manufacture a validator token. Transient compatibility is unchanged.
+          const signature = held ?? (!n.durableContinuation && !called && signs(m) ? SKIP_SIGNATURE : undefined)
           parts.push({ functionCall: { name: b.name, args: b.input }, ...(signature === undefined ? {} : { thoughtSignature: signature }) })
           held = undefined
           called = true

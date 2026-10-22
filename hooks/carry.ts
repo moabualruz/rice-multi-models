@@ -4,7 +4,7 @@
 import type { ApiMessage } from './protocol'
 import { setCapped } from './util'
 
-export type Reasoning = { thinking: string; signature: string }
+export type Reasoning = { thinking: string; signature: string; at?: number }
 export type Carry = Map<string, readonly Reasoning[]>
 
 const CARRY_MAX = 400
@@ -30,9 +30,10 @@ export function withCarry(messages: readonly ApiMessage[], carry: Carry): readon
     const kept = first ? carry.get(first['id'] as string) : undefined
     if (!kept) return message
     changed = true
-    const thinking = kept.map(item => ({ type: 'thinking', thinking: item.thinking, signature: item.signature }))
-
-    return { ...message, content: [...thinking, ...message.content.filter(block => block.type !== 'thinking' && block.type !== 'redacted_thinking')] }
+    const clean = message.content.filter(block => block.type !== 'thinking' && block.type !== 'redacted_thinking')
+    const at = (index: number) => kept.filter(item => (item.at ?? 0) === index).map(item => ({ type: 'thinking', thinking: item.thinking, signature: item.signature }))
+    const tail = kept.filter(item => (item.at ?? 0) >= clean.length).map(item => ({ type: 'thinking', thinking: item.thinking, signature: item.signature }))
+    return { ...message, content: [...clean.flatMap((block, index) => [...at(index), block]), ...tail] }
   })
 
   return changed ? out : messages

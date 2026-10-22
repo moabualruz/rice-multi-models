@@ -18,6 +18,9 @@ import { collectText, helperStep, preferSession, readyLine, sessionHelper, setSe
 import type { HelperPort } from './backend'
 import { carryFor, remember, withCarry } from './carry'
 import type { Reasoning } from './carry'
+import { CONTINUATION_OFF, continuationSessionPrefix, continuationStatus } from './continuation'
+import type { ContinuationRecord } from './continuation'
+import { clearContinuations, continuationRecords, saveContinuation, withContinuationStore } from './continuation-store'
 import { retainedTail, withUserText } from './compact'
 import type { CompactMessage } from './compact'
 import { compactOwner, compactionPolicyBlock, historyContains, historyDigest, observedReceipt, putReceipt, RECEIPT_TTL_MS, receiptText } from './compaction-receipt'
@@ -141,6 +144,8 @@ let seenTranscriptPath: string | undefined
 
 /** Immutable last dispatched routed main request prefix, never reconstructed from current context. */
 let mainSnapshot: StepRequest | undefined
+let lastContinuationStatus = 'not used'
+let continuationExpiredRecords = 0
 
 function activeContext(model: string) {
   const route = splitTarget(model)
@@ -557,7 +562,8 @@ async function buildRequest($: EngineInterface, e: TurnStepInput, transcript: re
     const allowed = allow
     allow = tool => allowed(tool) && only.includes(tool)
   }
-  messages = withCarry(withIdentity(messages, target.model, provider), carryFor(who))
+  messages = withIdentity(messages, target.model, provider)
+  if (loaded.config?.continuation?.mode !== 'durable') messages = withCarry(messages, carryFor(who))
   const candidates: RemoteTool[] = remoteTools(modelInfos, described, allow, {}, native === undefined || native instanceof Error ? undefined : toolTable(native), exactModelIds(catalogue, loaded))
   if (handback) candidates.push({ name: HANDBACK_TOOL.name, description: HANDBACK_TOOL.description, schema: { ...HANDBACK_TOOL.schema } })
   const tools = target.remote ? selectTools(candidates, target.remote.provider, target.remote.model) : candidates
@@ -735,14 +741,26 @@ async function* routedStep($: EngineInterface, e: TurnStepInput, signal?: AbortS
     const metadata = catalogue.models.find(entry => entry.model === (remote?.target ?? e.model))?.metadata
     if (metadata?.tools === false && built.req.tools.length) throw new Error(`${e.model} reports no tool-call support; choose a tool-capable model for this session`)
     if (typeof built.req.effort === 'string' && metadata?.reasoningEfforts && !metadata.reasoningEfforts.includes(built.req.effort)) throw new Error(`${e.model} reports reasoning efforts ${metadata.reasoningEfforts.join(', ') || 'none'}; requested ${built.req.effort}`)
+    const continuation = loaded.config?.continuation
+    if (continuation?.mode === 'durable') {
+      if (!runtime.executable) throw new Error('Durable continuation requires the native Node helper')
+      const records = remote?.model.kind === 'openai' ? [] : await withContinuationStore($, runtime.executable, store => continuationRecords(store, built.req.session, who, Date.now(), () => { continuationExpiredRecords++ }))
+      built.req.continuation = { boundary: { turnId: e.turnId, index: e.index }, maxAgeSeconds: continuation.maxAgeSeconds, records }
+    }
     const wire = await wireFor($, built.req)
     signal?.throwIfAborted()
     if (e.agentId === undefined) mainSnapshot = JSON.parse(JSON.stringify(wire.req)) as StepRequest
     const reasoning: Reasoning[] = []
+    let durable: ContinuationRecord | undefined
     let firstTool: string | undefined
     for await (const event of helperStep(helperPort($), wire)) {
       signal?.throwIfAborted()
-      if (event.type === 'signature') reasoning.push({ thinking: event.thinking, signature: event.signature })
+      if (event.type === 'continuation') durable = event.record
+      else if (event.type === 'continuation_status') {
+        lastContinuationStatus = event.status
+        if (event.status === 'opaque-state-not-retained') throw new Error('Durable continuation blocked: signed plaintext or oversized protocol state cannot be retained; tool calls withheld')
+      }
+      else if (event.type === 'signature') reasoning.push({ thinking: event.thinking, signature: event.signature })
       else if (event.type === 'limits') {
         limits = event.limits
         limitsObservedAt = await $.clock.now()
@@ -764,8 +782,15 @@ async function* routedStep($: EngineInterface, e: TurnStepInput, signal?: AbortS
         for (const chunk of chunks) if (chunk.kind === 'text') visibleAnswer += chunk.text
       }
     }
-    remember(carryFor(who), firstTool, reasoning)
+    if (durable && runtime.executable && assembler.end().failure === undefined) {
+      // Staged until the next native transcript proves every real call committed successfully.
+      const status = await withContinuationStore($, runtime.executable, store => saveContinuation(store, built.req.session, who, durable!, Date.now()))
+      lastContinuationStatus = status === 'saved' ? 'staged: awaiting successful native tool results' : status
+      if (status !== 'saved') throw new Error(`Durable continuation blocked: ${status}; tool calls withheld`)
+    }
+    if (!built.req.continuation) remember(carryFor(who), firstTool, reasoning)
   } catch (error) {
+    if (loaded.config?.continuation?.mode === 'durable') lastContinuationStatus = ['budget-full', 'expired', 'cleared', 'opaque-state-not-retained'].includes(lastContinuationStatus) ? `blocked: ${lastContinuationStatus}` : 'blocked: durable dispatch or store operation failed'
     assembler.feed({ type: 'error', kind: 'request', text: `rice-multi-models: ${error instanceof Error ? error.message : String(error)}` })
   }
   const end = assembler.end({ ...(handback ? { handback } : {}), ...(signal?.aborted ? { failure: `${PLUGIN}: request aborted` } : {}) })
@@ -1189,6 +1214,7 @@ async function discoveryStatus($: EngineInterface): Promise<Record<string, unkno
     toolSchemaVersion: STAMP.engineVersion,
     toolDefinitions: await toolDefinitionsState($),
     webSearch: await currentWebSearchStatus($),
+    continuation: continuationStatus(loaded.config?.continuation ?? CONTINUATION_OFF, ['codex-responses', ...Object.values(loaded.config?.providers ?? {}).flatMap(provider => Object.values(provider.models).map(model => model.kind))], lastContinuationStatus, continuationExpiredRecords),
     modelCapabilities: await configuredCapabilities($),
     currentEngineVersion: version.version,
     limits: limitsReport(limits, limitsObservedAt),
@@ -1276,6 +1302,7 @@ async function doctorCommand($: EngineInterface): Promise<string> {
   const checked = await detectRuntime($)
   return JSON.stringify({ runtime: checked.info || { node: { executable: checked.executable, version: checked.version } }, error: checked.error || null,
     integration: { kind: 'public plugin hooks', start: 'claude', compaction: 'session.compact', compactionReceipts: (await read($, receiptsAtom)).entries, compactionAccounting: 'mod-owned provider usage, not native ledger', toolDefinitions: await toolDefinitionsState($), webSearch: await currentWebSearchStatus($, checked) },
+    continuation: continuationStatus(loaded.config?.continuation ?? CONTINUATION_OFF, ['codex-responses', ...Object.values(loaded.config?.providers ?? {}).flatMap(provider => Object.values(provider.models).map(model => model.kind))], lastContinuationStatus, continuationExpiredRecords),
     modelCapabilities: await configuredCapabilities($),
     actions: checked.error ? ['/rice-models setup repair'] : ['/rice-models setup repair', ...(!checked.info?.auth.codex ? ['codex login', ...(!checked.info?.clis.codex ? ['/rice-models setup codex'] : [])] : [])] }, null, 2)
 }
@@ -1508,6 +1535,21 @@ export const register: Register = on => {
   })
 
   on('session.end', async ($, e, next) => {
+    if (e.reason === 'clear') {
+      // If the host cuts its short session.end budget, doctor must not retain a success claim.
+      lastContinuationStatus = 'clear-pending: deletion not confirmed'
+      try {
+        const hasRecords = (await $.store.keys()).some(key => key.startsWith(continuationSessionPrefix(e.sessionId)))
+        if (loaded.config?.continuation?.mode === 'durable' || hasRecords) {
+          if (!runtime.executable) throw new Error('Native helper unavailable')
+          await withContinuationStore($, runtime.executable, store => clearContinuations(store, e.sessionId))
+        }
+        lastContinuationStatus = 'cleared'
+      } catch {
+        lastContinuationStatus = 'clear-failed: durable records may remain'
+        $.ui.log(`${PLUGIN}: continuation deletion failed; durable records may remain. Inspect /rice-models doctor.`, { to: 'transcript' })
+      }
+    }
     if (e.reason === 'clear') for (const row of (await read($, receiptsAtom)).entries) if (['preparing', 'prepared'].includes(row.status)) await saveReceipt($, { ...row, status: 'aborted', reason: 'clear' }, row)
     await syncNativeContext($, true)
     return next(e)
