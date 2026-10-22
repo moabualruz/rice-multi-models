@@ -366,6 +366,21 @@ test('explicit routed completions honor the caller model without changing native
   expect(nativeCalls).toBe(1)
 })
 
+test('explicit completion callers use host-attested plugin provenance without guessing a loop owner', async () => {
+  const f = contextFixture()
+  await startContext(f)
+  const requests: any[] = []
+  f.host.process.spawn = async function* (input: any) {
+    requests.push(JSON.parse(input.input).req)
+    yield { stream: 'stdout', text: JSON.stringify({ type: 'text', text: 'owned reply' }) + '\n' + JSON.stringify({ type: 'stop', reason: 'end_turn' }) + '\n' }
+    return { code: 0 }
+  }
+  const origins = [{ plugin: 'owned-caller-a', tier: 'user' }, { plugin: 'owned-caller-b', tier: 'user' }]
+  await Promise.all(origins.map(origin => callbacks.get('model.complete')!(f.host, { model: 'codex/fresh', prompt: 'owned request' }, { origin })))
+  expect(requests.map(req => JSON.parse(req.who)).sort((a, b) => a[3].localeCompare(b[3]))).toEqual(origins.map(origin => ['auxiliary', 'complete', origin.tier, origin.plugin]))
+  expect(requests.every(req => req.target === 'codex/fresh')).toBe(true)
+})
+
 test('unreadable routed fork transcript cannot fall back to the native provider', async () => {
   const f = contextFixture()
   await startContext(f)

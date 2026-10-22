@@ -117,8 +117,8 @@ export const register: Register = on => {`)
   const contract = observed.classifierContract
   assert.equal(contract?.version, targetVersion, 'classifier wording comes from the executing host build')
   assert.deepEqual(observed.auxiliaryRequests, [
-    { target: 'codex/fresh-native', system: '', tools: [], transcript: [{ role: 'user', content: [{ type: 'text', text: 'One word' }] }], who: 'complete', native: { maxTokens: 1024 } },
-    { target: 'codex/fresh-native', system: contract.system[0] + ['bug', 'question'].map(label => JSON.stringify(label)).join(', ') + contract.system[1], tools: [], transcript: [{ role: 'user', content: contract.prompt[0] + 'A broken feature' + contract.prompt[1] }], who: 'classify', native: { maxTokens: Math.min(contract.maxTokens, 2048) } },
+    { target: 'codex/fresh-native', system: '', tools: [], transcript: [{ role: 'user', content: [{ type: 'text', text: 'One word' }] }], who: JSON.stringify(['auxiliary', 'complete', 'user', 'rice-multi-models']), native: { maxTokens: 1024 } },
+    { target: 'codex/fresh-native', system: contract.system[0] + ['bug', 'question'].map(label => JSON.stringify(label)).join(', ') + contract.system[1], tools: [], transcript: [{ role: 'user', content: contract.prompt[0] + 'A broken feature' + contract.prompt[1] }], who: JSON.stringify(['auxiliary', 'classify', 'user', 'rice-multi-models']), native: { maxTokens: Math.min(contract.maxTokens, 2048) } },
   ], 'actual helper requests preserve the explicit model, native classifier contract and bounded output')
   assert.deepEqual(observed.auxiliaryTargets, ['codex/fresh-native', 'codex/fresh-native'])
   assert.equal(observed.nativeCompletions, 1, 'explicit native model stays native, never silently replaced by the main provider')

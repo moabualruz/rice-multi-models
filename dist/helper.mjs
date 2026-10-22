@@ -3800,7 +3800,7 @@ var SECRET_HEADER_RE = /auth|key|token|secret|password|credential|cookie|session
 var HEADER_VALUE_RE = /^[\x20-\x7e]*$/;
 var HOST_RE = /^(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+$/;
 var RESERVED_ALIASES = /* @__PURE__ */ new Set(["fable", "opus", "sonnet", "haiku", "default", "inherit", "native"]);
-var PROVIDER_KEYS = ["kind", "baseUrl", "allowHttp", "auth", "authHeader", "headers", "params", "timeoutMs", "maxTools", "models", "sessionHeader"];
+var PROVIDER_KEYS = ["kind", "baseUrl", "allowHttp", "auth", "authHeader", "headers", "params", "timeoutMs", "maxTools", "models", "sessionHeader", "cacheScope"];
 var REQUEST_KEYS = ["params", "effort", "cache", "headers"];
 var MODEL_KEYS = ["kind", "contextWindow", "maxInputTokens", "maxOutputTokens", "tools", "vision", "webSearch", ...REQUEST_KEYS];
 var KIND_NAMES = '"openai", "responses", "anthropic", "gemini" or "bedrock"';
@@ -3988,6 +3988,12 @@ function provider(id, v, path7, errors) {
   const sessionHeader = v["sessionHeader"];
   const sessionHeaderOk = typeof sessionHeader === "string" && HEADER_NAME_RE.test(sessionHeader);
   if (sessionHeader !== void 0 && !sessionHeaderOk) errors.push(`${path7}.sessionHeader: must be a header name`);
+  let cacheScope;
+  if (v["cacheScope"] !== void 0) {
+    const scope = v["cacheScope"];
+    if (!isObject(scope) || Object.keys(scope).some((key2) => key2 !== "endpoint" && key2 !== "account") || ![scope["endpoint"], scope["account"]].every((ref) => typeof ref === "string" && /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(ref))) errors.push(`${path7}.cacheScope: must contain endpoint and account non-secret reference ids (1 to 128 letters, digits, dots, underscores, colons or dashes), never a URL or key`);
+    else cacheScope = { endpoint: scope["endpoint"], account: scope["account"] };
+  }
   const out = {};
   if (models !== void 0 && !isObject(models)) errors.push(`${path7}.models: must be a map of model ids`);
   else if (isObject(models)) {
@@ -4004,6 +4010,7 @@ function provider(id, v, path7, errors) {
     kind,
     baseUrl: base,
     origin,
+    ...cacheScope ? { cacheScope } : {},
     allowHttp,
     auth: key,
     ...authHeaderOk ? { authHeader } : {},
@@ -6602,8 +6609,22 @@ function createKeys(run2, now) {
   };
 }
 
-// helper/styx/step.ts
+// helper/styx/cache-identity.ts
 import { createHash as createHash3 } from "node:crypto";
+function cacheIdentityKey(identity) {
+  return createHash3("sha256").update(JSON.stringify([
+    "rice-multi-models:styx-cache-identity:v2",
+    identity.providerId,
+    identity.providerKind,
+    identity.endpointOrigin,
+    identity.endpointRef ?? "default",
+    identity.accountRef ?? identity.providerId,
+    identity.modelKind,
+    identity.modelId,
+    identity.session,
+    identity.owner
+  ])).digest("hex");
+}
 
 // helper/styx/codec.ts
 var LINE_MAX = 16 * 1024 * 1024;
@@ -7825,17 +7846,31 @@ function createStepper(env) {
     const refuse = (text2, status2) => close([{ type: "error", kind: "request", text: text2, ...status2 === void 0 ? {} : { status: status2 } }], "error");
     if (t?.kind !== "remote") return yield* refuse(`rice-multi-models: ${req.target} is not configured in this session; run /rice-models reload`);
     const { provider: p, model: m } = t;
-    const owner = `${p.id}/${m.id}`;
     const approved = new Set(w.approved);
     keys4.prune(approved);
     const codec = CODECS[m.kind];
     let key = await keys4.get(p, approved);
     if ("error" in key) return yield* refuse(key.error);
-    const conversationKey = createHash3("sha256").update(`${req.session}:${req.who}`).digest("hex");
+    const conversationKey = cacheIdentityKey({
+      providerId: p.id,
+      providerKind: p.kind,
+      endpointOrigin: p.origin,
+      endpointRef: p.cacheScope?.endpoint,
+      accountRef: p.cacheScope?.account,
+      modelKind: m.kind,
+      modelId: m.id,
+      session: req.session,
+      owner: req.who
+    });
+    const owner = conversationKey;
     let enc;
     try {
       enc = codec.encode({ system: req.system, messages: normalize(req.transcript, m.vision, ids.of(p.id), thinking.sealed(owner)), tools: req.tools, ...req.effort === void 0 ? {} : { effort: req.effort }, cacheKey: conversationKey }, p, m);
       enc.body = nativeConstraints(enc.body, m, req.native);
+      const body2 = parseJson(enc.body);
+      if (isObject(body2) && (m.kind === "responses" || Object.hasOwn(body2, "prompt_cache_key")) && body2["prompt_cache_key"] !== conversationKey) {
+        return yield* refuse("rice-multi-models: prompt_cache_key overrides are not accepted; cache identity is scoped automatically");
+      }
     } catch (error) {
       return yield* refuse(error instanceof Error ? error.message : "rice-multi-models: request policy could not be encoded");
     }

@@ -4,7 +4,7 @@
 // the provider, and its stream comes back as the engine's own chunks. Claude models pass through untouched.
 import { atom, read, update } from 'claude-code'
 import type { AgentModelOwner, CompactionReceipt } from '../types'
-import type { EngineInterface, ModelCompleteResult, ModelUsage, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
+import type { EngineInterface, ModelCompleteResult, ModelUsage, Origin, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
 import { AGENT_TOOL, CARRIER_VALUE, classifyCall, emptyCarrier, entryOf, exactModelIds, forgetEntry, markDescription, pickRequested, recordEntry, unmarkDescription, withDescriptionSuffix } from './agent-model'
 import { BUILTIN_AGENTS, HANDBACK_TOOL, identityLine, isFork, toolFilter } from './agents'
@@ -77,7 +77,7 @@ import { createEvaluatorSources, registerEvaluatorSources } from './evaluator-so
 
 const PLUGIN = 'rice-multi-models'
 /** Who the requests to declared providers say they come from (OpenCode Go asks each client to name itself). */
-const USER_AGENT = 'rice-multi-models/0.14.0 (claude-code)'
+const USER_AGENT = 'rice-multi-models/0.15.0 (claude-code)'
 const PROVIDERS: Readonly<Record<string, string>> = { codex: 'OpenAI Codex (ChatGPT subscription)' }
 const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 const prefsAtom = atom({ plugin: 'rice-multi-models', key: 'prefs' } as const, { effort: null, transport: 'auto', helper: 'session' })
@@ -781,6 +781,9 @@ async function* routedStep($: EngineInterface, e: TurnStepInput, signal?: AbortS
 
   return { turnId: e.turnId, index: e.index, answer: end.failure === undefined ? end.answer : visibleAnswer, toolUses: end.toolUses, stopReason: end.stopReason, usage: end.usage }
 }
+
+/** Host-attested caller plugin, not an inferred loop identity for hidden requests. */
+const auxiliaryOwner = (purpose: string, origin?: Origin) => origin ? JSON.stringify(['auxiliary', purpose, origin.tier, origin.plugin]) : purpose
 
 const NO_USAGE: ModelUsage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 
@@ -1842,7 +1845,7 @@ export const register: Register = on => {
       target: e.model, system: e.system ?? '', tools: [],
       transcript: [{ role: 'user', content: [{ type: 'text', text: e.prompt }] }],
       ...(e.effort === undefined ? {} : { effort: e.effort }),
-      who: 'complete', session: await $.session.id(), native: { maxTokens },
+      who: auxiliaryOwner('complete', next.origin), session: await $.session.id(), native: { maxTokens },
     }
     return { value: await complete($, req, e.timeoutMs, false, next.signal) }
   }).catch((_host, _e, next) => ({ value: next.signal.aborted ? { isAnswered: false, reason: 'aborted', usage: NO_USAGE } : { isAnswered: false, reason: 'api-error', status: null, error: 'unknown', usage: NO_USAGE } }))
@@ -1857,7 +1860,7 @@ export const register: Register = on => {
     const result = await complete($, {
       target: model, system: contract.system, tools: [],
       transcript: [{ role: 'user', content: contract.prompt }],
-      who: 'classify', session: await $.session.id(), native: { maxTokens: Math.min(contract.maxTokens, outputLimit(model)) },
+      who: auxiliaryOwner('classify', next.origin), session: await $.session.id(), native: { maxTokens: Math.min(contract.maxTokens, outputLimit(model)) },
     }, undefined, true, next.signal)
     if (!result.isAnswered) throw new Error(`${PLUGIN}: routed classification failed (${result.reason})`)
     const label = result.text.trim()

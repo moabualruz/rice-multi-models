@@ -54,6 +54,8 @@ export type ProviderConfig = {
   kind: Kind
   baseUrl: string
   origin: string
+  /** Non-secret identity references for endpoints/accounts that share a provider id and origin. */
+  cacheScope?: { endpoint: string; account: string }
   allowHttp: boolean
   auth: Auth
   // How the key is sent, when the provider names it; else by each model's kind (AUTH_HEADERS).
@@ -129,7 +131,7 @@ const HEADER_VALUE_RE = /^[\x20-\x7e]*$/
 // a dash, and no trailing dot.
 const HOST_RE = /^(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+$/
 export const RESERVED_ALIASES = new Set(['fable', 'opus', 'sonnet', 'haiku', 'default', 'inherit', 'native'])
-const PROVIDER_KEYS = ['kind', 'baseUrl', 'allowHttp', 'auth', 'authHeader', 'headers', 'params', 'timeoutMs', 'maxTools', 'models', 'sessionHeader']
+const PROVIDER_KEYS = ['kind', 'baseUrl', 'allowHttp', 'auth', 'authHeader', 'headers', 'params', 'timeoutMs', 'maxTools', 'models', 'sessionHeader', 'cacheScope']
 // The keys a model and an alias share: what a request is built from.
 const REQUEST_KEYS = ['params', 'effort', 'cache', 'headers']
 const MODEL_KEYS = ['kind', 'contextWindow', 'maxInputTokens', 'maxOutputTokens', 'tools', 'vision', 'webSearch', ...REQUEST_KEYS]
@@ -356,6 +358,12 @@ function provider(id: string, v: unknown, path: string, errors: string[]): Provi
   const sessionHeader = v['sessionHeader']
   const sessionHeaderOk = typeof sessionHeader === 'string' && HEADER_NAME_RE.test(sessionHeader)
   if (sessionHeader !== undefined && !sessionHeaderOk) errors.push(`${path}.sessionHeader: must be a header name`)
+  let cacheScope: ProviderConfig['cacheScope']
+  if (v['cacheScope'] !== undefined) {
+    const scope = v['cacheScope']
+    if (!isObject(scope) || Object.keys(scope).some(key => key !== 'endpoint' && key !== 'account') || ![scope['endpoint'], scope['account']].every(ref => typeof ref === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(ref))) errors.push(`${path}.cacheScope: must contain endpoint and account non-secret reference ids (1 to 128 letters, digits, dots, underscores, colons or dashes), never a URL or key`)
+    else cacheScope = { endpoint: scope['endpoint'] as string, account: scope['account'] as string }
+  }
   const out: Record<string, ModelConfig> = {}
   if (models !== undefined && !isObject(models)) errors.push(`${path}.models: must be a map of model ids`)
   else if (isObject(models)) {
@@ -372,6 +380,7 @@ function provider(id: string, v: unknown, path: string, errors: string[]): Provi
     kind,
     baseUrl: base,
     origin,
+    ...(cacheScope ? { cacheScope } : {}),
     allowHttp,
     auth: key,
     ...(authHeaderOk ? { authHeader: authHeader as AuthHeader } : {}),

@@ -148,7 +148,6 @@ export function createStepper(env: Env) {
     const refuse = (text: string, status?: number) => close([{ type: 'error', kind: 'request', text, ...(status === undefined ? {} : { status }) }], 'error')
     if (t?.kind !== 'remote') return yield* refuse(`rice-multi-models: ${req.target} is not configured in this session; run /rice-models reload`)
     const { provider: p, model: m } = t
-    const owner = `${p.id}/${m.id}`
     const approved = new Set(w.approved)
     keys.prune(approved)
     const codec = CODECS[m.kind]
@@ -158,17 +157,21 @@ export function createStepper(env: Env) {
       providerId: p.id,
       providerKind: p.kind,
       endpointOrigin: p.origin,
+      endpointRef: p.cacheScope?.endpoint,
+      accountRef: p.cacheScope?.account,
       modelKind: m.kind,
       modelId: m.id,
       session: req.session,
       owner: req.who,
     })
+    // Opaque continuation has the same exact identity boundary, even while transient.
+    const owner = conversationKey
     let enc: ReturnType<Codec['encode']>
     try {
       enc = codec.encode({ system: req.system, messages: normalize(req.transcript, m.vision, ids.of(p.id), thinking.sealed(owner)), tools: req.tools, ...(req.effort === undefined ? {} : { effort: req.effort }), cacheKey: conversationKey }, p, m)
       enc.body = nativeConstraints(enc.body, m, req.native)
       const body = parseJson(enc.body)
-      if (isObject(body) && Object.hasOwn(body, 'prompt_cache_key') && body['prompt_cache_key'] !== conversationKey) {
+      if (isObject(body) && (m.kind === 'responses' || Object.hasOwn(body, 'prompt_cache_key')) && body['prompt_cache_key'] !== conversationKey) {
         return yield* refuse('rice-multi-models: prompt_cache_key overrides are not accepted; cache identity is scoped automatically')
       }
     } catch (error) {

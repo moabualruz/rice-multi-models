@@ -5,6 +5,8 @@ export type CacheIdentity = {
   providerId: string
   providerKind: Kind
   endpointOrigin: string
+  endpointRef?: string
+  accountRef?: string
   modelKind: Kind
   modelId: string
   session: string
@@ -16,10 +18,12 @@ export type CacheIdentity = {
 export function cacheIdentityKey(identity: CacheIdentity): string {
   return createHash('sha256')
     .update(JSON.stringify([
-      'rice-multi-models:styx-cache-identity:v1',
+      'rice-multi-models:styx-cache-identity:v2',
       identity.providerId,
       identity.providerKind,
       identity.endpointOrigin,
+      identity.endpointRef ?? 'default',
+      identity.accountRef ?? identity.providerId,
       identity.modelKind,
       identity.modelId,
       identity.session,

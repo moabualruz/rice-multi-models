@@ -11,6 +11,7 @@ type Options = {
   providerId?: string
   providerKind?: Kind
   endpoint?: string
+  cacheScope?: { endpoint: string; account: string }
   modelId?: string
   modelKind?: Kind
   session?: string
@@ -33,6 +34,7 @@ async function invoke(options: Options = {}) {
       [providerId]: {
         kind: providerKind,
         baseUrl: endpoint,
+        ...(options.cacheScope ? { cacheScope: options.cacheScope } : {}),
         auth,
         ...(options.providerParams === undefined ? {} : { params: options.providerParams }),
         models: {
@@ -95,6 +97,19 @@ test('runtime Responses bodies use a stable key scoped by provider, endpoint, ex
   }
 })
 
+test('runtime same-origin account and endpoint references produce distinct stable keys without hashing credentials or URL paths', async () => {
+  const scope = { endpoint: 'tenant-a', account: 'account-a' }
+  const first = await invoke({ cacheScope: scope })
+  expect((await invoke({ cacheScope: scope })).body?.prompt_cache_key).toBe(first.body?.prompt_cache_key)
+  for (const cacheScope of [{ ...scope, endpoint: 'tenant-b' }, { ...scope, account: 'account-b' }]) expect((await invoke({ cacheScope })).body?.prompt_cache_key).not.toBe(first.body?.prompt_cache_key)
+  expect(first.body?.prompt_cache_key).not.toContain('account-a')
+  for (const cacheScope of [null, {}, { endpoint: 'tenant-a' }, { endpoint: 'https://invalid.example', account: 'a' }, { endpoint: 'a', account: 'b', unknown: 'c' }]) {
+    const result = parseConfig(JSON.stringify({ providers: { gateway: { kind: 'responses', baseUrl: 'https://gateway.example/v1', auth: 'none', cacheScope, models: {} } } }))
+    expect(result.config).toBeUndefined()
+    expect(result.errors.join(' ')).toContain('cacheScope')
+  }
+})
+
 test('each identity field changes the digest without serializing its raw value', () => {
   const identity = {
     providerId: 'gateway',
@@ -131,6 +146,9 @@ test('provider, model, and alias prompt_cache_key overrides are refused before t
     { providerParams: { prompt_cache_key: 'manual-provider-key' } },
     { modelParams: { prompt_cache_key: 'manual-model-key' } },
     { aliasParams: { prompt_cache_key: 'manual-alias-key' } },
+    { providerParams: { prompt_cache_key: null } },
+    { modelParams: { prompt_cache_key: null } },
+    { aliasParams: { prompt_cache_key: null } },
   ]
   for (const configuration of configurations) {
     const result = await invoke(configuration)
