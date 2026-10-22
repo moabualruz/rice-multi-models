@@ -1765,7 +1765,7 @@ export const register: Register = on => {
       // Core's configured PreCompact hooks do not run for this replacement. Never
       // execute their shell ourselves, or silently compact around a blocking policy.
       let hooks: unknown
-      try { hooks = await $.settings.read({ key: 'hooks' }) } catch { return skip(`${PLUGIN}: effective compaction policy is unreadable; replacement refused, original transcript retained`, 'configured-policy') }
+      try { hooks = (await $.settings.read()).hooks } catch { return skip(`${PLUGIN}: effective compaction policy is unreadable; replacement refused, original transcript retained`, 'configured-policy') }
       if (compactionPolicyBlock(hooks)) return skip(`${PLUGIN}: configured PreCompact policy requires native dispatch, which the replacement cannot preserve; no hook was bypassed or manually run, original transcript retained`, 'configured-policy')
       // The engine cannot send its own summary request to another provider, so this hook sends it: the engine's
       // prompt and summary format (learned from the installed claude), over the conversation as the engine holds

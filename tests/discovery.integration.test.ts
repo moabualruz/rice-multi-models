@@ -109,7 +109,7 @@ const host: any = {
   env: { get: async (key: string) => environment.get(key), set: async (key: string, value: string | undefined) => { if (value === undefined) environment.delete(key); else environment.set(key, value) } },
   state: { get: async (ref: { key: string }) => ({ value: sessionState.get(ref.key), version: 0 }), set: async (ref: { key: string }, value: unknown) => { sessionState.set(ref.key, value); return { isSet: true, version: 1 } } },
   plugin: { root },
-  settings: { read: async () => undefined },
+  settings: { read: async () => ({}) },
   fs: {
     exists: async (path: string) => path.endsWith('/dist/helper.mjs') || path.endsWith('rice-multi-models.json') || fixtureFiles.has(path) || fixtureDirs.has(path),
     read: async (path: string) => {

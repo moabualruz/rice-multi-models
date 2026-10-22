@@ -244,7 +244,7 @@ async function compactFixture() {
   ]
   const active = { rows, afterProvider: () => {} }
   const requests: any[] = [], notices: any[] = []
-  f.host.settings = { read: async () => undefined }
+  f.host.settings = { read: async () => ({}) }
   f.host.session.messages = async (args: any = {}) => args.as === 'api' ? active.rows.map(row => ({ role: row.role, content: row.text })) : active.rows.map(({ handle, ...row }) => row)
   f.host.session.append = async (args: any) => { notices.push(args); return {} }
   f.host.prompt = { compose: async () => ({ sections: [{ id: 'base', text: 'Owned system' }] }) }
@@ -293,7 +293,7 @@ test('compaction cancellation and changed active history discard prepared output
 
 test('configured PreCompact blockers are neither bypassed nor manually executed', async () => {
   const f = await compactFixture()
-  f.host.settings.read = async () => ({ PreCompact: [{ hooks: [{ type: 'command', command: 'owned-never-execute' }] }] })
+  f.host.settings.read = async () => ({ hooks: { PreCompact: [{ hooks: [{ type: 'command', command: 'owned-never-execute' }] }] } })
   const result = await callbacks.get('session.compact')!(f.host, { trigger: 'auto', messages: f.rows }, f.next)
   expect(result.skip).toContain('no hook was bypassed or manually run')
   expect(f.requests).toEqual([])
