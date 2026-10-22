@@ -169,10 +169,10 @@ try {
   assert.ok(finishedGates.every((row, index) => row.approved && row.input?.url === inputs[index].url), 'the production gate approves each exact checked WebFetch input')
   assert.deepEqual(outcomes[0], { isError: false, denied: false, result: marker, url: inputs[0].url, code: 200, bytes: Buffer.byteLength(selectedPage) })
   assert.deepEqual(outcomes[1], { isError: false, denied: false, result: nativeMarker, url: inputs[1].url, code: 200, bytes: Buffer.byteLength(nativePage) })
-  assert.deepEqual(outcomes[2], { isError: false, denied: false, result: directMarker, url: inputs[2].url, code: 200, bytes: Buffer.byteLength(directPage) })
+  assert.deepEqual(outcomes[2], { isError: false, denied: true, reason: 'rice-multi-models: the web tool failed; no action was approved or replayed automatically' }, 'a failed final native stage is terminal')
   assert.deepEqual(observations.filter(row => row.stage === 'configured-service').map(row => row.status), [200, 503, 503])
-  assert.equal(observations.filter(row => row.stage === 'direct-page').length, 1)
-  assert.deepEqual(observations.filter(row => row.stage === 'selected-provider').map(row => ({ pageEvidence: row.pageEvidence, direct: row.direct, noTools: row.noTools })), [{ pageEvidence: true, direct: false, noTools: true }, { pageEvidence: true, direct: true, noTools: true }])
+  assert.equal(observations.filter(row => row.stage === 'direct-page').length, 0, 'no direct retrieval runs after the final native stage')
+  assert.deepEqual(observations.filter(row => row.stage === 'selected-provider').map(row => ({ pageEvidence: row.pageEvidence, direct: row.direct, noTools: row.noTools })), [{ pageEvidence: true, direct: false, noTools: true }], 'no selected-provider extraction runs after the final native failure')
   assert.deepEqual(nativeReceipt, { stage: 'native-messages', authHandlePresent: true, model: nativeModel.id, requested: inputs[2].url, webFetchTool: 'web_fetch' })
 } finally {
   terminate(); await new Promise(resolve => server.close(resolve)); rmSync(fixture, { recursive: true, force: true })
