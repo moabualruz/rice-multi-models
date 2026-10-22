@@ -362,6 +362,21 @@ async function localPost(socketPath, body, path = '/step') {
   })
 }
 
+async function firstChildLine(lines, exited) {
+  const [line] = await Promise.race([once(lines, 'line'), exited.then(([code, signal]) => {
+    throw new Error(`fixture child exited before readiness: code=${code} signal=${signal}`)
+  })])
+  return line
+}
+
+test('IPC fixture startup fails closed when its child exits before announcing readiness', { timeout: 5000 }, async () => {
+  const child = spawn(process.execPath, ['-e', 'process.exit(17)'], { stdio: ['ignore', 'pipe', 'pipe'] })
+  const exited = once(child, 'exit')
+  const lines = createInterface({ input: child.stdout })
+  try { await assert.rejects(firstChildLine(lines, exited), /exited before readiness: code=17/) }
+  finally { lines.close(); child.kill('SIGTERM'); await exited }
+})
+
 test('release client never falls back after accepted empty or dropped requests', async () => {
   const socketPath = process.platform === 'win32' ? `\\\\.\\pipe\\rice-client-test-${process.pid}` : join(scratch, 'accepted.sock')
   const listenPath = process.platform === 'win32' ? socketPath : 'accepted.sock'
@@ -370,7 +385,7 @@ test('release client never falls back after accepted empty or dropped requests',
   const exited = once(server, 'exit')
   const lines = createInterface({ input: server.stdout })
   try {
-    await once(lines, 'line')
+    await firstChildLine(lines, exited)
     for (const drop of [false, true]) {
       const result = spawnSync(process.execPath, [release, 'client', socketPath], { input: JSON.stringify({ drop }), encoding: 'utf8', timeout: 5000 })
       assert.equal(result.status, 1, result.stderr)
@@ -387,7 +402,7 @@ test('release session IPC requires its body token and client fallback never repl
   const exited = once(helper, 'exit')
   const lines = createInterface({ input: helper.stdout })
   try {
-    const [ready] = await once(lines, 'line')
+    const ready = await firstChildLine(lines, exited)
     assert.ok(ready.startsWith('ready '))
     const { socketPath, token } = JSON.parse(ready.slice(6))
     assert.equal(process.cwd(), originalCwd)
