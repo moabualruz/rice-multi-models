@@ -3,6 +3,7 @@
 // transcript, system prompt and tools, the shipped Node helper (dist/helper.mjs) calls
 // the provider, and its stream comes back as the engine's own chunks. Claude models pass through untouched.
 import { atom, read, update } from 'claude-code'
+import type { AgentModelOwner } from '../types'
 import type { EngineInterface, ModelCompleteResult, ModelUsage, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
 import { AGENT_TOOL, CARRIER_VALUE, classifyCall, emptyCarrier, entryOf, exactModelIds, forgetEntry, markDescription, pickRequested, recordEntry, unmarkDescription, withDescriptionSuffix } from './agent-model'
@@ -81,6 +82,7 @@ const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 const prefsAtom = atom({ plugin: 'rice-multi-models', key: 'prefs' } as const, { effort: null, transport: 'auto', helper: 'session' })
 /** Exact Agent model ids carried from a call's tool.call to its agent.spawn (see agent-model.ts), by tool_use_id; host state, so a hot reload keeps it. */
 const carrierAtom = atom({ plugin: 'rice-multi-models', key: 'agent-model-carrier' } as const, emptyCarrier)
+const ownersAtom = atom({ plugin: 'rice-multi-models', key: 'agent-model-owners' } as const, { entries: [] as readonly AgentModelOwner[] })
 /** The main transcript's file, as the engine's classic hooks name it; a compaction cites it in its summary message. */
 const transcriptAtom = atom({ plugin: 'rice-multi-models', key: 'transcript' } as const, { path: null })
 
@@ -596,22 +598,39 @@ async function permissionInstructions($: EngineInterface, model: string, agentId
 }
 
 /** Routed failures terminate with the public unsuccessful stop shape, never native-provider replay. */
-/** The model a step runs on: native aliases stay in the owning conversation's family. */
+function cacheOwner(owner: AgentModelOwner): void {
+  setCapped(agentModels, owner.id, owner.model)
+  setCapped(spawnDecisions, owner.id, { model: owner.model, family: owner.explicitNative ? CLAUDE_FAMILY : splitTarget(owner.model)?.provider ?? 'external', explicit: owner.explicitNative, reason: 'observed native loop ownership' })
+  if (owner.background !== undefined) setCapped(spawnBackground, owner.id, owner.background)
+}
+
+async function rememberOwner($: EngineInterface, id: string, model: string, background?: boolean): Promise<void> {
+  const owner: AgentModelOwner = { id, model, explicitNative: !isRouted(model) && claimedRefusal(model) === undefined, ...(background === undefined ? {} : { background }) }
+  cacheOwner(owner)
+  await update($, ownersAtom, state => ({ entries: [...state.entries.filter(entry => entry.id !== id), { ...state.entries.find(entry => entry.id === id), ...owner }].slice(-256) }))
+}
+
+async function restoreOwner($: EngineInterface, id: string): Promise<void> {
+  if (agentModels.has(id) && spawnDecisions.has(id)) return
+  const owner = (await read($, ownersAtom)).entries.find(entry => entry.id === id)
+  if (owner) cacheOwner(owner)
+}
+
+/** The model a step runs on: native aliases stay in the observed owning conversation's family. */
 async function stepOwnerModel($: EngineInterface, e: TurnStepInput): Promise<string> {
   if (e.agentId === undefined) return stepModel(e.model, await $.session.model(), false, tiers(), familyPorts)
   if (isRouted(e.model)) return e.model
+  await restoreOwner($, e.agentId)
   // A loop with a native alias (an Explore default, a forked skill's
   // model: haiku) stays in its owner's family unless it was explicitly
   // placed on Claude. The owner is the spawn decision, else the parent loop.
   const decision = spawnDecisions.get(e.agentId)
   const explicitClaude = decision?.explicit === true && decision.family === CLAUDE_FAMILY
-  let owner = decision?.model ?? agentModels.get(e.agentId)
-  if (owner === undefined && decision?.explicit !== true) {
-    const agent = (await $.agent.list()).find(each => each.id === e.agentId)
-    // An absent row can be an internal fork or remote workflow. It is not evidence of a main parent.
-    if (agent !== undefined) owner = agent.parentId === undefined ? await $.session.model() : agentModels.get(agent.parentId)
-    if (owner === undefined && (isNativeAlias(e.model) || e.model === 'inherit') && isRouted(await $.session.model())) throw new Error('the child has no observed model or verified parent model')
-  }
+  const owner = decision?.model ?? agentModels.get(e.agentId)
+  if (owner !== undefined && decision?.family !== CLAUDE_FAMILY && !isRouted(owner)) throw new Error('the observed external child model is unavailable; its request was not moved to a native provider')
+  if (owner === undefined && (isNativeAlias(e.model) || e.model === 'inherit') && isRouted(await $.session.model())) throw new Error('the child has no observed model or verified parent model')
+  // A list row identifies a loop, not its model choice. Never infer ownership from main.
+  // An exact native model on an unowned request remains native, rather than being remapped.
   return stepModel(e.model, owner, explicitClaude, tiers(), familyPorts)
 }
 
@@ -1336,6 +1355,7 @@ export const register: Register = on => {
     owner: async ({ agentId, mainModel, session }) => {
       const model = agentId === undefined ? mainModel : agentModels.get(agentId)
       if (!model) throw new Error('The configured evaluator has no verified conversation model.')
+      if (claimedRefusal(model) || agentId !== undefined && spawnDecisions.get(agentId)?.family !== CLAUDE_FAMILY && spawnDecisions.has(agentId) && !isRouted(model)) throw new Error('The observed external evaluator model is unavailable.')
       return isRouted(model) ? { target: model, who: agentId ?? 'main', session } : null
     },
     outputLimit,
@@ -1401,6 +1421,8 @@ export const register: Register = on => {
     runtime = await detectRuntime($)
     codexDefaults = await readCodexDefaults($)
     await loadProviders($)
+    agentModels.clear(); spawnDecisions.clear(); spawnBackground.clear()
+    for (const owner of (await read($, ownersAtom)).entries) cacheOwner(owner)
     await refreshCatalogue($)
     // A nested claude process can migrate settings; run it before any judgment
     // is pending so its settings change cannot invalidate one.
@@ -1604,6 +1626,7 @@ export const register: Register = on => {
       // resolve it from today's main model or rewrite it with a fresh Agent request.
       const result = await next(e)
       if (result.agentId && result.model) {
+        await rememberOwner($, result.agentId, result.model, e.background)
         setCapped(agentModels, result.agentId, result.model)
         setCapped(spawnBackground, result.agentId, e.background)
         setCapped(spawnDecisions, result.agentId, { model: result.model, family: familyOf(result.model, familyPorts), explicit: true, reason: 'native resumed invocation model' })
@@ -1616,6 +1639,12 @@ export const register: Register = on => {
     const definition = e.fork ? undefined : registered.get(e.subagentType) ?? await definitionOf(promptsPort($), memory, e.subagentType)
     // The engine reports a parent's own model, which for a remapped loop (an
     // Explore haiku default, a forked skill alias) is a Claude alias.
+    if (e.parentAgentId !== undefined) {
+      await restoreOwner($, e.parentAgentId)
+      if (!agentModels.has(e.parentAgentId) && (isNativeAlias(e.parentModel) || e.parentModel === 'inherit') && isRouted(await $.session.model())) return { deny: `${PLUGIN}: the nested Agent parent model is unknown; no subagent was started` }
+      const owner = agentModels.get(e.parentAgentId)
+      if (owner && (claimedRefusal(owner) || spawnDecisions.get(e.parentAgentId)?.family !== CLAUDE_FAMILY && !isRouted(owner))) return { deny: `${PLUGIN}: the nested Agent parent model is unavailable; no subagent was started` }
+    }
     const parentModel = e.parentAgentId === undefined
       ? stepModel(e.parentModel, await $.session.model(), false, tiers(), familyPorts)
       : agentModels.get(e.parentAgentId) ?? e.parentModel
@@ -1627,6 +1656,7 @@ export const register: Register = on => {
     if (picked.exact !== undefined && result.model !== picked.exact) $.ui.log(`${PLUGIN}: Agent model ${picked.exact} was requested but the subagent started on ${result.model}`, { to: 'transcript' })
     if (result.agentId) {
       const observed = e.fork ? parentModel : result.model ?? decision.model
+      if (observed) await rememberOwner($, result.agentId, observed, e.background)
       setCapped(spawnDecisions, result.agentId, observed ? { ...decision, model: observed, family: familyOf(observed, familyPorts) } : decision)
       if (observed) setCapped(agentModels, result.agentId, observed)
       setCapped(spawnBackground, result.agentId, e.background)
@@ -1650,7 +1680,7 @@ export const register: Register = on => {
       // Claude: a hook failure would otherwise run the native request.
       return yield* refusedStep($, e, `${PLUGIN}: the model family of this conversation could not be resolved (${error instanceof Error ? error.message : String(error)}); nothing was sent`)
     }
-    if (e.agentId !== undefined) setCapped(agentModels, e.agentId, e.model)
+    if (e.agentId !== undefined) await rememberOwner($, e.agentId, e.model, spawnBackground.get(e.agentId))
     const claimed = claimedRefusal(e.model)
     if (claimed) return yield* refusedStep($, e, claimed)
     if (!isRouted(e.model)) return yield* next(e)
@@ -1671,6 +1701,8 @@ export const register: Register = on => {
   on('session.compact', async ($, e, next) => {
     const model = e.agentId === undefined ? await $.session.model() : agentModels.get(e.agentId)
     if (model === undefined) return { skip: `${PLUGIN}: subagent active model is unknown; compaction was not attempted, original transcript retained. Its next observed turn establishes the model after reload.` }
+    const claimed = claimedRefusal(model)
+    if (claimed || e.agentId !== undefined && spawnDecisions.get(e.agentId)?.family !== CLAUDE_FAMILY && spawnDecisions.has(e.agentId) && !isRouted(model)) return { skip: `${PLUGIN}: the observed compaction model is unavailable; original transcript retained` }
     if (!isRouted(model)) return next(e)
     next.signal.throwIfAborted()
     const who = e.agentId ?? 'main'
@@ -1734,6 +1766,7 @@ export const register: Register = on => {
   on('model.complete', async ($, e, next) => {
     // This public contract names its model explicitly. It carries no loop provenance:
     // do not replace a child's or another plugin's choice with the main model.
+    if (claimedRefusal(e.model)) return { value: { isAnswered: false, reason: 'api-error', status: null, error: 'invalid_request', usage: NO_USAGE } }
     if (!isRouted(e.model)) return next(e)
     const maxTokens = e.maxTokens ?? 1024
     if (!Number.isSafeInteger(maxTokens) || maxTokens < 1 || maxTokens > 64000) return { value: { isAnswered: false, reason: 'api-error', status: null, error: 'invalid_request', usage: NO_USAGE } }
@@ -1749,6 +1782,7 @@ export const register: Register = on => {
   on('model.classify', async ($, e, next) => {
     // Omitted model means the documented native small-model default, not guessed ownership.
     const model = e.options?.model
+    if (model && claimedRefusal(model)) return { deny: `${PLUGIN}: the explicit classifier model is unavailable; no native fallback` }
     if (!isRouted(model)) return next(e)
     if (e.labels.length === 0) return { value: undefined }
     const contract = classifierRequest(await nativeClassifier($), e.text, e.labels)
@@ -1763,7 +1797,9 @@ export const register: Register = on => {
   }).catch(() => ({ deny: `${PLUGIN}: routed classification failed; no native provider fallback` }))
 
   on('model.fork', async ($, e, next) => {
-    if (!isRouted(await $.session.model())) return next(e)
+    const model = await $.session.model()
+    if (claimedRefusal(model)) return { value: { isAnswered: false, reason: 'api-error', status: null, error: 'invalid_request', usage: NO_USAGE } }
+    if (!isRouted(model)) return next(e)
     const snapshot = mainSnapshot
     if (!snapshot || snapshot.session !== await $.session.id()) return { value: { isAnswered: false, reason: 'nothing-to-fork' } }
     // Fork the last sent prefix, not today's transcript, prompt, model, or child loop.

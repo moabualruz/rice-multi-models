@@ -5,10 +5,13 @@ export type ModelPrefs = {
   helper: 'session' | 'once'
 }
 
+export type AgentModelOwner = { id: string; model: string; explicitNative: boolean; background?: boolean }
+
 declare module 'claude-code' {
   interface PluginState {
     'rice-multi-models': {
       prefs: ModelPrefs
+      'agent-model-owners': { entries: readonly AgentModelOwner[] }
       nativeContext: { original: string | null; applied: string | null; relinquished: boolean }
       /** The main transcript's file, as the engine's classic hooks name it (a compaction summary cites it). */
       transcript: { path: string | null }

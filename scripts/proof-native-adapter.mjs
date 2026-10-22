@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict'
 import { cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -28,6 +28,7 @@ const fixture = mkdtempSync(join(tmpdir(), 'rice-native space-'))
 const plugin = join(fixture, 'plugin space'), configDir = join(fixture, '.claude')
 const observations = [], denied = []
 let phase = 'setup', mainCalls = 0
+let cancelClosed = false, releaseCancelClose
 const protocols = ['openai', 'responses', 'anthropic', 'gemini', 'bedrock']
 const CHILDREN_PROMPT = 'Use both owned child agents, then report completion.'
 const FAMILY_PROMPT = 'Use two owned subagents, then report completion.'
@@ -93,8 +94,10 @@ const provider = createServer(async (request, response) => {
   } else if (body.response_format?.json_schema) content = JSON.stringify(schemaValue(body.response_format.json_schema.schema))
   else if (userText.includes('Owned classification fixture')) content = 'owned'
   entry.ended = performance.now()
+  if (phase === 'request-failure') { response.writeHead(429, { 'content-type': 'application/json', 'x-should-retry': 'false' }); response.end('{"error":{"message":"Owned quota rejection"}}'); return }
   response.setHeader('content-type', 'text/event-stream')
   const send = value => response.write(`data: ${JSON.stringify(value)}\n\n`)
+  if (phase === 'cancellation') { response.once('close', () => { cancelClosed = true; releaseCancelClose?.() }); send({ choices: [{ index: 0, delta: { content: 'OWNED_PARTIAL_BEFORE_CANCEL' } }] }); return }
   if (phase === 'partial-failure') { send({ choices: [{ index: 0, delta: { content: 'Owned partial output' } }] }); response.end(); return }
   send({ choices: [{ index: 0, delta: calls ? { tool_calls: calls.map((call, index) => ({ index, ...call })) } : { content } }] })
   send({ choices: [{ index: 0, delta: {}, finish_reason: calls ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: phase.startsWith('auto') ? 10000 : 20, completion_tokens: 10 } })
@@ -173,6 +176,9 @@ try {
       return { turnId: e.turnId, index: e.index, answer, toolUses: [], stopReason: 'end_turn', usage: null }
     }
   `)
+  const cancelReceipt = join(fixture, 'cancel-turn.json')
+  const moduleEnd = source.lastIndexOf('\n}')
+  source = source.slice(0, moduleEnd) + `\n  on('turn.complete',async($,e,next)=>{const result=await next(e);if(await $.env.get('RICE_OWNED_PHASE')==='cancellation')await $.fs.write(${JSON.stringify(cancelReceipt)},JSON.stringify({reason:e.reason,isAborted:e.isAborted}));return result;});\n` + source.slice(moduleEnd)
   writeFileSync(file, source)
   // ProgramFiles and CLAUDE_CODE_GIT_BASH_PATH let native Windows find Git Bash, whose absence removes the Bash tool.
   const env = Object.fromEntries(['PATH', 'PATHEXT', 'TMPDIR', 'LANG', 'LC_ALL', 'SystemRoot', 'SystemDrive', 'WINDIR', 'ComSpec', 'ProgramFiles', 'ProgramFiles(x86)', 'CLAUDE_CODE_GIT_BASH_PATH', 'TEMP', 'TMP', 'RICE_CLAUDE_EXECUTABLE'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]))
@@ -280,17 +286,68 @@ try {
     assert.equal(denied.filter(event => event.phase === 'skill-fork-unsaved').length, 0, 'an unreadable fork never falls back to Claude')
   }
   if (wants('budget')) {
-    const result = await run('budget', ['--no-session-persistence', '--tools', ''], 'Owned oversized context. '.repeat(250), { model: 'budget/main' })
-    assert.equal(result.stop_reason, null, 'the bounded guard produces an unsuccessful step, not an assistant answer')
-    assert.equal(result.result, '', 'the budget diagnostic is not fabricated assistant content')
+    const { code, result } = await run('budget', ['--no-session-persistence', '--tools', ''], 'Owned oversized context. '.repeat(250), { model: 'budget/main', expectSuccess: false })
+    assert.equal(code, 1, 'a no-output budget refusal is an unsuccessful native CLI result')
+    assert.equal(result?.is_error, true, 'the bounded guard is not a successful assistant answer')
+    assert.ok(result.result === undefined || result.result === '', 'the diagnostic is not fabricated assistant content')
     assert.equal(observations.filter(event => event.phase === 'budget' && event.kind === 'provider').length, 0, 'an oversized request stops before provider dispatch')
   }
   if (wants('failure')) {
+    const rejected = await run('request-failure', ['--no-session-persistence'], 'Return the owned quota rejection.', { expectSuccess: false })
+    assert.equal(rejected.code, 1, 'a rejected provider request is not a successful CLI answer')
+    assert.equal(rejected.result?.is_error, true)
+    assert.equal(observations.filter(event => event.phase === 'request-failure' && event.kind === 'provider').length, 1, 'a rejected request is not replayed')
     const result = await run('partial-failure', ['--no-session-persistence'], 'Return the owned partial output.')
     assert.equal(observations.filter(event => event.phase === 'partial-failure' && event.kind === 'provider').length, 1, 'a committed partial response is not replayed')
     assert.equal(result.result, 'Owned partial output', 'only real partial output is retained, never fabricated success or failure text')
     assert.equal(result.stop_reason, null, 'the provider failure retains the supported unsuccessful stop shape')
     console.log(JSON.stringify({ nativeFailureBoundary: { stopReason: result.stop_reason, cliIsError: result.is_error, providerReplayed: false, fabricatedAnswer: false } }))
+    phase = 'cancellation'; cancelClosed = false
+    const providerClosed = new Promise(resolve => { releaseCancelClose = resolve })
+    const cancelled = spawn(process.env.RICE_CLAUDE_EXECUTABLE || 'claude', ['--plugin-dir', plugin, '-p', '--model', 'a/main', '--setting-sources', 'user', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--permission-mode', 'dontAsk', '--tools', '', '--no-session-persistence', '--input-format', 'stream-json', '--output-format', 'stream-json', '--include-partial-messages', '--verbose'], { cwd: fixture, env: { ...env, RICE_OWNED_PHASE: phase }, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'] })
+    console.log(JSON.stringify({ phase, ownedPid: cancelled.pid }))
+    let output = '', errorOutput = '', pending = ''
+    const events = [], waiters = []
+    const waitFor = match => events.some(match) ? Promise.resolve(events.find(match)) : new Promise(resolve => waiters.push({ match, resolve }))
+    cancelled.stdout.on('data', bytes => {
+      output += bytes; pending += bytes
+      for (let at = pending.indexOf('\n'); at !== -1; at = pending.indexOf('\n')) {
+        const line = pending.slice(0, at); pending = pending.slice(at + 1)
+        let event; try { event = JSON.parse(line) } catch { continue }
+        events.push(event)
+        for (const waiter of [...waiters]) if (waiter.match(event)) { waiters.splice(waiters.indexOf(waiter), 1); waiter.resolve(event) }
+      }
+    })
+    cancelled.stderr.on('data', bytes => { errorOutput = (errorOutput + bytes).slice(-4000) })
+    const closed = new Promise((resolve, reject) => { cancelled.once('error', reject); cancelled.once('close', code => resolve(code)) })
+    let deadlineTimer
+    const deadline = new Promise((_, reject) => { deadlineTimer = setTimeout(() => reject(new Error('Owned cancellation deadline')), 60_000) })
+    const until = work => Promise.race([work, deadline, closed.then(code => { throw new Error(`Owned cancellation ended early (${code}): ${errorOutput.slice(-600)}`) })])
+    const send = value => cancelled.stdin.write(JSON.stringify(value) + '\n')
+    try {
+      send({ type: 'control_request', request_id: 'owned-cancel-init', request: { subtype: 'initialize' } })
+      await until(waitFor(event => event.type === 'control_response' && event.response?.request_id === 'owned-cancel-init' && event.response?.subtype === 'success'))
+      send({ type: 'user', session_id: '', parent_tool_use_id: null, message: { role: 'user', content: 'Owned cancellation fixture.' } })
+      await until(waitFor(event => JSON.stringify(event).includes('OWNED_PARTIAL_BEFORE_CANCEL')))
+      send({ type: 'control_request', request_id: 'owned-cancel-interrupt', request: { subtype: 'interrupt' } })
+      await until(waitFor(event => event.type === 'control_response' && event.response?.request_id === 'owned-cancel-interrupt' && event.response?.subtype === 'success'))
+      cancelled.stdin.end()
+      await Promise.race([closed, deadline])
+      await Promise.race([providerClosed, deadline])
+      assert.equal(cancelClosed, true, 'native interruption closes the owned provider request')
+      assert.ok(existsSync(cancelReceipt), 'the native aborted turn completes its lifecycle')
+      assert.deepEqual(JSON.parse(readFileSync(cancelReceipt, 'utf8')), { reason: 'aborted', isAborted: true })
+      assert.equal(observations.filter(event => event.phase === 'cancellation' && event.kind === 'provider').length, 1, 'visible output and interruption never replay inference')
+      assert.equal(denied.filter(event => event.phase === 'cancellation').length, 0)
+      console.log(JSON.stringify({ nativeCancellation: true, providerClosed: cancelClosed, nativeAbortedLifecycle: true }))
+    } finally {
+      clearTimeout(deadlineTimer)
+      if (cancelled.exitCode === null && cancelled.signalCode === null) {
+        if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(cancelled.pid), '/T', '/F'], { stdio: 'ignore', timeout: 10_000 })
+        else try { process.kill(-cancelled.pid, 'SIGTERM') } catch {}
+        await closed.catch(() => {})
+      }
+    }
   }
   if (wants('evaluators')) {
     // Prompt-type Stop evaluators are routed. Agent-type evaluators run natively

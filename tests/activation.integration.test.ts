@@ -4,9 +4,9 @@ import { unknownMetadata, type ModelCatalogue } from '../hooks/catalogue'
 
 const root = fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]$/, '')
 mock.module('claude-code', () => ({
-  atom: (_key: unknown, value: unknown) => ({ value }),
-  read: async (_host: unknown, state: { value: unknown }) => state.value,
-  update: async (_host: unknown, state: { value: unknown }, change: (value: unknown) => unknown) => { state.value = change(state.value) },
+  atom: (ref: { key: string }, value: unknown) => ({ ref, value }),
+  read: async (host: any, state: any) => host.__atoms.get(state.ref.key) ?? state.value,
+  update: async (host: any, state: any, change: (value: unknown) => unknown) => { host.__atoms.set(state.ref.key, change(host.__atoms.get(state.ref.key) ?? state.value)) },
 }))
 const { register } = await import('../hooks/register')
 const callbacks = new Map<string, (...args: any[]) => any>()
@@ -31,6 +31,7 @@ function fixture() {
   const fetchStatus: { result: unknown } = { result: { ok: true, config: { endpoints: [{ name: 'docs-fetch', priority: 4 }] } } }
   const info = { node: { executable: '/fixture/node', version: '22.20.0', supported: true }, platform: 'linux', home: '/empty-home', configDir: '/empty-home/.claude', codexHome: '/empty-home/.codex', opencodeAuthFile: '/empty-home/.local/share/opencode/auth.json', clis: {}, auth: { codex: false, opencode: false }, opencodeEntries: [] }
   const host: any = {
+    __atoms: state,
     env: {
       get: async (key: string) => env.get(key),
       set: async (key: string, value: string | undefined) => {
@@ -333,6 +334,34 @@ test('a failed routed stream preserves partial text and usage but commits no pen
   expect(chunks).toEqual([{ kind: 'text', index: 0, text: 'real partial output' }, { kind: 'stop', stopReason: null, usage: { input_tokens: 21, output_tokens: 4, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'codex/fresh' } }])
   expect(item.value).toMatchObject({ answer: 'real partial output', toolUses: [], stopReason: null })
   expect(f.notices.join('\n')).toContain('owned transport failed')
+})
+
+test('native session state restores child ownership across a fresh mod module', async () => {
+  const f = contextFixture()
+  await startContext(f)
+  const nativeId = 'owned-native-after-reload', routedId = 'owned-routed-fork-after-reload'
+  await callbacks.get('agent.spawn')!(f.host, { tool_use_id: 'toolu_persist_native', prompt: 'owned', description: 'owned native', subagentType: 'general-purpose', provider: { plugin: 'engine', tier: 'core' }, parentModel: 'codex/fresh', model: 'claude-sonnet-5-5', background: false, fork: false }, async () => ({ model: 'claude-sonnet-5-5', agentId: nativeId }))
+  const saved = f.state.get('agent-model-owners') as { entries: any[] }
+  expect(saved.entries).toContainEqual({ id: nativeId, model: 'claude-sonnet-5-5', explicitNative: true, background: false })
+  f.state.set('agent-model-owners', { entries: [...saved.entries, { id: routedId, model: 'codex/child', explicitNative: false, background: true }] })
+  const fresh = await import('../hooks/register.ts?owned-reload')
+  const reloaded = new Map<string, (...args: any[]) => any>()
+  fresh.register(((event: string, match: any, callback: any) => { reloaded.set(event, callback ?? match); return { catch: () => undefined } }) as any)
+  await reloaded.get('session.start')!(f.host, { isInteractive: false }, async () => ({}))
+  let nativeCalls = 0
+  for await (const _chunk of reloaded.get('turn.step')!(f.host, { agentId: nativeId, model: 'haiku', turnId: 'native-after-reload', index: 0 }, async function* () { nativeCalls++; return {} })) {}
+  expect(nativeCalls).toBe(1)
+  f.host.agent.list = async () => [{ id: routedId, type: 'fork', description: 'owned saved fork', status: 'running' }]
+  f.host.session.messages = async () => [{ role: 'user', content: 'owned fork context' }]
+  f.host.prompt = { compose: async () => ({ sections: [{ id: 'base', text: 'owned native sections' }] }) }
+  const requests: any[] = []
+  f.host.process.spawn = async function* (input: any) {
+    requests.push(JSON.parse(input.input).req)
+    yield { stream: 'stdout', text: JSON.stringify({ type: 'text', text: 'owned restored reply' }) + '\n' + JSON.stringify({ type: 'stop', reason: 'end_turn' }) + '\n' }
+    return { code: 0 }
+  }
+  for await (const _chunk of reloaded.get('turn.step')!(f.host, { agentId: routedId, model: 'haiku', turnId: 'routed-after-reload', index: 0 }, async function* () { throw new Error('no main or native borrowing') })) {}
+  expect(requests.at(-1)).toMatchObject({ target: 'codex/child', who: routedId })
 })
 
 test('capacity observations expire and optional discovery failure stays bounded and recoverable', async () => {

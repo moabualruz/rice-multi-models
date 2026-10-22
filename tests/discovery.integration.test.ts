@@ -8,9 +8,9 @@ import { BODY_MARK, deriveCapture, MARKER_AGENT } from '../hooks/native-tools'
 const root = fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]$/, '')
 const helperBranches: string[] = []
 mock.module('claude-code', () => ({
-  atom: (_key: unknown, value: unknown) => ({ value }),
-  read: async (_host: unknown, atom: { value: unknown }) => atom.value,
-  update: async (_host: unknown, atom: { value: unknown }, change: (value: unknown) => unknown) => { atom.value = change(atom.value) },
+  atom: (ref: { key: string }, value: unknown) => ({ ref, value }),
+  read: async (host: any, atom: any) => host.__atoms.get(atom.ref.key) ?? atom.value,
+  update: async (host: any, atom: any, change: (value: unknown) => unknown) => { host.__atoms.set(atom.ref.key, change(host.__atoms.get(atom.ref.key) ?? atom.value)) },
 }))
 mock.module(`${root}/helper/codex.ts`, () => ({ codexStep: async function* (_req: unknown, model: string) { helperBranches.push(`codex:${model}`); yield { type: 'text', text: `fixture: codex ${model}` } } }))
 mock.module(`${root}/helper/styx/step.ts`, () => ({ createStepper: () => ({ step: async function* (wire: any) { helperBranches.push(`configured:${wire.req.target}`); yield { type: 'text', text: `fixture: configured ${wire.req.target}` } } }) }))
@@ -99,6 +99,7 @@ const diagnostics: string[] = []
 const environment = new Map<string, string>([['HOME', '/fixture-home']])
 const sessionState = new Map<string, unknown>()
 const host: any = {
+  __atoms: sessionState,
   env: { get: async (key: string) => environment.get(key), set: async (key: string, value: string | undefined) => { if (value === undefined) environment.delete(key); else environment.set(key, value) } },
   state: { get: async (ref: { key: string }) => ({ value: sessionState.get(ref.key), version: 0 }), set: async (ref: { key: string }, value: unknown) => { sessionState.set(ref.key, value); return { isSet: true, version: 1 } } },
   plugin: { root },
@@ -193,6 +194,8 @@ const step = async (type: string, model: string) => {
   const id = `fixture-agent-${agents.length}`
   const agent = { id, type, description: 'offline review control', status: 'running' }
   agents.push(agent)
+  // Establish the native dispatch receipt before testing its subsequent loop request.
+  await hook('agent.spawn')(host, { ...spawnInput(await host.session.model(), type, model), background: false }, async (event: any) => ({ model: event.model ?? model, agentId: id }))
   let nextCalls = 0
   const diagnosticStart = diagnostics.length
   const generator = hook('turn.step')(host, { agentId: id, model, turnId: 'fixture-turn', index: 0 }, async function* () {
@@ -817,6 +820,16 @@ test('workflow and resumed native spawns retain exact ownership and pinned permi
   await reload({})
 })
 
+test('a nested spawn with unknown alias ownership never chooses a native or main provider', async () => {
+  for (const fork of [false, true]) {
+    let nativeCalls = 0
+    const input = { ...spawnInput('haiku', fork ? 'fork' : 'general-purpose', undefined, 'owned-unobserved-spawn-parent'), fork }
+    const result = await hook('agent.spawn')(host, input, async () => { nativeCalls++; return { model: 'haiku', agentId: 'must-not-start' } })
+    expect(nativeCalls).toBe(0)
+    expect(result.deny).toContain('parent model is unknown')
+  }
+})
+
 test('a child with an unknown parent never borrows the main model', async () => {
   const id = 'owned-unknown-parent-child'
   agents.push({ id, parentId: 'unobserved-parent', type: 'general-purpose', description: 'owned unknown lineage' })
@@ -829,6 +842,18 @@ test('a child with an unknown parent never borrows the main model', async () => 
   expect(nativeCalls).toBe(0)
   expect(chunks).toEqual([{ kind: 'stop', stopReason: null, usage: null }])
   expect(diagnostics.slice(start).join('\n')).toContain('no observed model or verified parent model')
+})
+
+test('an unowned root child is not assigned the main provider from its list row', async () => {
+  const id = 'owned-unobserved-root-child'
+  agents.push({ id, type: 'general-purpose', description: 'owned unobserved root child' })
+  const before = wires.length
+  let nativeCalls = 0
+  const chunks: any[] = []
+  for await (const chunk of hook('turn.step')(host, { agentId: id, model: 'haiku', turnId: 'unknown-root-owner', index: 0 }, async function* () { nativeCalls++; return {} })) chunks.push(chunk)
+  expect(wires.length).toBe(before)
+  expect(nativeCalls).toBe(0)
+  expect(chunks).toEqual([{ kind: 'stop', stopReason: null, usage: null }])
 })
 
 test('a built-in agent type the installed claude did not start is refused, never sent with a made-up prompt', async () => {
