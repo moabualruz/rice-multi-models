@@ -45,6 +45,20 @@ test('fresh facts replace stale limits, clamp output policy, add IDs, and retain
   expect(remote(changed, 'stale').model).toMatchObject({ contextWindow: 300_000, maxInputTokens: 250_000, maxOutputTokens: 400 })
 })
 
+test('active context remains the effective window when the model advertises a larger maximum', () => {
+  const effective = runtimeConfig(source({ m: {} }), snapshot(discovered('m', { contextWindow: 32_000, maxContextWindow: 872_000 })))
+  expect(remote(effective, 'm').model.contextWindow).toBe(32_000)
+})
+
+test('fresh active context uses the maximum only as an upper ceiling and invalid facts stay unknown', () => {
+  const active = runtimeConfig(source({ m: {} }), snapshot(discovered('m', { contextWindow: 64_000, maxContextWindow: 32_000 })))
+  expect(remote(active, 'm').model.contextWindow).toBe(32_000)
+  const invalid = runtimeConfig(source({ m: {} }), snapshot(discovered('m', { contextWindow: 64_000.5, maxContextWindow: 128_000 })))
+  expect(remote(invalid, 'm').model.contextWindow).toBeUndefined()
+  const configured = runtimeConfig(source({ m: { contextWindow: 200_000 } }), snapshot(discovered('m', { maxContextWindow: 128_000 })))
+  expect(remote(configured, 'm').model.contextWindow).toBe(128_000)
+})
+
 test('smaller discovered context constrains an existing input policy without dropping new routes', () => {
   const effective = runtimeConfig(source({ m: { contextWindow: 100_000, maxInputTokens: 90_000 } }), snapshot(discovered('m', { contextWindow: 50_000 }), discovered('new')))
   expect(effective.errors).toEqual([])
@@ -122,6 +136,15 @@ test('runtime text reparses exactly with safe params, aliases, auth and approval
   expect(current.model.headers).toEqual(original.model.headers)
   expect(effective.config?.aliases).toEqual(loaded.config?.aliases)
   expect(effective.text).not.toContain('Bearer ')
+})
+
+test('only a fresh provider catalogue replaces cached model limits, and refresh can recover', () => {
+  const loaded = source({ m: { contextWindow: 1_000, maxOutputTokens: 100 } })
+  const stale = snapshot(discovered('m', { contextWindow: 80_000, outputTokenLimit: 4_000 }))
+  stale.providers[0]!.status = 'unavailable'
+  expect(remote(runtimeConfig(loaded, stale), 'm').model).toEqual(remote(loaded, 'm').model)
+  const refreshed = runtimeConfig(loaded, snapshot(discovered('m', { contextWindow: 80_000, outputTokenLimit: 4_000 })))
+  expect(remote(refreshed, 'm').model).toMatchObject({ contextWindow: 80_000, maxOutputTokens: 100 })
 })
 
 test('unavailable snapshots and unconfigured providers add no routes', () => {

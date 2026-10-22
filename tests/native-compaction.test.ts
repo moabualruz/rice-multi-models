@@ -53,13 +53,16 @@ const result = (id: string, text: string): ApiMessage => ({ role: 'user', conten
 
 test('a transcript that fits is sent whole', () => {
   const messages = [user('task'), call('a'), result('a', 'ok'), user('next')]
-  expect(fitTranscript(messages, 100_000)).toEqual({ messages, omitted: 0 })
+  expect(fitTranscript(messages, 100_000)).toMatchObject({ messages, omitted: 0, clipped: 0, fits: true, explanation: 'no transcript content excluded' })
 })
 
 test('long tool outputs are shortened before anything is left out', () => {
   const messages = [user('task'), call('a'), result('a', 'x'.repeat(60_000)), user('next')]
   const fitted = fitTranscript(messages, 12_000)
   expect(fitted.omitted).toBe(0)
+  expect(fitted.clipped).toBeGreaterThan(0)
+  expect(fitted.fits).toBe(true)
+  expect(fitted.explanation).toContain('tool-result blocks clipped')
   expect(JSON.stringify(fitted.messages).length).toBeLessThanOrEqual(12_000)
   expect(JSON.stringify(fitted.messages)).toContain('characters omitted')
 })
@@ -72,6 +75,41 @@ test('the oldest exchanges are left out whole, the task stays, and no result los
   expect(fitted.omitted).toBeGreaterThan(0)
   expect(fitted.messages[0]).toEqual(user('the task'))
   expect(fitted.messages.at(-1)).toEqual(user('latest'))
+  expect(fitted.fits).toBe(true)
+  expect(fitted.explanation).toContain(`${fitted.omitted} messages excluded from this request copy`)
+  expect(fitted.excluded.length).toBe(fitted.omitted)
   const calls = new Set(fitted.messages.flatMap(message => typeof message.content === 'string' ? [] : message.content.filter(block => block.type === 'tool_use').map(block => block.id as string)))
   for (const message of fitted.messages) if (typeof message.content !== 'string') for (const block of message.content) if (block.type === 'tool_result') expect(calls.has(block.tool_use_id as string)).toBe(true)
+})
+
+test('request fitting preserves opaque handles and leaves the source transcript untouched', () => {
+  const original = [
+    { ...user('task'), handle: 'whole-first-handle' },
+    { ...call('pair'), handle: 'whole-call-handle' },
+    { ...result('pair', 'z'.repeat(30_000)), handle: 'whole-result-handle' },
+    { ...user('latest'), handle: 'whole-latest-handle' },
+  ] as ApiMessage[]
+  const before = JSON.stringify(original)
+  const fitted = fitTranscript(original, 5_000)
+  expect(fitted.fits).toBe(true)
+  expect(JSON.stringify(original)).toBe(before)
+  expect(fitted.messages.map(message => (message as ApiMessage & { handle?: string }).handle)).toEqual(['whole-first-handle', 'whole-call-handle', 'whole-result-handle', 'whole-latest-handle'])
+  expect((fitted.messages[0] as ApiMessage & { handle?: string }).handle).toBe('whole-first-handle')
+  expect((fitted.messages.at(-1) as ApiMessage & { handle?: string }).handle).toBe('whole-latest-handle')
+})
+
+test('rejects an orphan tool result instead of forwarding a broken tool exchange', () => {
+  const fitted = fitTranscript([user('task'), result('missing', 'result')], 10_000)
+  expect(fitted.fits).toBe(false)
+  expect(fitted.messages).toHaveLength(2)
+  expect(fitted.explanation).toContain('1 unpaired tool-result blocks')
+})
+
+test('reports when the protected first and latest messages cannot fit without dropping history silently', () => {
+  const messages = [user('x'.repeat(4_000)), user('y'.repeat(4_000))]
+  const fitted = fitTranscript(messages, 100)
+  expect(fitted.fits).toBe(false)
+  expect(fitted.messages).toHaveLength(2)
+  expect(fitted.omitted).toBe(0)
+  expect(fitted.explanation).toBe('no transcript content excluded')
 })
