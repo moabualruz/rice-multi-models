@@ -86,13 +86,14 @@ export function assembler(codec: Codec, provider: string, ids: ReturnType<typeof
     },
     // `cut` is the transport's failure text, when the response was cut short.
     end(p: ProviderConfig, cut?: string): { events: StepEvent[]; finish: string; note?: string } {
-      if (cut !== undefined) return { events: [{ type: 'error', kind: 'request', text: cut }], finish: 'error' }
+      const received: StepEvent[] = usage === undefined ? [] : [{ type: 'usage', ...usage }]
+      if (cut !== undefined) return { events: [...received, { type: 'error', kind: 'request', text: cut }], finish: 'error' }
       if (failure !== undefined) {
         const text = `rice-multi-models: ${p.id} response failed: ${oneLine(errorDetail(failure).message, 300)}; retry, or see the debug log`
-        return { events: [{ type: 'error', kind: 'response', text }], finish: 'error' }
+        return { events: [...received, { type: 'error', kind: 'response', text }], finish: 'error' }
       }
       const reason = own(codec.stops, finish ?? 'stop')
-      const events: StepEvent[] = [...(usage === undefined ? [] : [{ type: 'usage' as const, ...usage }]), { type: 'stop', reason: reason ?? 'end_turn' }]
+      const events: StepEvent[] = [...received, { type: 'stop', reason: reason ?? 'end_turn' }]
       return { events, finish: finish ?? 'none', ...(reason === undefined ? { note: `finish_reason "${finish}" read as end_turn` } : {}) }
     },
     failed: () => failure !== undefined,
@@ -144,7 +145,7 @@ export function createStepper(env: Env) {
       )
       return [...events, st]
     }
-    const refuse = (text: string) => close([{ type: 'error', kind: 'request', text }], 'error')
+    const refuse = (text: string, status?: number) => close([{ type: 'error', kind: 'request', text, ...(status === undefined ? {} : { status }) }], 'error')
     if (t?.kind !== 'remote') return yield* refuse(`rice-multi-models: ${req.target} is not configured in this session; run /rice-models reload`)
     const { provider: p, model: m } = t
     const owner = `${p.id}/${m.id}`
@@ -186,7 +187,7 @@ export function createStepper(env: Env) {
     // A cut made by the client going away is no failure.
     if ('cut' in answer) return signal.aborted ? void close([], 'aborted') : yield* refuse(cutText(p, answer.cut))
     http = String(answer.status)
-    if (answer.status < 200 || answer.status > 299) return yield* refuse(httpErrorText(p, answer.status, await errorBody(answer), m.id))
+    if (answer.status < 200 || answer.status > 299) return yield* refuse(httpErrorText(p, answer.status, await errorBody(answer), m.id), answer.status)
     const decoder = codec.decoder()
     const asm = assembler(codec, p.id, ids)
     let cut: Cut | undefined

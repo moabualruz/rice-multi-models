@@ -38,6 +38,8 @@ export type NativeRunOptions = {
   files?: Readonly<Record<string, string>>
   /** More arguments for claude. */
   args?: readonly string[]
+  /** A supported mod used only inside this isolated fixture to invoke a native public contract. */
+  pluginSource?: string
   /** Ends the run as soon as it holds, checked after each request; otherwise the run ends when claude exits. */
   done?: (run: NativeRun) => boolean
   signal?: AbortSignal
@@ -174,7 +176,17 @@ export async function runNative(options: NativeRunOptions): Promise<NativeRunRes
     Object.assign(env, { HOME: root, USERPROFILE: root, CLAUDE_CONFIG_DIR: config, ANTHROPIC_API_KEY: NOT_A_KEY, ANTHROPIC_BASE_URL: `http://127.0.0.1:${address.port}`, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', DISABLE_AUTOUPDATER: '1' })
     const installed = await version(env, root, signal)
 
-    const command = claude(['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--setting-sources', 'user', ...(options.args ?? [])])
+    const pluginArgs: string[] = []
+    if (options.pluginSource !== undefined) {
+      const plugin = path.join(root, 'contract-mod')
+      await mkdir(path.join(plugin, '.claude-plugin'), { recursive: true })
+      await mkdir(path.join(plugin, 'hooks'))
+      await writeFile(path.join(plugin, '.claude-plugin/plugin.json'), JSON.stringify({ name: 'owned-contract-capture', version: '1.0.0', description: 'Isolated native contract capture' }))
+      await writeFile(path.join(plugin, 'hooks/hooks.json'), JSON.stringify({ modules: ['./register.js'] }))
+      await writeFile(path.join(plugin, 'hooks/register.js'), options.pluginSource)
+      pluginArgs.push('--plugin-dir', plugin)
+    }
+    const command = claude(['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--setting-sources', 'user', ...pluginArgs, ...(options.args ?? [])])
     child = spawn(command.file, command.args, { cwd: root, env, signal, windowsHide: true, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'ignore'] })
     const running = child
     const { script } = options

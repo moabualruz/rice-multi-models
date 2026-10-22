@@ -2,7 +2,7 @@
 
 A Claude Code mod that runs models from other subscriptions, APIs and local
 servers as ordinary Claude Code session and subagent models. Claude Code keeps
-its own tools, permissions, transcript, compaction and agents; the mod answers
+its orchestration, tools, permissions, transcript storage and native agents; the mod answers
 each routed request with a direct call to the provider you selected. It works
 inside the normal `claude` command through supported plugin hooks. Release
 0.11.0 removed every mod-owned agent type; Claude Code built-ins and user-supplied
@@ -13,11 +13,9 @@ including tool coverage and web tiers, in setup, doctor and status. Release 0.14
 Agent tool's `model` argument name any discovered `<provider>/<model>` id exactly. It registers no
 MCP tools and needs no launcher, proxy or gateway.
 
-**Each conversation stays on its own provider family.** A Codex session's
-routed subagents, skills, compaction, titles, permission judgments, web search
-and web fetch use Codex too. A subagent you deliberately put on another provider
-keeps that provider. Some engine-owned classifiers remain native Claude Code
-behavior, as listed in [Known limits](#known-limits). See [Families](#families).
+**Routed conversation inference follows its observed owner.** Exact provider/model ids are primary; family aliases are optional compatibility. Native agent dispatch, tool execution and permission ceilings remain authoritative. Compaction stays on the same exact active model with no alternate-provider fallback. Web tools alone have an explicit final native Claude fallback.
+
+This is native in-process mod integration, not an external harness and not a claim that every stock inference pipeline is unchanged. Routed compaction and some auxiliary operations are native-like adapters on supported hooks. Hidden engine inference can remain native. See [What runs where](#what-runs-where) and [Host limits](docs/host-limits.md).
 
 Providers:
 
@@ -156,30 +154,35 @@ parent's own model. Entries naming a model from another family are ignored.
 | Session titles | Selected provider, local fallback, manual names kept |
 | Auto-mode permission judgments | Selected provider receives your effective auto-mode policy; Claude Code's native classifier, rules, hooks and managed limits can still decide the action |
 | SubagentHandback admission classifier | Claude Code's native classifier; the public plugin API does not route this engine-owned decision |
-| WebFetch | Provider-native retrieval where supported, configured fetch services, Claude Code native WebFetch, then direct fetch with selected-provider extraction if native fallback is unavailable |
+| WebFetch | Provider-native retrieval where supported, configured fetch services, then native Claude WebFetch LAST; no hidden retrieval after it |
 | WebSearch | Selected provider's own search, then your saved search services, then Claude's native search with the session's account |
-| Stop / SubagentStop prompt hooks | Selected provider |
-| Plugin auxiliary calls (`model.complete`, `classify`, `fork`) | The main conversation's family |
+| Visible Stop / SubagentStop prompt hooks | Observed owner's exact model, with the installed host's captured evaluator contract and the owner's transcript; hidden sources and agent evaluators remain native |
+| `model.complete` and explicit `model.classify` | The caller's explicit model, never overwritten by the main model; native choices stay native; omitted classify model keeps its documented native default |
+| `model.fork` | Tool-free completion over the last successfully sent main request snapshot; `nothing-to-fork` when no verified snapshot is available |
 | Context meter and automatic compaction threshold | The selected model's reported context window |
 
 ### Known limits
 
 These come from what Claude Code exposes to plugins today:
 
-- **Compaction.** The engine cannot send its own summary request to another provider, so the mod sends it: once per Claude Code version it runs the installed `claude` for a few seconds in a throwaway folder against a loopback stub (no network, none of your settings or sessions) to read the engine's own summary prompt and summary-message wording, and keeps them. Nothing of that text is copied into this repository. If it cannot be read, a routed conversation is not compacted and says why. Two things the host gives a plugin no way to do: your `PreCompact` hooks do not run for a routed compaction and `PostCompact` hooks receive an empty summary, and the summary appears as a message in the conversation, not as the collapsed "Compacted" row.
+- **Capacity and compaction policy.** The same exact observed model is used, including for children. There is no alternate compaction chooser and no implicit Claude fallback. Active context is distinct from a maximum ceiling. Input allowance reserves output and request overhead. Discovery observations expire after five minutes and are refreshed before routed requests and compaction; unavailable discovery falls back to explicit configuration or bounded conservative capacity, never infinity. Missing capacity uses at most 8,192 input tokens and a 2,048 output-token default. A maximum-only observation does not enlarge active context. Fitted summary requests preserve tool pairs, report clipped blocks and excluded source ranges visibly, and label that coverage in the summary. Failure or cancellation retains original history and handles.
+- **Errors.** Provider errors are not assistant answers or handback calls. Partial text and observed usage are retained; failed tool streams are withheld and stop with `stopReason: null`. The public step result has no typed provider-error arm. On 2.1.308 the CLI can still report `is_error: false` for this unsuccessful plugin response. Native API-error/StopFailure bookkeeping is therefore not equivalent; automation must inspect the stop reason and diagnostic, not infer success from exit status alone. See [Host limits](docs/host-limits.md).
+- **Ownership boundaries.** Workflow spawns use normal resolution; resumed invocations retain the model returned by native resume. A child with no observed model or verified parent is not assigned the main provider by guess. Fixtures cover parallel, background, nested, fork, workflow, teammate and resume event shapes; remote workflows and teammates in another process do not expose an in-process loop here. Suggestions, memory inference and independently executing command internals are not globally intercepted by `model.*` hooks. A skill or command using the normal loop is routed only when its actual `turn.step` is observed.
+
+- **Compaction.** The public API has no summarizer model selector, and an owned 2.1.308 native manual-compaction probe exposed no external transport seam through `turn.step`, `model.complete`, `model.fork`, `model.classify` or `http.fetch`. The routed adapter therefore replaces core summarization through `session.compact`: once per Claude Code version it runs the installed `claude` for a few seconds in a throwaway folder against a loopback stub (no network, none of your settings or sessions) to read the engine's own summary prompt and summary-message wording, and keeps them. Nothing of that text is copied into this repository. If it cannot be read, a routed conversation is not compacted and says why. Two things the host gives a plugin no way to do: your `PreCompact` hooks do not run for a routed compaction and `PostCompact` hooks receive an empty summary, and the summary appears as a message in the conversation, not as the collapsed "Compacted" row.
 - **Tool definitions and agent prompts.** A routed session builds no Anthropic request, so the engine never renders its tools or a subagent's prompt for the mod. Once per Claude Code version and combination of your session's built-in tools, the mod runs the installed `claude` for about a second in a throwaway folder against a loopback stub (no network, none of your settings, plugins or sessions): the engine's first request gives the tools as it sends them, and the stub has it start every agent type it lists, plus a marker agent, in the foreground and in the background, to read each agent's system prompt, the text the engine puts around every subagent prompt (agent files included), and the tools it offers each type. The result is kept in the plugin's store; nothing of that text is copied into this repository. The identity line the engine opens a subagent prompt with is left out, as the main prompt's identity sections are; the subagent's environment and model notice reach it in its transcript, as natively. Without the capture a main step sends the schema table generated for this build and the descriptions the session lists, a routed subagent step is refused rather than run on a made-up prompt, and `/rice-models status`, `doctor` and the debug log say so; a failed read is tried again after a minute or at `/rice-models refresh`. What the capture cannot reach:
   - The run is headless with default settings and permission mode. Where the engine words a tool differently in an interactive session, under another permission mode or for an account feature, the routed model gets the headless wording; in 2.1.302 that is the Agent and Bash descriptions in an interactive session, and Bash under `bypassPermissions`.
   - Tools a headless run never offers (AskUserQuestion, EnterPlanMode, ExitPlanMode) keep the session's description and the generated schema. MCP tools keep the session's description and a loose schema: the capture runs without your servers and credentials, and the host gives a plugin an MCP tool's description but not its input schema.
   - An agent type the engine lists only in some sessions (claude-code-guide is not listed to a headless run without an account) has no captured prompt; a routed step of it is refused.
   - SubagentHandback is offered only in auto mode, where every Agent call passes the engine's own classifier, so the capture cannot start one; the mod keeps its own definition of that tool (the engine's name and input shape).
   - A headless foreground subagent is offered a few more tools than a background one, and an interactive session's subagents get the background set; the mod follows that.
-- **Auxiliary prompt text.** Session titles, auto-mode permission judgments, WebFetch extraction, and Stop or SubagentStop prompt evaluators still use text written by this mod. These are headless capture limits, not substitutes claimed to be native:
+- **Auxiliary contracts.** Explicit classification and visible prompt Stop/SubagentStop evaluations use version-bound native request text captured against owned loopback stubs. Evaluators include the observed owner's transcript, not just the event JSON. The native internal inference itself is replaced by a tool-free selected-provider call; cache behavior and output capacity are provider-specific. Other auxiliary text remains native-like:
   - The title hook receives the host's title event/result, not the internal title-generation request. The isolated title proof verifies selected-provider generation, persisted titles, manual titles, and failure fallback, but cannot capture Claude's native title prompt.
   - The permission hook receives the pending action and effective policy, not the host classifier's prompt. The isolated auto-mode proof verifies selected-provider judgments and actual native mode controls; it did not expose a stable native classifier prompt to the plugin.
-  - Stop and SubagentStop system blocks matched across marker runs, but the full requests differed, so no independently stable byte-for-byte prompt was established. Prompt evaluators continue to route to the selected provider; agent-type evaluators remain native.
-  - The WebFetch proof verifies the configured provider-native, saved-service, host-native and direct-fetch chain with selected-provider extraction, and refusal on selected-provider failure. It does not capture Claude's internal extraction prompt.
+  - Native evaluator event ids and transcript paths vary per invocation. The mod captures the stable system wrapper, condition prefix and JSON contract, then supplies the real owner transcript and event. Unavailable or mismatched captures stop replacement safely; hidden or agent-type sources are delegated natively, never skipped.
+  - Configured-service WebFetch extraction uses a mod-written tool-free prompt. It is not Claude's internal extraction prompt. The helper's explicit direct-retrieval action is not a runtime fallback tier.
 
-  No native auxiliary prompt was substituted without an independently verifiable capture. The plugin does not silently fall back from an unavailable native prompt capture to invented agent/tool text; routed built-in agent steps without a valid capture are refused with a visible diagnostic.
+  Title generation uses the first 12,000 prompt characters and 128 output tokens with a deterministic fallback, not the hidden stock title prompt. Explicit completion text, effort and output requests are preserved; native cache-mark semantics cannot be promised across external provider protocols. A fork never reconstructs arbitrary current context after resume or reload: it returns `nothing-to-fork` until a routed main request supplies a new snapshot.
 - **Transcript content.** Text, images, inline PDF and plain-text documents, tool calls and results are retained or translated by each supported codec. Unsupported reasoning, source shapes and provider-specific blocks produce visible omission notes. Chat Completions accepts plain-text documents as text but cannot accept PDF document blocks; image and document URL sources are not fetched by the adapter.
 - **Host API gaps.** MCP input schemas, engine-owned inference hooks, compaction lifecycle callbacks, full evaluator-source provenance, Agent model choices and pinned teammate models need host support. The current behavior and specific API requests are documented in [Host limits](docs/host-limits.md).
 - **A long step shows a stale label.** After a compaction or a subagent spawn the engine's spinner keeps reading "Running SessionStart hooks..." for the whole next routed step, which can take minutes on a large context. The session is working; the label is the engine's.
@@ -256,8 +259,7 @@ attempted. This metadata omits endpoint URLs and credential references; live
 Claude account access is verified only if that fallback is used. Safe debug
 messages identify the stage that answered. The same doctor/status object now
 includes ordered fetch tiers, safe configured service names and priorities,
-configuration-read status, and readiness notes for Claude Code native WebFetch
-and direct retrieval with selected-model extraction. No endpoint URL or auth
+configuration-read status, and readiness notes for the final Claude Code native WebFetch stage. No endpoint URL or auth
 reference is returned. See the [provider research](docs/research/provider-web-search-20261016.md).
 
 ## WebFetch
@@ -266,8 +268,9 @@ WebFetch follows this order and stops at the first successful result:
 
 1. **Provider hosted fetch**, only where a supported protocol and exact official endpoint provide it. This mod supports Anthropic Messages `web_fetch` at `https://api.anthropic.com` and Google Gemini GenerateContent URL Context at `https://generativelanguage.googleapis.com`. A compatible server hosted elsewhere is not assumed to implement either tool.
 2. **Configured fetch services**, tried serially by ascending priority.
-3. **Claude Code native WebFetch**, using the current session's host authorization and HTTP handle.
-4. **`direct-selected-extraction`**, only after Claude Code native WebFetch is unavailable. The mod resolves the page destination, rejects non-public addresses, pins each connection to a checked address, manually follows and rechecks redirects, bounds the response, then asks the selected provider to extract from the fetched text. This is a recovery tier, not provider-native fetch: the mod itself retrieves the page.
+3. **Claude Code native WebFetch LAST**, using the current session's host authorization and HTTP handle. Failure is terminal; no direct retrieval or selected-model extraction runs afterward.
+
+The helper retains an explicit `web-fetch-direct` action for callers deliberately arranging a retrieval stage before native fallback. It is not enabled by default, is not labeled provider-native, and no user configuration is migrated. It retains public-address checks, pinned destinations, redirect rechecks, bounded responses and selected-provider extraction.
 
 Claude Code's native permission processing still runs first. The hook gates the exact checked WebFetch input before replacing the engine implementation. A broad permission rule or a URL supplied by a caller does not skip that native gate. An unsafe or unresolved destination fails closed. Provider output that has started is not switched to another tier after a later provider error. Valid empty page content is a successful terminal result.
 
@@ -313,7 +316,7 @@ Save version 1 configuration in `<CLAUDE_CONFIG_DIR>/rice-multi-models/fetch.jso
 
 `auth` may reference an environment variable by name or an absolute credential-helper command. The referenced secret value is read only at request time, is sent only to that endpoint as a Bearer token, and is not returned by status state. Authenticated endpoints must use HTTPS. Do not put a credential value in the JSON file or URL. Endpoint priorities are nonnegative integers; ties retain file order. An empty `content` string is a valid success and prevents later services from being tried.
 
-The pure hook-side state interface is exported from `hooks/fetch-config.ts` as `fetchTierConfigState(config, providerNative)`. It accepts endpoint metadata and a boolean indicating whether the selected route passes the local protocol eligibility checks. It always reports all four runtime tiers, with `eligible: false` and a skip reason for provider-native fetch when the route does not qualify. Configured service names and priorities are ordered without endpoint URLs, credential references or values. Provider/account model support is not claimed unless confirmed by the actual request. The final two entries are always `native-fallback` and `direct-selected-extraction`.
+The pure hook-side state interface is exported from `hooks/fetch-config.ts` as `fetchTierConfigState(config, providerNative)`. It accepts endpoint metadata and a boolean indicating whether the selected route passes the local protocol eligibility checks. It always reports the three runtime tiers, with `eligible: false` and a skip reason for provider-native fetch when the route does not qualify. Configured service names and priorities are ordered without endpoint URLs, credential references or values. Provider/account model support is not claimed unless confirmed by the actual request. The final entry is always `native-fallback`.
 
 Protocol support is intentionally narrow. Anthropic Messages has a hosted `web_fetch` server tool. Gemini URL Context retrieves supplied URLs and returns model-generated text with URL retrieval metadata, rather than raw page text. OpenAI Responses web search is not treated as arbitrary URL fetch. OpenCode's `webfetch` is an application tool, and Ollama's web fetch is a separate REST endpoint; neither is a provider-protocol tool in this chain. The current Bedrock Converse adapter has no hosted fetch contract. Bedrock Mantle Responses is a separate API surface.
 

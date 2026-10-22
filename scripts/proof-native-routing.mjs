@@ -39,8 +39,9 @@ try {
       // value is fixed to isolate whether legacy picker migration lets the
       // real engine honor its documented context override.
       await $.env.set('CLAUDE_CODE_MAX_CONTEXT_TOKENS', '500000')
-      const completion = await $.model.complete({ model: 'haiku', prompt: 'One word' })
-      const classification = await $.model.classify('A broken feature', ['bug', 'question'])
+      const completion = await $.model.complete({ model: 'codex/fresh-native', prompt: 'One word' })
+      const nativeCompletion = await $.model.complete({ model: 'haiku', prompt: 'Explicit native route' })
+      const classification = await $.model.classify('A broken feature', ['bug', 'question'], { model: 'codex/fresh-native' })
       answer = JSON.stringify({ nativeWindow: (await $.session.usage()).context.window,
       completion: completion.isAnswered ? completion.text : completion.reason,
       classification, auxiliaryTargets: proofTargets, nativeCompletions: proofNative })
@@ -64,7 +65,7 @@ export const register: Register = on => {`)
   on('process.run', async ($, e, next) => {
     if (!e.argv.includes('discover')) return next(e)
     const metadata = { contextWindow: 500000, maxContextWindow: 872000, inputTokenLimit: null, outputTokenLimit: null, autoCompactTokenLimit: null, inputModalities: ['text'], reasoningEfforts: null, tools: null, parallelToolCalls: null }
-    const catalogue = { models: [{ model: 'codex/fresh-native', label: 'Fresh (Codex)', execution: 'native provider', source: 'fixture', observedAt: 1800000000000, metadata }], providers: [{ provider: 'codex', status: 'fresh', source: 'fixture', observedAt: 1800000000000 }] }
+    const catalogue = { models: [{ model: 'codex/fresh-native', label: 'Fresh (Codex)', execution: 'native provider', source: 'fixture', observedAt: Date.now(), metadata }], providers: [{ provider: 'codex', status: 'fresh', source: 'fixture', observedAt: Date.now() }] }
     return { value: { exitCode: 0, stdout: JSON.stringify(catalogue), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('process.spawn', async function* ($, e, next) {
@@ -91,7 +92,7 @@ export const register: Register = on => {`)
   assert.equal(observed.completion, 'bug')
   assert.equal(observed.classification, 'bug')
   assert.deepEqual(observed.auxiliaryTargets, ['codex/fresh-native', 'codex/fresh-native'])
-  assert.equal(observed.nativeCompletions, 0)
+  assert.equal(observed.nativeCompletions, 1, 'explicit native model stays native, never silently replaced by the main provider')
   process.stdout.write(JSON.stringify(observed) + '\n')
 } finally {
   rmSync(fixture, { recursive: true, force: true })

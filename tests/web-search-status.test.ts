@@ -24,7 +24,7 @@ test('doctor web-search metadata uses configured order and never returns endpoin
     { order: 4, name: 'legacy-environment', kind: 'searxng', priority: null },
   ])
   expect(status.claudeFallback).toMatchObject({ available: true })
-  expect(status.fetchTierState.tiers.map(tier => tier.stage)).toEqual(['provider-native', 'configured-service', 'native-fallback', 'direct-selected-extraction'])
+  expect(status.fetchTierState.tiers.map(tier => tier.stage)).toEqual(['provider-native', 'configured-service', 'native-fallback'])
   expect(status.fetchTierState.tiers[0]).toMatchObject({ eligible: false })
   expect(status.fetchConfiguration).toEqual({ available: true, error: null })
   const safe = JSON.stringify(status)
@@ -50,8 +50,7 @@ test('fetch diagnostics expose safe configured services and honest fallback read
   expect(state.tiers).toEqual([
     { order: 1, stage: 'provider-native', eligible: true, reason: 'The selected route passes local provider protocol checks; model or account support may still be rejected by the provider.' },
     { order: 2, stage: 'configured-service', eligible: true, reason: 'Configured services are tried serially by ascending priority; reachability is not checked by status.', services: [{ name: 'first', priority: 1 }, { name: 'later', priority: 20 }] },
-    { order: 3, stage: 'native-fallback', eligible: true, reason: 'Claude Code native WebFetch is attempted before direct retrieval.', readiness: 'Session authorization and account WebFetch support are checked only if this tier is used.' },
-    { order: 4, stage: 'direct-selected-extraction', eligible: true, reason: 'Final recovery retrieves the page directly, then extracts with the selected model.' },
+    { order: 3, stage: 'native-fallback', eligible: true, reason: 'Claude Code native WebFetch is the final fallback. Failure is terminal; no hidden retrieval runs afterward.', readiness: 'Session authorization and account WebFetch support are checked only if this tier is used.' },
   ])
   expect(status.fetchConfiguration).toEqual({ available: false, error: 'Fetch configuration could not be read.' })
   const safe = JSON.stringify(status)

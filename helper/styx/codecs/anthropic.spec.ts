@@ -208,7 +208,7 @@ test('an error event ends the reading with one line; nothing after it is read, a
 
 test('a stream that ends inside a tool call, before a stop reason, or on broken data is an error and holds no tool_use', () => {
   expect<unknown>(run(sse(START, tool(0), json(0, '{"a":'))).events).toEqual([failed('the stream ended inside a tool call')])
-  expect<unknown>(run(sse(START, tool(0), json(0, '{"a":'), ...END('tool_use'))).events).toEqual([failed('the stream ended inside a tool call')])
+  expect<unknown>(run(sse(START, tool(0), json(0, '{"a":'), ...END('tool_use'))).events).toEqual([{ type: 'usage', in: 0, out: 5, cacheRead: 0, cacheWrite: 0 }, failed('the stream ended inside a tool call')])
   expect<unknown>(run(sse(START, tool(0, 'Read'), json(0, '{}'), stop(0))).events).toEqual([{ type: 'tool_use', id: 'toolu_rice_x', name: 'Read', input: {} }, failed('the stream ended with no stop reason')])
   expect(run(`${sse(START, tool(0))}data: {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_del`).events.map(e => e.type)).toEqual(['error'])
   expect<unknown>(run('data: [1]\n\n').events).toEqual([failed('unparseable stream data: [1]')])

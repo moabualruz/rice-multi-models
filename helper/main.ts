@@ -17,6 +17,8 @@ import { fetchConfigurationSnapshot } from './fetch-services.ts'
 import { runToolSearch } from './search/tool-search.ts'
 import { runDirectWebFetch, runWebFetch } from './web-fetch.ts'
 import { captureCompaction } from './native-compaction.ts'
+import { captureClassifier } from './native-classify.ts'
+import { captureEvaluator } from './native-evaluator.ts'
 import { captureTools } from './native-tools.ts'
 import { resolveAndCheck } from './native/destination.ts'
 
@@ -127,7 +129,7 @@ export async function main(lifetime?: AbortSignal): Promise<void> {
       lifetime?.removeEventListener('abort', abort)
       for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.off(signal, abort)
     }
-  } else if (mode === 'capture-compaction' || mode === 'capture-tools') {
+  } else if (mode === 'capture-compaction' || mode === 'capture-tools' || mode === 'capture-classifier' || mode === 'capture-evaluator') {
     // The installed claude's own compaction text, or its tool definitions and agent prompts for the session's
     // built-in tools; the caller caches them per version. Ending the session stops it.
     const controller = new AbortController()
@@ -137,6 +139,12 @@ export async function main(lifetime?: AbortSignal): Promise<void> {
     if (lifetime?.aborted) abort()
     try {
       if (mode === 'capture-compaction') process.stdout.write(`${JSON.stringify({ ok: true, template: await captureCompaction(controller.signal) })}\n`)
+      else if (mode === 'capture-classifier') process.stdout.write(`${JSON.stringify({ ok: true, template: await captureClassifier(controller.signal) })}\n`)
+      else if (mode === 'capture-evaluator') {
+        const input = JSON.parse(await readStdin()) as { event?: unknown }
+        if (input.event !== 'Stop' && input.event !== 'SubagentStop') throw new Error('Invalid native evaluator event.')
+        process.stdout.write(`${JSON.stringify({ ok: true, template: await captureEvaluator(input.event, controller.signal) })}\n`)
+      }
       else {
         const input = JSON.parse(await readStdin()) as { tools?: unknown }
         if (!Array.isArray(input.tools) || !input.tools.every(name => typeof name === 'string')) throw new Error('capture-tools reads {"tools": [names]} from its standard input')

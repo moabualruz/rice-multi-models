@@ -6499,7 +6499,7 @@ async function* codexStep(req, model2, signal, options = {}) {
             await waitForRetry(delay, signal);
             continue;
           }
-          queue.push({ type: "error", kind: error instanceof UpstreamError || error instanceof CodexAuthError ? "request" : "response", text: finalText(failure, attempt) });
+          queue.push({ type: "error", kind: error instanceof UpstreamError || error instanceof CodexAuthError ? "request" : "response", text: finalText(failure, attempt), ...failure.info.status === void 0 ? {} : { status: failure.info.status }, ...signal.aborted ? { aborted: true } : {} });
           return;
         }
       }
@@ -6508,7 +6508,7 @@ async function* codexStep(req, model2, signal, options = {}) {
         event: signal.aborted ? "request.aborted" : error instanceof CodexAuthError ? "auth.error" : "request.admission",
         code: signal.aborted ? "aborted" : error instanceof CodexAuthError ? "codex-auth" : "account-limit"
       });
-      queue.push({ type: "error", kind: "request", text: finalText(failure, attempts) });
+      queue.push({ type: "error", kind: "request", text: finalText(failure, attempts), ...signal.aborted ? { aborted: true } : {} });
     } finally {
       release?.();
       queue.close();
@@ -7753,13 +7753,14 @@ function assembler(codec, provider2, ids, mint = mintToolId) {
     },
     // `cut` is the transport's failure text, when the response was cut short.
     end(p, cut) {
-      if (cut !== void 0) return { events: [{ type: "error", kind: "request", text: cut }], finish: "error" };
+      const received = usage === void 0 ? [] : [{ type: "usage", ...usage }];
+      if (cut !== void 0) return { events: [...received, { type: "error", kind: "request", text: cut }], finish: "error" };
       if (failure !== void 0) {
         const text2 = `rice-multi-models: ${p.id} response failed: ${oneLine(errorDetail(failure).message, 300)}; retry, or see the debug log`;
-        return { events: [{ type: "error", kind: "response", text: text2 }], finish: "error" };
+        return { events: [...received, { type: "error", kind: "response", text: text2 }], finish: "error" };
       }
       const reason = own(codec.stops, finish ?? "stop");
-      const events = [...usage === void 0 ? [] : [{ type: "usage", ...usage }], { type: "stop", reason: reason ?? "end_turn" }];
+      const events = [...received, { type: "stop", reason: reason ?? "end_turn" }];
       return { events, finish: finish ?? "none", ...reason === void 0 ? { note: `finish_reason "${finish}" read as end_turn` } : {} };
     },
     failed: () => failure !== void 0,
@@ -7806,7 +7807,7 @@ function createStepper(env) {
       );
       return [...events, st];
     };
-    const refuse = (text2) => close([{ type: "error", kind: "request", text: text2 }], "error");
+    const refuse = (text2, status2) => close([{ type: "error", kind: "request", text: text2, ...status2 === void 0 ? {} : { status: status2 } }], "error");
     if (t?.kind !== "remote") return yield* refuse(`rice-multi-models: ${req.target} is not configured in this session; run /rice-models reload`);
     const { provider: p, model: m } = t;
     const owner = `${p.id}/${m.id}`;
@@ -7845,7 +7846,7 @@ function createStepper(env) {
     }
     if ("cut" in answer) return signal.aborted ? void close([], "aborted") : yield* refuse(cutText(p, answer.cut));
     http = String(answer.status);
-    if (answer.status < 200 || answer.status > 299) return yield* refuse(httpErrorText(p, answer.status, await errorBody(answer), m.id));
+    if (answer.status < 200 || answer.status > 299) return yield* refuse(httpErrorText(p, answer.status, await errorBody(answer), m.id), answer.status);
     const decoder6 = codec.decoder();
     const asm = assembler(codec, p.id, ids);
     let cut;
@@ -9962,7 +9963,8 @@ function createDirectWebFetch(ports = {}) {
   };
 }
 var runWebFetch = createWebFetch();
-var runDirectWebFetch = createDirectWebFetch();
+var runPreNativeDirectWebFetch = createDirectWebFetch();
+var runDirectWebFetch = runPreNativeDirectWebFetch;
 
 // hooks/native-compaction.ts
 var TRANSCRIPT_TOKEN = "{{transcript}}";
@@ -10143,7 +10145,17 @@ async function runNative(options) {
     for (const name of KEPT_ENV) if (process.env[name] !== void 0) env[name] = process.env[name];
     Object.assign(env, { HOME: root, USERPROFILE: root, CLAUDE_CONFIG_DIR: config, ANTHROPIC_API_KEY: NOT_A_KEY, ANTHROPIC_BASE_URL: `http://127.0.0.1:${address2.port}`, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", DISABLE_AUTOUPDATER: "1" });
     const installed = await version(env, root, signal);
-    const command = claude(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--setting-sources", "user", ...options.args ?? []]);
+    const pluginArgs = [];
+    if (options.pluginSource !== void 0) {
+      const plugin = path6.join(root, "contract-mod");
+      await mkdir4(path6.join(plugin, ".claude-plugin"), { recursive: true });
+      await mkdir4(path6.join(plugin, "hooks"));
+      await writeFile2(path6.join(plugin, ".claude-plugin/plugin.json"), JSON.stringify({ name: "owned-contract-capture", version: "1.0.0", description: "Isolated native contract capture" }));
+      await writeFile2(path6.join(plugin, "hooks/hooks.json"), JSON.stringify({ modules: ["./register.js"] }));
+      await writeFile2(path6.join(plugin, "hooks/register.js"), options.pluginSource);
+      pluginArgs.push("--plugin-dir", plugin);
+    }
+    const command = claude(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--setting-sources", "user", ...pluginArgs, ...options.args ?? []]);
     child = spawn4(command.file, command.args, { cwd: root, env, signal, windowsHide: true, detached: process.platform !== "win32", stdio: ["pipe", "pipe", "ignore"] });
     const running = child;
     const { script } = options;
@@ -10225,6 +10237,76 @@ ${SUMMARY_MARK}
   if (!summary) throw new Error("the installed claude wrote no compaction summary row");
   const transcriptPath = /read the full transcript at: (.+)/.exec(summary)?.[1]?.trim() ?? "";
   return deriveTemplate({ version: run2.version, plain: prompts[0], custom: prompts[1], summaryMessage: summary, transcriptPath });
+}
+
+// hooks/native-classify.ts
+var CLASSIFY_TEXT_MARK = "RICE_CLASSIFY_OWNED_TEXT_42";
+var CLASSIFY_LABELS = ["RICE_CLASSIFY_LABEL_A_42", "RICE_CLASSIFY_LABEL_B_42"];
+function isClassifyTemplate(value) {
+  if (!value || typeof value !== "object") return false;
+  const v = value;
+  const pair = (a) => Array.isArray(a) && a.length === 2 && a.every((item) => typeof item === "string");
+  return typeof v.version === "string" && pair(v.system) && pair(v.prompt) && Number.isSafeInteger(v.maxTokens) && v.maxTokens > 0 && v.maxTokens <= 64e3;
+}
+function deriveClassifier(version2, system, prompt, maxTokens) {
+  const labelSlot = CLASSIFY_LABELS.map((label) => JSON.stringify(label)).join(", ");
+  const systemParts = system.split(labelSlot);
+  const promptParts = prompt.split(CLASSIFY_TEXT_MARK);
+  const template = { version: version2, system: systemParts, prompt: promptParts, maxTokens };
+  if (!isClassifyTemplate(template) || !promptParts[0]?.endsWith("> ")) throw new Error("The native classifier contract has an unsupported shape.");
+  return template;
+}
+
+// helper/native-classify.ts
+async function captureClassifier(signal) {
+  const source = `export const register=on=>{on('turn.step',async function*($,e){await $.model.classify(${JSON.stringify(CLASSIFY_TEXT_MARK)},${JSON.stringify(CLASSIFY_LABELS)},{model:'haiku'});yield{kind:'text',index:0,text:'OWNED_DONE'};yield{kind:'stop',stopReason:'end_turn',usage:null};return{turnId:e.turnId,index:e.index,answer:'OWNED_DONE',toolUses:[],stopReason:'end_turn',usage:null};});};`;
+  const run2 = await runNative({ label: "classifier", script: ["Owned native classifier contract"], pluginSource: source, answer: () => ({ text: CLASSIFY_LABELS[0] }), signal });
+  const requests2 = run2.requests.filter((request3) => textOf(request3.messages && Array.isArray(request3.messages) ? request3.messages[0]?.content : void 0).includes(CLASSIFY_TEXT_MARK));
+  if (requests2.length !== 1) throw new Error("The installed host did not expose one native classifier request.");
+  const request2 = requests2[0];
+  if (!Array.isArray(request2.system) || !Array.isArray(request2.messages)) throw new Error("The installed classifier request cannot be read.");
+  const system = request2.system.map((block) => textOf([block])).filter((text2) => !text2.startsWith("x-anthropic-billing-header:")).join("\n\n");
+  return deriveClassifier(run2.version, system, textOf(request2.messages[0]?.content), Number(request2.max_tokens));
+}
+
+// hooks/native-evaluator.ts
+var EVALUATOR_MARK = "RICE_OWNED_EVALUATOR_CONDITION_42";
+function isEvaluatorTemplate(value) {
+  if (!value || typeof value !== "object") return false;
+  const v = value;
+  return typeof v.version === "string" && ["Stop", "SubagentStop"].includes(v.event) && typeof v.system === "string" && v.system.length > 0 && typeof v.prefix === "string" && v.prefix.length > 0 && Number.isSafeInteger(v.maxTokens) && v.maxTokens > 0 && !!v.outputSchema && typeof v.outputSchema === "object" && !Array.isArray(v.outputSchema);
+}
+
+// helper/native-evaluator.ts
+async function captureEvaluator(event, signal) {
+  let spawned = false;
+  const run2 = await runNative({
+    label: "evaluator-contract",
+    script: ["OWNED_NATIVE_EVALUATOR_MAIN"],
+    signal,
+    files: { "settings.json": JSON.stringify({ hooks: { [event]: [{ hooks: [{ type: "prompt", prompt: EVALUATOR_MARK + " $ARGUMENTS", timeout: 15 }] }] } }) },
+    answer: (request3) => {
+      const messages = request3.messages;
+      const last = textOf(messages?.at(-1)?.content);
+      if (last.includes(EVALUATOR_MARK)) return { text: '{"ok":true,"reason":"owned capture evidence"}' };
+      if (event === "SubagentStop" && !spawned && JSON.stringify(messages).includes("OWNED_NATIVE_EVALUATOR_MAIN")) {
+        spawned = true;
+        return { toolUses: [{ id: "toolu_owned_evaluator_child", name: "Agent", input: { subagent_type: "general-purpose", description: "Owned evaluator capture", prompt: "OWNED_NATIVE_EVALUATOR_CHILD", run_in_background: false } }] };
+      }
+      return { text: "OWNED_NATIVE_EVALUATOR_DONE" };
+    }
+  });
+  const requests2 = run2.requests.filter((request3) => Array.isArray(request3.messages) && textOf(request3.messages.at(-1)?.content).includes(EVALUATOR_MARK));
+  if (requests2.length !== 1) throw new Error("The installed host did not expose one native evaluator contract.");
+  const request2 = requests2[0];
+  const systems = request2.system;
+  const system = systems?.map((block) => block.text ?? "").find((text2) => text2.includes("You are evaluating a stop-condition hook"));
+  const prompt = textOf(request2.messages.at(-1)?.content);
+  const prefix = prompt.split(EVALUATOR_MARK)[0];
+  const output = request2.output_config;
+  const template = { version: run2.version, event, system, prefix, maxTokens: Number(request2.max_tokens), outputSchema: output?.format?.schema };
+  if (!isEvaluatorTemplate(template)) throw new Error("The installed evaluator contract has an unsupported shape.");
+  return template;
 }
 
 // hooks/native-tools.ts
@@ -10465,7 +10547,7 @@ async function main(lifetime) {
       lifetime?.removeEventListener("abort", abort);
       for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.off(signal, abort);
     }
-  } else if (mode === "capture-compaction" || mode === "capture-tools") {
+  } else if (mode === "capture-compaction" || mode === "capture-tools" || mode === "capture-classifier" || mode === "capture-evaluator") {
     const controller = new AbortController();
     const abort = () => controller.abort();
     for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, abort);
@@ -10474,7 +10556,14 @@ async function main(lifetime) {
     try {
       if (mode === "capture-compaction") process.stdout.write(`${JSON.stringify({ ok: true, template: await captureCompaction(controller.signal) })}
 `);
-      else {
+      else if (mode === "capture-classifier") process.stdout.write(`${JSON.stringify({ ok: true, template: await captureClassifier(controller.signal) })}
+`);
+      else if (mode === "capture-evaluator") {
+        const input = JSON.parse(await readStdin());
+        if (input.event !== "Stop" && input.event !== "SubagentStop") throw new Error("Invalid native evaluator event.");
+        process.stdout.write(`${JSON.stringify({ ok: true, template: await captureEvaluator(input.event, controller.signal) })}
+`);
+      } else {
         const input = JSON.parse(await readStdin());
         if (!Array.isArray(input.tools) || !input.tools.every((name) => typeof name === "string")) throw new Error('capture-tools reads {"tools": [names]} from its standard input');
         process.stdout.write(`${JSON.stringify({ ok: true, capture: await captureTools(input.tools, controller.signal) })}

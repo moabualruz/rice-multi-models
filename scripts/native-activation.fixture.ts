@@ -92,8 +92,8 @@ test('native startup refreshes catalogue and exposes factual metadata without a 
   const switchRequest = { from_model: 'sonnet', to_model: 'codex/fresh-native', requested_model: 'codex/fresh-native', source: 'sdk', context_tokens: 500001, prompt_cache_warm: false, cache_ttl: '1h', estimated_cache_write_usd: 0, pricing: 'default' } as const
   const denied = await $.classic.PreModelSwitch(switchRequest)
   expect(denied.permissionDecision).toBe('deny')
-  expect(denied.permissionDecisionReason).toContain('500000 token')
-  const allowed = await $.classic.PreModelSwitch({ ...switchRequest, context_tokens: 500000 })
+  expect(denied.permissionDecisionReason).toContain('495904 token')
+  const allowed = await $.classic.PreModelSwitch({ ...switchRequest, context_tokens: 495904 })
   expect(allowed.permissionDecision).toBe('allow')
   expect(contextWrites).toEqual(['500000'])
   selectedModel = 'sonnet'

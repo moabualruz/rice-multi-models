@@ -1,16 +1,27 @@
 import type { EngineInterface, On } from 'claude-code'
 import { commandHookResult, planStopEvaluators, runStopEvaluators } from './evaluators'
 import type { EvaluatorCompletion, EvaluatorEvent, EvaluatorOwner, EvaluatorSource, PlannedCommand, PlannedEvaluator } from './evaluators'
-import type { StepRequest } from './protocol'
+import type { ApiMessage, StepRequest } from './protocol'
+import { isEvaluatorTemplate } from './native-evaluator'
+import type { EvaluatorContext } from './native-evaluator'
 import type { HelperPort } from './backend'
 import { TRUST_PREFIX } from './providers'
 import { pluginHookConflict } from './evaluator-coverage'
+
+export type EvaluatorCapacityPort = {
+  now: number
+  helper: string
+  approved: readonly string[]
+  run(argv: readonly string[], options: { stdin: string; timeoutMs: number }): Promise<{ exitCode: number; stdout: string }>
+}
 
 export type EvaluatorRuntimePorts = {
   /** Null is a verified native owner; unresolved routed ownership must throw. */
   owner(context: { agentId?: string; mainModel: string; session: string }): Promise<EvaluatorOwner | null>
   complete(port: HelperPort, request: StepRequest, approved: readonly string[], timeoutMs: number, signal: AbortSignal): Promise<EvaluatorCompletion>
   node(): Promise<string>
+  outputLimit(model: string): number
+  refreshCapacity(port: EvaluatorCapacityPort): Promise<void>
   /** Additional loaded definitions, obtained from actual public event metadata. */
   sources?(event: EvaluatorEvent): Promise<{ sources: EvaluatorSource[]; errors?: string[] }>
 }
@@ -98,6 +109,23 @@ async function hiddenSource($: EngineInterface, event: EvaluatorEvent, state: Ru
   return pluginHookConflict(name, { configDir: configDir.replace(/[\\/]+$/, ''), enabledPlugins: (effective.enabledPlugins ?? {}) as Record<string, unknown>, ownPlugin: $.plugin.name, observedModules: new Set(state.moduleEvents.keys()), exists: path => $.fs.exists(path), read: path => $.fs.read(path) })
 }
 
+async function evaluatorContext($: EngineInterface, event: EvaluatorEvent, owner: EvaluatorOwner, node: string, maxTokens: number): Promise<EvaluatorContext> {
+  const version = (await $.session.version()).version
+  const key = `native-evaluator:${version}:${event.hook_event_name}`
+  let template = await $.store.get(key)
+  if (!isEvaluatorTemplate(template) || template.version !== version || template.event !== event.hook_event_name) {
+    const ran = await $.process.run([node, `${$.plugin.root}/dist/helper.mjs`, 'capture-evaluator'], { stdin: JSON.stringify({ event: event.hook_event_name }), timeoutMs: 100_000 })
+    const result = JSON.parse(ran.stdout) as { ok?: boolean; template?: unknown }
+    if (ran.exitCode !== 0 || !result.ok || !isEvaluatorTemplate(result.template) || result.template.version !== version || result.template.event !== event.hook_event_name) throw new Error('The native evaluator contract could not be captured for this host version and event.')
+    template = result.template
+    await $.store.set(key, template)
+  }
+  if (!isEvaluatorTemplate(template)) throw new Error('The native evaluator contract is invalid.')
+  const transcript = await $.session.messages({ as: 'api', ...(owner.who === 'main' ? {} : { agentId: owner.who }) })
+  if (!Array.isArray(transcript)) throw new Error('The evaluator owner transcript is unavailable; its condition was not assumed satisfied.')
+  return { template, transcript: transcript as ApiMessage[], maxTokens }
+}
+
 async function evaluate($: EngineInterface, event: EvaluatorEvent, signal: AbortSignal, ports: EvaluatorRuntimePorts, state: RuntimeState) {
   const owner = await ownerOf($, typeof event.agent_id === 'string' ? event.agent_id : undefined, ports)
   if (!owner) return undefined
@@ -118,7 +146,12 @@ async function evaluate($: EngineInterface, event: EvaluatorEvent, signal: Abort
     $.ui.log(`${$.plugin.name}: ${event.hook_event_name} evaluators run natively because ${hidden}`, { to: 'debug' })
     return undefined
   }
+  // Contract capture and transcript ownership failures stop the replacement before any
+  // configured source is run. They must not be mistaken for a satisfied condition.
+  await ports.refreshCapacity({ now: await $.clock.now(), helper: `${$.plugin.root}/dist/helper.mjs`, approved: await grants($), run: (argv, options) => $.process.run(argv, options) })
+  const context = await evaluatorContext($, event, owner, node, ports.outputLimit(owner.target))
   const result = await runStopEvaluators(plan, event, owner, {
+    context: async () => context,
     command: (hook, input) => command($, hook, input, node),
     prompt: async (hook, request, cancellation) => ports.complete(selectedPort($, node, hook.timeoutMs), request, await grants($), hook.timeoutMs, cancellation),
   }, signal)

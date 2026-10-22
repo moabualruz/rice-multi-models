@@ -67,6 +67,16 @@ test('long tool outputs are shortened before anything is left out', () => {
   expect(JSON.stringify(fitted.messages)).toContain('characters omitted')
 })
 
+test('repeated fitting reports omissions against original content, not a prior clipped marker', () => {
+  const messages = [user('task'), call('a'), result('a', 'x'.repeat(100_000)), user('next')]
+  const fitted = fitTranscript(messages, 12_000)
+  expect(fitted.fits).toBe(true)
+  expect(fitted.omitted).toBe(0)
+  expect(fitted.clipped).toBe(1)
+  expect(JSON.stringify(fitted.messages)).toContain('94000 characters omitted')
+  expect(JSON.stringify(messages)).not.toContain('characters omitted')
+})
+
 test('the oldest exchanges are left out whole, the task stays, and no result loses its call', () => {
   const messages: ApiMessage[] = [user('the task')]
   for (let i = 0; i < 20; i++) messages.push(call(`c${i}`), result(`c${i}`, `out ${i} ${'y'.repeat(1_500)}`))

@@ -91,10 +91,10 @@ export type SpawnDecision = { model?: string; family: string; explicit: boolean;
 export function spawnDecision(input: SpawnInput, tiers: TierMap, ports: FamilyPorts): SpawnDecision {
   const parentFamily = familyOf(input.parentModel, ports)
   if (input.fork) return { family: parentFamily, explicit: false, reason: 'forks inherit their parent model' }
-  if (input.requested !== undefined && ports.isRouted(input.requested)) return { model: input.requested, family: familyOf(input.requested, ports), explicit: true, reason: 'an explicit routed model was requested' }
-  if (input.definitionModel !== undefined && ports.isRouted(input.definitionModel)) return { model: input.definitionModel, family: familyOf(input.definitionModel, ports), explicit: true, reason: 'the agent definition names a routed model' }
-  if (parentFamily === CLAUDE_FAMILY) return { family: CLAUDE_FAMILY, explicit: false, reason: 'the parent runs on Claude' }
   const tier = input.requested ?? input.definitionModel
+  if (tier !== undefined && ports.isRouted(tier)) return { model: tier, family: familyOf(tier, ports), explicit: true, reason: input.requested === undefined ? 'the agent definition names a routed model' : 'an explicit routed model was requested' }
+  if (tier !== undefined && tier !== 'inherit' && !isNativeAlias(tier)) return { family: CLAUDE_FAMILY, explicit: true, reason: 'an explicit native model was requested' }
+  if (parentFamily === CLAUDE_FAMILY) return { family: CLAUDE_FAMILY, explicit: false, reason: 'the parent runs on Claude' }
   const model = tierModel(parentFamily, tier === 'inherit' ? undefined : tier, input.parentModel, tiers, ports)
   return model === undefined
     ? { family: parentFamily, explicit: false, reason: `no ${parentFamily} model is available` }

@@ -29,11 +29,11 @@ test('bad schema, duplicate names, inline credentials and URL query values fail 
 test('tier state is pure, priority ordered and never reveals endpoints or authentication references', () => {
   const parsed = parseFetchConfig(source)
   const state = fetchTierConfigState(parsed.config, true)
-  expect(state.tiers.map(tier => tier.stage)).toEqual(['provider-native', 'configured-service', 'native-fallback', 'direct-selected-extraction'])
+  expect(state.tiers.map(tier => tier.stage)).toEqual(['provider-native', 'configured-service', 'native-fallback'])
   expect(state.tiers[0]).toMatchObject({ order: 1, eligible: true })
   expect(state.tiers[1]).toMatchObject({ order: 2, eligible: true, services: [{ name: 'first', priority: 10 }, { name: 'second', priority: 20 }] })
   expect(state.tiers[2]).toMatchObject({ order: 3, eligible: true, readiness: expect.any(String) })
-  expect(state.tiers[3]).toMatchObject({ order: 4, eligible: true })
+  expect(state.tiers).toHaveLength(3)
   const safe = JSON.stringify(state)
   for (const sensitive of ['FETCH_SECOND_KEY', '/usr/bin/credential-helper', 'fetch.example']) expect(safe).not.toContain(sensitive)
   expect(fetchTierConfigState(parsed.config, false).tiers[0]).toMatchObject({ order: 1, stage: 'provider-native', eligible: false })

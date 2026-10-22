@@ -26,7 +26,7 @@ try {
   on('process.run', async ($, e, next) => {
     if (!e.argv.includes('discover')) return next(e)
     const metadata={contextWindow:500000,maxContextWindow:500000,inputTokenLimit:null,outputTokenLimit:32768,autoCompactTokenLimit:null,inputModalities:['text'],reasoningEfforts:null,tools:null,parallelToolCalls:null}
-    return {value:{exitCode:0,stdout:JSON.stringify({models:[{model:'codex/owned-public',label:'Owned',execution:'native provider',source:'owned fixture',observedAt:1800000000000,metadata}],providers:[{provider:'codex',status:'fresh',source:'owned fixture'}]}),stderr:'',isStdoutTruncated:false,isStderrTruncated:false}}
+    return {value:{exitCode:0,stdout:JSON.stringify({models:[{model:'codex/owned-public',label:'Owned',execution:'native provider',source:'owned fixture',observedAt:Date.now(),metadata}],providers:[{provider:'codex',status:'fresh',source:'owned fixture'}]}),stderr:'',isStdoutTruncated:false,isStderrTruncated:false}}
   })
   on('process.spawn', async function* ($, e, next) {
     if (!e.argv.includes('once')) return yield* next(e)

@@ -71,7 +71,7 @@ export function fetchProviderProtocol(modelKind: string | undefined, baseUrl: st
   return undefined
 }
 
-export type FetchTierStage = 'provider-native' | 'configured-service' | 'native-fallback' | 'direct-selected-extraction'
+export type FetchTierStage = 'provider-native' | 'configured-service' | 'native-fallback'
 export type FetchTierConfigState = { tiers: Array<{
   order: number
   stage: FetchTierStage
@@ -92,8 +92,7 @@ export function fetchTierConfigState(config: FetchConfigMetadata, providerNative
     { order: 2, stage: 'configured-service', eligible: services.length > 0, reason: services.length
       ? 'Configured services are tried serially by ascending priority; reachability is not checked by status.'
       : 'No configured fetch services are available.', services },
-    { order: 3, stage: 'native-fallback', eligible: true, reason: 'Claude Code native WebFetch is attempted before direct retrieval.',
+    { order: 3, stage: 'native-fallback', eligible: true, reason: 'Claude Code native WebFetch is the final fallback. Failure is terminal; no hidden retrieval runs afterward.',
       readiness: 'Session authorization and account WebFetch support are checked only if this tier is used.' },
-    { order: 4, stage: 'direct-selected-extraction', eligible: true, reason: 'Final recovery retrieves the page directly, then extracts with the selected model.' },
   ] }
 }

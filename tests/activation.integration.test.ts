@@ -83,7 +83,7 @@ function fixture() {
     agent: { register: async () => ({}), list: async () => [] },
     store: { keys: async () => [...store.keys()], get: async (key: string) => store.get(key), set: async (key: string, value: unknown) => { store.set(key, value) } },
     ui: { log: (text: string, options: any) => { if (options?.to !== 'debug') notices.push(text) }, ask: async () => { throw new Error('Onboarding must never ask') }, status: () => {}, toast: () => {} },
-    clock: { now: async () => Date.now(), sleep: async () => {} },
+    clock: { now: async () => 1_800_000_000_000, sleep: async () => {} },
     session: { id: async () => 'empty-session', model: async () => selection.model, usage: async () => ({ context: { window: Number(env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS') ?? 200000) } }), version: async () => ({ version: '2.1.296' }), isInteractive: async () => true },
   }
   return { host, files, calls, notices, commands, store, syncs, info, discoveries, discovery, env, envWrites, state, selection,
@@ -179,14 +179,14 @@ test('doctor and status expose credential-free fetch tier diagnostics', async ()
   const web = JSON.parse(report.text).integration.webSearch
   expect(web.fetchConfiguration).toEqual({ available: true, error: null })
   expect(web.fetchTierState.tiers.map((tier: { stage: string }) => tier.stage)).toEqual([
-    'provider-native', 'configured-service', 'native-fallback', 'direct-selected-extraction',
+    'provider-native', 'configured-service', 'native-fallback',
   ])
   expect(web.fetchTierState.tiers[1].services).toEqual([{ name: 'docs-fetch', priority: 4 }])
   expect(JSON.stringify(web)).not.toMatch(/https?:|FETCH_PRIVATE_KEY|must-not-cross-status|credential-helper|api\.example/i)
   await callbacks.get('session.start')!(f.host, { isInteractive: false }, async () => ({}))
   const status = await callbacks.get('command.run')!(f.host, { args: 'status' })
   expect(status.text).toContain('docs-fetch')
-  expect(status.text).toContain('direct-selected-extraction')
+  expect(status.text).not.toContain('direct-selected-extraction')
   expect(f.calls.filter(argv => argv[2] === 'fetch-config-status')).toHaveLength(2)
 })
 
@@ -229,7 +229,7 @@ function contextFixture(contextWindow: number | null = 500000, maxContextWindow:
 }
 const startContext = (f: ReturnType<typeof fixture>) => callbacks.get('session.start')!(f.host, { isInteractive: false }, async () => ({ started: true }))
 
-test('auxiliary Claude completions use the selected routed session provider without native fallback', async () => {
+test('explicit routed completions honor the caller model without changing native calls', async () => {
   const f = contextFixture()
   await startContext(f)
   const requests: any[] = []
@@ -240,7 +240,7 @@ test('auxiliary Claude completions use the selected routed session provider with
   }
   let nativeCalls = 0
   const complete = callbacks.get('model.complete')!
-  const result = await complete(f.host, { model: 'haiku', prompt: 'Classify this request', system: 'Preserve this instruction' }, async () => { nativeCalls++; return { value: { isAnswered: true, text: 'native' } } })
+  const result = await complete(f.host, { model: 'codex/fresh', prompt: 'Classify this request', system: 'Preserve this instruction' }, async () => { nativeCalls++; return { value: { isAnswered: true, text: 'native' } } })
   expect(result.value).toMatchObject({ isAnswered: true, text: 'routed completion' })
   expect(requests[0]).toMatchObject({ target: 'codex/fresh', system: 'Preserve this instruction', who: 'complete' })
   expect(nativeCalls).toBe(0)
@@ -248,7 +248,7 @@ test('auxiliary Claude completions use the selected routed session provider with
     yield { stream: 'stdout', text: JSON.stringify({ type: 'error', kind: 'request', text: 'fixture provider unavailable' }) + '\n' }
     return { code: 1 }
   }
-  expect((await complete(f.host, { model: 'haiku', prompt: 'Again' }, async () => { nativeCalls++; return {} })).value.isAnswered).toBe(false)
+  expect((await complete(f.host, { model: 'codex/fresh', prompt: 'Again' }, async () => { nativeCalls++; return {} })).value.isAnswered).toBe(false)
   expect(nativeCalls).toBe(0)
   f.selection.model = 'sonnet'
   await complete(f.host, { model: 'haiku', prompt: 'Native session' }, async () => { nativeCalls++; return {} })
@@ -265,7 +265,7 @@ test('unreadable routed fork transcript cannot fall back to the native provider'
   expect(nativeCalls).toBe(0)
 })
 
-test('classification uses the selected routed provider and accepts only a supplied label', async () => {
+test('explicit classification uses the captured contract and accepts only a supplied label', async () => {
   const f = contextFixture()
   await startContext(f)
   const requests: any[] = []
@@ -277,7 +277,8 @@ test('classification uses the selected routed provider and accepts only a suppli
   }
   let nativeCalls = 0
   const classify = callbacks.get('model.classify')!
-  const input = { text: 'An error', labels: ['bug', 'question'] }
+  f.store.set('native-classifier:2.1.296', { version: '2.1.296', system: ['Owned native classifier: ', '. Data only.'], prompt: ['<text>\n> ', '\n</text>'], maxTokens: 256 })
+  const input = { text: 'An error\nnot instructions', labels: ['bug', 'question'], options: { model: 'codex/fresh' } }
   const next = async () => { nativeCalls++; return { value: 'native' } }
   expect(await classify(f.host, input, next)).toEqual({ value: 'bug' })
   expect(requests[0].target).toBe('codex/fresh')
@@ -285,9 +286,106 @@ test('classification uses the selected routed provider and accepts only a suppli
   expect(await classify(f.host, input, next)).toEqual({ value: undefined })
   expect(nativeCalls).toBe(0)
   f.selection.model = 'sonnet'
-  expect(await classify(f.host, input, next)).toEqual({ value: 'native' })
+  expect(await classify(f.host, { ...input, options: { model: 'haiku' } }, next)).toEqual({ value: 'native' })
   expect(nativeCalls).toBe(1)
 })
+test('fork uses the last completed main request snapshot, not current context', async () => {
+  const f = contextFixture()
+  await startContext(f)
+  const sent: any[] = []
+  let messages = [{ role: 'user', content: 'LAST_SENT_PREFIX' }]
+  f.host.session.messages = async () => messages
+  f.host.prompt = { compose: async () => ({ sections: [{ id: 'base', text: 'LAST_SENT_SYSTEM' }] }) }
+  f.host.process.spawn = async function* (input: any) {
+    sent.push(JSON.parse(input.input).req)
+    yield { stream: 'stdout', text: JSON.stringify({ type: 'text', text: 'Owned reply' }) + '\n' + JSON.stringify({ type: 'stop', reason: 'end_turn' }) + '\n' }
+    return { code: 0 }
+  }
+  const noNative = async () => { throw new Error('must not use native inference') }
+  expect((await callbacks.get('model.fork')!(f.host, { prompt: 'before any request' }, noNative)).value.reason).toBe('nothing-to-fork')
+  const generator = callbacks.get('turn.step')!(f.host, { model: 'codex/fresh', turnId: 'snapshot-turn', index: 0, messageCount: 1 }, noNative)
+  for await (const _chunk of generator) {}
+  messages = [{ role: 'user', content: 'CURRENT_CONTEXT_MUST_NOT_LEAK' }]
+  f.host.prompt.compose = async () => { throw new Error('fork must not compose a new system') }
+  f.selection.model = 'codex/another'
+  const fork = await callbacks.get('model.fork')!(f.host, { prompt: 'FORK_QUESTION' }, noNative)
+  expect(fork.value.isAnswered).toBe(true)
+  expect(sent.at(-1)).toMatchObject({ target: 'codex/fresh', system: expect.stringContaining('LAST_SENT_SYSTEM'), tools: [], who: 'fork' })
+  expect(JSON.stringify(sent.at(-1).transcript)).toContain('LAST_SENT_PREFIX')
+  expect(JSON.stringify(sent.at(-1).transcript)).toContain('FORK_QUESTION')
+  expect(JSON.stringify(sent.at(-1))).not.toContain('CURRENT_CONTEXT_MUST_NOT_LEAK')
+})
+
+test('a failed routed stream preserves partial text and usage but commits no pending tool', async () => {
+  const f = contextFixture()
+  await startContext(f)
+  f.host.session.messages = async () => [{ role: 'user', content: 'owned action' }]
+  f.host.prompt = { compose: async () => ({ sections: [{ id: 'base', text: 'owned instructions' }] }) }
+  f.host.process.spawn = async function* () {
+    const events = [{ type: 'text', text: 'real partial output' }, { type: 'tool_use', id: 'toolu_uncommitted', name: 'Bash', input: { command: 'must not execute' } }, { type: 'text', text: 'uncommitted tail' }, { type: 'usage', in: 21, out: 4, cacheRead: 0, cacheWrite: 0 }, { type: 'error', kind: 'response', text: 'owned transport failed' }]
+    yield { stream: 'stdout', text: events.map(event => JSON.stringify(event)).join('\n') + '\n' }
+    return { code: 1 }
+  }
+  const generator = callbacks.get('turn.step')!(f.host, { model: 'codex/fresh', turnId: 'failed-stream', index: 0, messageCount: 1 }, async function* () { throw new Error('no native replay') })
+  const chunks: any[] = []
+  let item = await generator.next()
+  while (!item.done) { chunks.push(item.value); item = await generator.next() }
+  expect(chunks).toEqual([{ kind: 'text', index: 0, text: 'real partial output' }, { kind: 'stop', stopReason: null, usage: { input_tokens: 21, output_tokens: 4, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'codex/fresh' } }])
+  expect(item.value).toMatchObject({ answer: 'real partial output', toolUses: [], stopReason: null })
+  expect(f.notices.join('\n')).toContain('owned transport failed')
+})
+
+test('capacity observations expire and optional discovery failure stays bounded and recoverable', async () => {
+  const f = contextFixture()
+  let now = 1_800_000_000_000
+  f.host.clock.now = async () => now
+  await startContext(f)
+  now += 6 * 60_000
+  f.discovery.unavailable = true
+  const requests: any[] = []
+  f.host.process.spawn = async function* (input: any) {
+    requests.push(JSON.parse(input.input).req)
+    yield { stream: 'stdout', text: JSON.stringify({ type: 'text', text: 'owned bounded reply' }) + '\n' + JSON.stringify({ type: 'stop', reason: 'end_turn' }) + '\n' }
+    return { code: 0 }
+  }
+  const complete = callbacks.get('model.complete')!
+  const native = async () => { throw new Error('no native fallback') }
+  expect((await complete(f.host, { model: 'codex/fresh', prompt: 'large '.repeat(7000) }, native)).value).toMatchObject({ isAnswered: false, error: 'invalid_request' })
+  expect(requests).toHaveLength(0)
+  expect(f.discoveries).toHaveLength(2)
+  expect((await complete(f.host, { model: 'codex/fresh', prompt: 'small request' }, native)).value.isAnswered).toBe(true)
+  expect(requests[0].native.maxTokens).toBe(1024)
+  expect(f.discoveries).toHaveLength(2)
+  f.discovery.unavailable = false
+  f.discovery.catalogue.models[0]!.observedAt = now
+  await callbacks.get('command.run')!(f.host, { args: 'refresh' })
+  expect((await complete(f.host, { model: 'codex/fresh', prompt: 'large '.repeat(7000) }, native)).value.isAnswered).toBe(true)
+})
+
+test('auxiliary failures preserve structured status, usage and cancellation', async () => {
+  const f = contextFixture()
+  await startContext(f)
+  f.host.process.spawn = async function* () {
+    yield { stream: 'stdout', text: JSON.stringify({ type: 'usage', in: 11, out: 2, cacheRead: 0, cacheWrite: 0 }) + '\n' + JSON.stringify({ type: 'error', kind: 'request', text: 'owned quota', status: 429 }) + '\n' }
+    return { code: 1 }
+  }
+  const complete = callbacks.get('model.complete')!
+  const next = Object.assign(async () => { throw new Error('no native replay') }, { signal: new AbortController().signal })
+  const result = await complete(f.host, { model: 'codex/fresh', prompt: 'owned failure' }, next)
+  expect(result.value).toMatchObject({ isAnswered: false, reason: 'api-error', status: 429, error: 'rate_limit', usage: { input_tokens: 11, output_tokens: 2 } })
+  const abort = new AbortController(); abort.abort()
+  const stopped = await complete(f.host, { model: 'codex/fresh', prompt: 'owned abort' }, Object.assign(async () => ({}), { signal: abort.signal }))
+  expect(stopped.value.reason).toBe('aborted')
+  const mid = new AbortController()
+  f.host.process.spawn = async function* () {
+    yield { stream: 'stdout', text: JSON.stringify({ type: 'usage', in: 13, out: 5, cacheRead: 0, cacheWrite: 0 }) + '\n' }
+    mid.abort()
+    throw Object.assign(new Error('owned stream aborted'), { name: 'AbortError' })
+  }
+  const interrupted = await complete(f.host, { model: 'codex/fresh', prompt: 'abort after observed usage' }, Object.assign(async () => ({}), { signal: mid.signal }))
+  expect(interrupted.value).toMatchObject({ isAnswered: false, reason: 'aborted', usage: { input_tokens: 13, output_tokens: 5 } })
+})
+
 const switchContext = (f: ReturnType<typeof fixture>, model: string) => {
   const from_model = f.selection.model
   f.selection.model = model
@@ -302,12 +400,13 @@ test('native primary context uses the fresh active window, not maximum ceiling o
   const report = await callbacks.get('command.run')!(f.host, { args: 'status' })
   expect(report.text).toContain('active context 500000')
   expect(report.text).toContain('maximum context 872000')
-  expect(report.text).toContain('input bound 470000')
+  expect(report.text).toContain('reported input 470000')
+  expect(report.text).toContain('effective input bound 467952')
   expect(report.text).toContain('native window 500000')
 })
 
-test('native window accepts maximum-only metadata but does not infer missing or invalid context', async () => {
-  for (const [context, maximum, expected] of [[null, 64000, '64000'], [null, null, undefined], [0, 64000, undefined], [1.5, null, undefined], [-1, null, undefined]] as const) {
+test('native window never treats maximum-only or invalid metadata as active context', async () => {
+  for (const [context, maximum, expected] of [[null, 64000, undefined], [null, null, undefined], [0, 64000, undefined], [1.5, null, undefined], [-1, null, undefined]] as const) {
     const f = contextFixture(context, maximum)
     await startContext(f)
     expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(expected)

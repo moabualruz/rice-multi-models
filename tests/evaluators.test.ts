@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test'
+import { isEvaluatorTemplate } from '../hooks/native-evaluator'
 import { commandHookResult, evaluatorAnswer, evaluatorPrompt, evaluatorRequest, planStopEvaluators, runStopEvaluators, type EvaluatorPort, type EvaluatorSource, type PlannedEvaluator } from '../hooks/evaluators'
 
 const event = { hook_event_name: 'Stop' as const, session_id: 'owned-session', last_assistant_message: 'Complete', stop_hook_active: false }
@@ -6,6 +7,7 @@ const owner = { target: 'selected/child', who: 'owned-child', session: 'owned-se
 const prompt: PlannedEvaluator = { type: 'prompt', prompt: 'Verify the condition: $ARGUMENTS', timeoutMs: 30_000, origin: { kind: 'settings' } }
 const source = (hooks: unknown[], origin: EvaluatorSource['origin'] = { kind: 'settings' }): EvaluatorSource => ({ origin, settings: { hooks: { Stop: [{ hooks }] } } })
 const unused = async (): Promise<never> => { throw new Error('This adapter must not run') }
+const context = async () => ({ template: { version: 'owned', event: 'Stop' as const, system: 'OWNED_NATIVE_EVALUATOR_SYSTEM', prefix: 'OWNED_NATIVE_CONDITION_PREFIX ', maxTokens: 10000, outputSchema: { type: 'object' } }, transcript: [{ role: 'user' as const, content: 'OWNED_CHILD_CONTEXT' }, { role: 'assistant' as const, content: 'OWNED_CHILD_REPLY' }], maxTokens: 2048 })
 
 test('planning retains native type order, last duplicate settings value, and separate plugin copies', () => {
   const plan = planStopEvaluators([
@@ -22,7 +24,7 @@ test('planning retains native type order, last duplicate settings value, and sep
 test('agent-type evaluators remain native and cannot enter the prompt adapter', async () => {
   const plan = planStopEvaluators([source([{ type: 'agent', prompt: 'Inspect files' }])], event, 'bash')
   expect(plan.hooks.map(hook => hook.type)).toEqual(['agent'])
-  await expect(runStopEvaluators(plan, event, owner, { command: unused, prompt: unused }, new AbortController().signal)).rejects.toThrow('must run through Claude Code')
+  await expect(runStopEvaluators(plan, event, owner, { context, command: unused, prompt: unused }, new AbortController().signal)).rejects.toThrow('must run through Claude Code')
 })
 
 test('managed matching groups already ran, Stop ignores matcher, and nontool if hooks never run', () => {
@@ -39,7 +41,7 @@ test('managed matching groups already ran, Stop ignores matcher, and nontool if 
 test('an unpreserved hook or invalid matcher prevents any partial replacement', async () => {
   const plan = planStopEvaluators([source([{ type: 'prompt', prompt: 'Condition' }, { type: 'http', url: 'https://owned.invalid' }])], event, 'bash')
   expect(plan.errors).toHaveLength(1)
-  const port: EvaluatorPort = { command: unused, prompt: unused }
+  const port: EvaluatorPort = { context, command: unused, prompt: unused }
   await expect(runStopEvaluators(plan, event, owner, port, new AbortController().signal)).rejects.toThrow('losing configured behavior')
   const invalid = planStopEvaluators([{ origin: { kind: 'settings' }, settings: { hooks: { SubagentStop: [{ matcher: '[invalid', hooks: [] }] } } }], { hook_event_name: 'SubagentStop' }, 'bash')
   expect(invalid.errors).toHaveLength(1)
@@ -57,13 +59,26 @@ test('SubagentStop matchers preserve native exact lists and explicit regex behav
   expect(planned('*', 'Any agent')).toBe(1)
 })
 
-test('the configured prompt and complete event bind the explicit child without parent context', () => {
-  const request = evaluatorRequest(prompt, event, owner)
+test('the captured native contract includes the owner transcript and complete condition event', async () => {
+  const request = evaluatorRequest(prompt, event, owner, await context())
   expect(request.target).toBe(owner.target); expect(request.who).toBe(owner.who); expect(request.session).toBe(owner.session)
   expect(request.tools).toEqual([]); expect(request.native?.toolChoice).toEqual({ type: 'none' })
-  expect(request.transcript[0]?.content).toBe(evaluatorPrompt(prompt.prompt, event))
+  expect(request.system).toBe('OWNED_NATIVE_EVALUATOR_SYSTEM')
+  expect(request.transcript[0]?.content).toBe('OWNED_CHILD_CONTEXT')
+  expect(request.transcript[1]?.content).toBe('OWNED_CHILD_REPLY')
+  expect(JSON.stringify(request.transcript.at(-1))).toContain('OWNED_NATIVE_CONDITION_PREFIX ')
+  expect(JSON.stringify(request.transcript.at(-1))).toContain('Verify the condition:')
+  expect(request.native?.maxTokens).toBe(2048)
   expect(evaluatorPrompt('Verify completion', event)).toBe('Verify completion\n\n' + JSON.stringify(event))
   expect(evaluatorPrompt('$ARGUMENTS / $ARGUMENTS', event)).toBe(JSON.stringify(event) + ' / ' + JSON.stringify(event))
+})
+
+test('native evaluator templates reject malformed or wrong-event contracts', async () => {
+  const held = await context()
+  expect(isEvaluatorTemplate(held.template)).toBe(true)
+  expect(isEvaluatorTemplate({ ...held.template, outputSchema: undefined })).toBe(false)
+  expect(isEvaluatorTemplate({ ...held.template, maxTokens: Infinity })).toBe(false)
+  expect(() => evaluatorRequest(prompt, { hook_event_name: 'SubagentStop' }, owner, held)).toThrow('different native event')
 })
 
 test('prompt evaluator results preserve native impossible and block behavior', () => {
@@ -94,9 +109,11 @@ test('matching command and prompt hooks start in parallel and aggregate in nativ
   const waiting = new Promise<void>(resolve => { release = resolve })
   const plan = planStopEvaluators([source([{ type: 'prompt', prompt: 'Check condition' }, { type: 'command', command: 'owned' }])], event, 'bash')
   const running = runStopEvaluators(plan, event, owner, {
+    context,
     command: async () => { started.push('command'); await waiting; return { result: { additionalContext: ['Command context'] } } },
     prompt: async (_hook, request) => { started.push('prompt'); targets.push(request.target); return { isAnswered: true, text: '{"ok":false,"reason":"Prompt feedback"}' } },
   }, new AbortController().signal)
+  await Promise.resolve()
   expect(started).toEqual(['command', 'prompt'])
   release?.()
   expect(await running).toEqual({ result: { additionalContext: ['Command context'], block: 'Prompt feedback' }, errors: [] })
@@ -106,6 +123,6 @@ test('matching command and prompt hooks start in parallel and aggregate in nativ
 test('cancellation remains cancellation instead of becoming an allow or a native retry', async () => {
   const controller = new AbortController()
   const plan = planStopEvaluators([source([{ type: 'prompt', prompt: 'Condition' }])], event, 'bash')
-  const running = runStopEvaluators(plan, event, owner, { command: unused, prompt: async () => { controller.abort(); return { isAnswered: true, text: '{"ok":true,"reason":"ignored"}' } } }, controller.signal)
+  const running = runStopEvaluators(plan, event, owner, { context, command: unused, prompt: async () => { controller.abort(); return { isAnswered: true, text: '{"ok":true,"reason":"ignored"}' } } }, controller.signal)
   await expect(running).rejects.toThrow()
 })

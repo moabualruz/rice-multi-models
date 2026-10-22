@@ -85,7 +85,7 @@ test('web capability output uses the configured search and fetch tier status fun
   expect(output).toContain('provider-native')
   expect(output).toContain('configured-service')
   expect(output).toContain('native-fallback')
-  expect(output).toContain('direct-selected-extraction')
+  expect(output).not.toContain('direct-selected-extraction')
 })
 
 test('tool selection applies model allowlists and the provider cap in one stable pass', () => {

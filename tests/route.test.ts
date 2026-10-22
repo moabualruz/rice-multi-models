@@ -73,11 +73,24 @@ test('the assembler turns events into numbered chunks and ends a tool step on to
   expect(end.toolUses).toEqual([{ name: 'Read', input: { file_path: '/x' } }])
 })
 
-test('a failed step answers its failure as text and reports no usage', async () => {
+test('a failed step is an unsuccessful native stop, not answer text or a handback', () => {
   const assembler = createAssembler('codex/gpt-6.1-sol')
+  assembler.feed({ type: 'text', text: 'Partial output' })
+  assembler.feed({ type: 'usage', in: 17, out: 3, cacheRead: 2, cacheWrite: 0 })
   assembler.feed({ type: 'error', kind: 'request', text: 'codex: HTTP 429' })
-  const end = assembler.end()
+  const end = assembler.end({ handback: 'SubagentHandback' })
   expect(end.failure).toBe('codex: HTTP 429')
-  expect(end.usage).toBe(null)
-  expect(end.chunks.at(-1)).toEqual({ kind: 'stop', stopReason: 'end_turn', usage: null })
+  expect(end.answer).toBe('Partial output')
+  expect(end.toolUses).toEqual([])
+  expect(end.usage?.input_tokens).toBe(17)
+  expect(end.chunks).toEqual([{ kind: 'stop', stopReason: null, usage: end.usage }])
+})
+
+test('an interrupted tool stream cannot authorize an unfinished call', () => {
+  const assembler = createAssembler('codex/gpt-6.1-sol')
+  assembler.feed({ type: 'tool_use', id: 'call_bad', name: 'Bash', input: { command: 'must not run' } })
+  const end = assembler.end({ failure: 'interrupted' })
+  expect(end.stopReason).toBeNull()
+  expect(end.toolUses).toEqual([])
+  expect(end.chunks.some(chunk => chunk.kind === 'tool')).toBe(false)
 })

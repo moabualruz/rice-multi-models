@@ -67,6 +67,10 @@ describe('spawn decisions', () => {
     expect(spawn({ definitionModel: 'b/child' })).toMatchObject({ model: 'b/child', native: false, family: 'b', explicit: true })
     expect(spawn({ requested: 'b/child' })).toMatchObject({ model: 'b/child', family: 'b', explicit: true })
   })
+  test('explicit native ids remain native and explicit aliases outrank a routed definition', () => {
+    expect(spawn({ requested: 'claude-sonnet-5-5' })).toMatchObject({ native: true, family: CLAUDE_FAMILY, explicit: true })
+    expect(spawn({ requested: 'haiku', definitionModel: 'b/child' }, { a: { haiku: 'a/small' } })).toMatchObject({ model: 'a/small', family: 'a' })
+  })
   test('a Claude parent and forks keep native resolution', () => {
     expect(spawn({ parentModel: 'sonnet', requested: 'haiku' })).toMatchObject({ native: true, family: CLAUDE_FAMILY })
     expect(spawn({ fork: true, requested: 'haiku' })).toMatchObject({ native: true, family: 'a' })

@@ -2,8 +2,8 @@
 // (MIT, Copyright (c) 2026 styx contributors; see LICENSES/claude-styx.MIT.txt).
 // Modified by Mo Abualruz: failure texts name rice-multi-models; mintToolId comes from ./protocol.
 // A routed step's events as the engine's turn.step chunks: block indexes, coalesced deltas, tool calls,
-// and the end, which is one stop carrying the usage, or a failure answered as text or, for a subagent
-// offered SubagentHandback, as one call of it. Pure.
+// and the end, which is one stop carrying usage. A failed request has a null stop reason,
+// never fabricated assistant text or a tool call. Pure.
 import type { TurnStepChunk, TurnStepToolUse, TurnUsage } from 'claude-code'
 
 import { mintToolId } from './protocol'
@@ -12,7 +12,7 @@ import type { StepEvent, StopReason } from './protocol'
 type Failure = { kind: 'request' | 'response'; text: string }
 // The step's end: its last chunks (the stop among them, last), what it answered, and the failure text when
 // it failed.
-type StepEnd = { chunks: TurnStepChunk[]; answer: string; toolUses: TurnStepToolUse[]; stopReason: StopReason; usage: TurnUsage | null; failure?: string; delivered?: true }
+type StepEnd = { chunks: TurnStepChunk[]; answer: string; toolUses: TurnStepToolUse[]; stopReason: StopReason | null; usage: TurnUsage | null; failure?: string; delivered?: true }
 
 export { coalesce } from './coalesce'
 
@@ -30,6 +30,7 @@ export function createAssembler(usageModel: string) {
 
   return {
     feed(ev: StepEvent): TurnStepChunk[] {
+      if (failure !== undefined && ev.type !== 'usage') return []
       if (ev.type === 'text' || ev.type === 'thinking') {
         if (open?.type !== ev.type) open = { type: ev.type, index: next++ }
         if (ev.type === 'text') answer += ev.text
@@ -49,9 +50,8 @@ export function createAssembler(usageModel: string) {
       else if (ev.type === 'error') failure ??= { kind: ev.kind, text: ev.text }
       return []
     },
-    // Ends the step: a stop, `tool_use` whenever a tool call was yielded. A failure (the events' error, or
-    // `failure` in its place) takes the next index as text; a request failure goes instead as one call of
-    // `handback` when one is named and no tool call was yielded. A failed step reports no usage.
+    // Native unsuccessful stop: preserve received text and usage, but never authorize tools
+    // or report end_turn after a provider failure. The caller withholds tool chunks until success.
     end(o: { handback?: string; failure?: string; deliver?: boolean } = {}): StepEnd {
       const failed: Failure | undefined =
         o.failure !== undefined
@@ -74,21 +74,7 @@ export function createAssembler(usageModel: string) {
         }
         return { chunks: [{ kind: 'stop', stopReason, usage }], answer, toolUses: [...toolUses], stopReason, usage }
       }
-      const index = next++
-      open = undefined
-      const chunks: TurnStepChunk[] = []
-      if (failed.kind === 'request' && o.handback !== undefined && toolUses.length === 0) {
-        const input = { message: failed.text }
-        chunks.push({ kind: 'tool', index, id: mintToolId(), name: o.handback }, { kind: 'input', index, json: JSON.stringify(input) })
-        toolUses.push({ name: o.handback, input })
-      } else {
-        chunks.push({ kind: 'text', index, text: failed.text })
-        answer += failed.text
-      }
-      usage = null
-      const stopReason = toolUses.length > 0 ? 'tool_use' : 'end_turn'
-      chunks.push({ kind: 'stop', stopReason, usage: null })
-      return { chunks, answer, toolUses: [...toolUses], stopReason, usage: null, failure: failed.text }
+      return { chunks: [{ kind: 'stop', stopReason: null, usage }], answer, toolUses: [], stopReason: null, usage, failure: failed.text }
     },
   }
 }

@@ -115,17 +115,25 @@ export async function* helperStep(port: HelperPort, wire: StepWire): AsyncGenera
 }
 
 /** A whole answer as text, for compaction and one-shot completions. */
-export async function collectText(port: HelperPort, wire: StepWire): Promise<{ text: string; usage?: ModelUsage; error?: string; stopReason?: StopReason }> {
+export async function collectText(port: HelperPort, wire: StepWire, signal?: AbortSignal): Promise<{ text: string; usage?: ModelUsage; error?: string; status?: number; aborted?: boolean; stopReason?: StopReason }> {
   let text = ''
   let usage: ModelUsage | undefined
   let error: string | undefined
+  let status: number | undefined
+  let aborted = false
   let stopReason: StopReason | undefined
-  for await (const event of helperStep(port, wire)) {
-    if (event.type === 'text') text += event.text
-    else if (event.type === 'usage') usage = { input_tokens: event.in, output_tokens: event.out, cache_read_input_tokens: event.cacheRead, cache_creation_input_tokens: event.cacheWrite }
-    else if (event.type === 'error') error = event.text
-    else if (event.type === 'stop') stopReason = event.reason
+  try {
+    for await (const event of helperStep(port, wire)) {
+      if (event.type === 'text') text += event.text
+      else if (event.type === 'usage') usage = { input_tokens: event.in, output_tokens: event.out, cache_read_input_tokens: event.cacheRead, cache_creation_input_tokens: event.cacheWrite }
+      else if (event.type === 'error') { error = event.text; status = event.status; aborted = event.aborted === true }
+      else if (event.type === 'stop') stopReason = event.reason
+    }
+  } catch (failure) {
+    error ??= 'The routed helper stream did not complete.'
+    aborted ||= signal?.aborted === true || failure instanceof Error && (failure.name === 'AbortError' || failure.name === 'TimeoutError')
   }
+  aborted ||= signal?.aborted === true
 
-  return { text, ...(usage ? { usage } : {}), ...(error !== undefined ? { error } : {}), ...(stopReason ? { stopReason } : {}) }
+  return { text, ...(usage ? { usage } : {}), ...(error !== undefined ? { error } : {}), ...(status === undefined ? {} : { status }), ...(aborted ? { aborted: true } : {}), ...(stopReason ? { stopReason } : {}) }
 }

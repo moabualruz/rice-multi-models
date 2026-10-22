@@ -140,6 +140,14 @@ function exchangeToRemove(messages: readonly ApiMessage[], seed: number): Set<nu
  */
 export function fitTranscript(messages: readonly ApiMessage[], maxChars: number): { messages: ApiMessage[]; omitted: number; excluded: number[]; clipped: number; fits: boolean; explanation: string } {
   const clippedBlocks = new Set<string>()
+  if (sizeOf(messages) <= maxChars) {
+    const calls = linkedIds(messages, 'tool_use')
+    const results = linkedIds(messages, 'tool_result')
+    const orphanResults = [...results].filter(id => !calls.has(id)).length
+    const unfinishedCalls = [...calls].filter(id => !results.has(id)).length
+    const fits = orphanResults + unfinishedCalls === 0
+    return { messages: [...messages], omitted: 0, excluded: [], clipped: 0, fits, explanation: fits ? 'no transcript content excluded' : `${orphanResults} unpaired tool-result blocks and ${unfinishedCalls} unfinished tool calls make this request copy unsafe` }
+  }
   let fitted = messages.map((message, messageIndex) => typeof message.content === 'string' ? message : {
     ...message,
     content: message.content.map((block, blockIndex) => {
@@ -150,7 +158,8 @@ export function fitTranscript(messages: readonly ApiMessage[], maxChars: number)
   })
   for (const max of [6_000, 1_500]) {
     if (sizeOf(fitted) <= maxChars) break
-    fitted = fitted.map((message, messageIndex) => typeof message.content === 'string' ? message : {
+    // Refit original text so omission counts never measure an already-clipped placeholder.
+    fitted = messages.map((message, messageIndex) => typeof message.content === 'string' ? message : {
       ...message,
       content: message.content.map((block, blockIndex) => {
         const next = clipBlock(block, max)
@@ -176,12 +185,16 @@ export function fitTranscript(messages: readonly ApiMessage[], maxChars: number)
   const omitted = excluded.length
   const calls = linkedIds(fitted, 'tool_use')
   const orphanResults = [...linkedIds(fitted, 'tool_result')].filter(id => !calls.has(id)).length
-  const fits = sizeOf(fitted) <= maxChars && orphanResults === 0
-  const clipped = clippedBlocks.size
+  const results = linkedIds(fitted, 'tool_result')
+  const unfinishedCalls = [...calls].filter(id => !results.has(id)).length
+  const fits = sizeOf(fitted) <= maxChars && orphanResults === 0 && unfinishedCalls === 0
+  const retainedIndexes = new Set(sourceIndexes)
+  const clipped = [...clippedBlocks].filter(key => retainedIndexes.has(Number(key.split(':')[0]))).length
   const details = [
     omitted ? `${omitted} messages excluded from this request copy (source indexes ${excluded.join(', ')})` : '',
     clipped ? `${clipped} tool-result blocks clipped with explicit omission markers` : '',
     orphanResults ? `${orphanResults} unpaired tool-result blocks make this request copy unsafe` : '',
+    unfinishedCalls ? `${unfinishedCalls} unfinished tool calls make this request copy unsafe` : '',
   ].filter(Boolean)
   return { messages: fitted, omitted, excluded, clipped, fits, explanation: details.length ? details.join('; ') : 'no transcript content excluded' }
 }

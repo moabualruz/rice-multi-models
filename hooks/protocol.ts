@@ -72,7 +72,7 @@ export type StepEvent =
   | ({ type: 'usage' } & Usage)
   | { type: 'limits'; limits: Limits }
   | { type: 'stop'; reason: StopReason }
-  | { type: 'error'; kind: 'request' | 'response'; text: string }
+  | { type: 'error'; kind: 'request' | 'response'; text: string; status?: number; aborted?: boolean }
   | ({ type: 'stats' } & StepStats)
 
 /**

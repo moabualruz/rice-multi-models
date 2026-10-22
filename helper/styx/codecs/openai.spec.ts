@@ -284,14 +284,14 @@ test('null fields are absent, unknown keys pass, data: without a space and event
   const stream = `event: message\nid: 7\ndata:${JSON.stringify({ ...delta({ content: null, tool_calls: [call(0, { name: 'A', arguments: '{}' }, 'c0')] }), provider_specific_fields: {}, cost: 1 })}\n\n` + sse(FINISH('tool_calls'))
   const { end } = parse([stream])
   expect(end.toolUses).toEqual([{ name: 'A', input: {} }])
-  expect(parse([sse(delta({ content: 5 }), FINISH('stop'))]).end.answer).toBe(failed('malformed stream chunk: delta.content is not text'))
+  expect(parse([sse(delta({ content: 5 }), FINISH('stop'))]).end.failure).toBe(failed('malformed stream chunk: delta.content is not text'))
 })
 
 test('structured fields are validated by their own shapes', () => {
-  expect(parse([sse({ choices: [{ index: 0, delta: { tool_calls: [{ index: 'zero', function: { name: 'A' } }] } }] }, FINISH('stop'))]).end.answer).toContain('a tool call index is not an index')
-  expect(parse([sse({ ...USAGE, usage: { prompt_tokens: '1', completion_tokens: 2 } }, FINISH('stop'))]).end.answer).toContain('usage prompt_tokens or completion_tokens is not a count')
-  expect(parse([sse({ ...USAGE, usage: { prompt_tokens: 1, completion_tokens: 2, prompt_tokens_details: { cached_tokens: -1 } } }, FINISH('stop'))]).end.answer).toContain('cached tokens')
-  expect(parse([sse({ choices: { 0: {} } }, FINISH('stop'))]).end.answer).toContain('choices is not an array')
+  expect(parse([sse({ choices: [{ index: 0, delta: { tool_calls: [{ index: 'zero', function: { name: 'A' } }] } }] }, FINISH('stop'))]).end.failure).toContain('a tool call index is not an index')
+  expect(parse([sse({ ...USAGE, usage: { prompt_tokens: '1', completion_tokens: 2 } }, FINISH('stop'))]).end.failure).toContain('usage prompt_tokens or completion_tokens is not a count')
+  expect(parse([sse({ ...USAGE, usage: { prompt_tokens: 1, completion_tokens: 2, prompt_tokens_details: { cached_tokens: -1 } } }, FINISH('stop'))]).end.failure).toContain('cached tokens')
+  expect(parse([sse({ choices: { 0: {} } }, FINISH('stop'))]).end.failure).toContain('choices is not an array')
 })
 
 test('empty and role-only deltas between fragments do not end a held call', () => {
@@ -300,9 +300,9 @@ test('empty and role-only deltas between fragments do not end a held call', () =
 })
 
 test('an in-stream error, a missing finish and [DONE], and finish_reason "error" take the error path', () => {
-  expect(parse([sse({ error: { message: 'boom' } })]).end).toMatchObject({ answer: failed('boom'), stopReason: 'end_turn', usage: null })
-  expect(parse([sse(delta({ content: 'part' }))]).end.answer).toBe(`part${failed('the stream ended with no finish reason')}`)
-  expect(parse([sse(delta({ content: 'x' }), FINISH('ERROR'))]).end.answer).toContain('finish_reason "error"')
+  expect(parse([sse({ error: { message: 'boom' } })]).end).toMatchObject({ answer: '', failure: failed('boom'), stopReason: null, usage: null })
+  expect(parse([sse(delta({ content: 'part' }))]).end).toMatchObject({ answer: 'part', failure: failed('the stream ended with no finish reason'), stopReason: null })
+  expect(parse([sse(delta({ content: 'x' }), FINISH('ERROR'))]).end.failure).toContain('finish_reason "error"')
 })
 
 test('finish reasons map case-insensitively; tool calls force tool_use; unknown reasons read as end_turn', () => {
@@ -339,35 +339,36 @@ test('live emission: a call is yielded when the next starts, the next when text 
   expect(fed.map(kinds)).toEqual([[], [], ['tool0', 'input0'], ['tool1', 'input1', 'text2'], []])
   expect(end.stopReason).toBe('tool_use')
   const late = parse([sse(delta({ tool_calls: [call(0, { name: 'A', arguments: '{}' }, 'c0')] }), delta({ tool_calls: [call(1, { name: 'B', arguments: '{}' }, 'c1')] }), delta({ tool_calls: [call(0, { arguments: 'x' })] }), FINISH('tool_calls'))])
-  expect(late.end.answer).toContain('interleaved calls are not supported')
-  expect(late.end.toolUses).toEqual([{ name: 'A', input: {} }])
-  expect(late.end.stopReason).toBe('tool_use')
+  expect(late.end.failure).toContain('interleaved calls are not supported')
+  expect(late.end.toolUses).toEqual([])
+  expect(late.end.stopReason).toBeNull()
 })
 
-test('a transport failure after a complete call keeps it and stops tool_use; before any call it stops end_turn', () => {
+test('a transport failure never authorizes a tool or invents assistant failure text', () => {
   const cut = parse([sse(delta({ tool_calls: [call(0, { name: 'A', arguments: '{}' }, 'c0')] }), delta({ tool_calls: [call(1, { name: 'B', arguments: '{"par' }, 'c1')] }))], 'rice-multi-models: acme stalled (no data for 600 s)')
-  expect(kinds(cut.chunks)).toEqual(['tool0', 'input0', 'text1', 'stop'])
-  expect(cut.end).toMatchObject({ stopReason: 'tool_use', usage: null, toolUses: [{ name: 'A', input: {} }], answer: 'rice-multi-models: acme stalled (no data for 600 s)' })
+  expect(kinds(cut.chunks)).toEqual(['tool0', 'input0', 'stop'])
+  expect(cut.end).toMatchObject({ stopReason: null, usage: null, toolUses: [], answer: '', failure: 'rice-multi-models: acme stalled (no data for 600 s)' })
   const early = parse([sse(delta({ content: 'par' }))], 'rice-multi-models: acme stalled (no data for 600 s)')
-  expect(early.end).toMatchObject({ stopReason: 'end_turn', answer: 'parrice-multi-models: acme stalled (no data for 600 s)' })
+  expect(early.end).toMatchObject({ stopReason: null, answer: 'par', failure: 'rice-multi-models: acme stalled (no data for 600 s)' })
 })
 
 test('a truncated held call is never yielded: empty or partial arguments with a failed transport', () => {
   for (const args of ['', '{"cit']) {
     const { chunks } = parse([sse(delta({ tool_calls: [call(0, { name: 'get_weather', arguments: args }, 'c0')] }))], 'rice-multi-models: acme stalled (no data for 600 s)')
-    expect(kinds(chunks)).toEqual(['text0', 'stop'])
+    expect(kinds(chunks)).toEqual(['stop'])
   }
 })
 
 test('malformed completed arguments fail before any chunk for that call', () => {
   const { chunks, end } = parse([sse(delta({ tool_calls: [call(0, { name: 'A', arguments: '{"a":' }, 'c0')] }), FINISH('tool_calls'))])
-  expect(kinds(chunks)).toEqual(['text0', 'stop'])
-  expect(end.answer).toBe(failed("the A call's arguments are not a JSON object"))
+  expect(kinds(chunks)).toEqual(['stop'])
+  expect(end.failure).toBe(failed("the A call's arguments are not a JSON object"))
 })
 
-test('[DONE] then a failed exit gives the error text before exactly one stop; a clean fixture stops only at end', () => {
+test('[DONE] then a failed exit preserves real partial text and one unsuccessful stop', () => {
   const failed = parse([sse(delta({ content: 'ok' }), FINISH('stop'), '[DONE]')], 'rice-multi-models: acme curl exit 56: curl: (56) Recv failure')
-  expect(kinds(failed.chunks)).toEqual(['text0', 'text1', 'stop'])
+  expect(kinds(failed.chunks)).toEqual(['text0', 'stop'])
+  expect(failed.end).toMatchObject({ stopReason: null, answer: 'ok' })
   expect(failed.chunks.filter(c => c.kind === 'stop')).toHaveLength(1)
   const clean = parse([SSE('model-b-step2.sse')])
   expect(clean.fed.flat().some(c => c.kind === 'stop')).toBe(false)

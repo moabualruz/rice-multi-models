@@ -95,6 +95,7 @@ let toolCaptureRuns = 0
 let completionText = 'fixture response'
 let captures = 0
 const reportedLimits = { plan: 'fixture-subscription', windows: [{ label: 'weekly', usedPercent: 97, resetsAt: 1_800_000_100_000 }] }
+const diagnostics: string[] = []
 const environment = new Map<string, string>([['HOME', '/fixture-home']])
 const sessionState = new Map<string, unknown>()
 const host: any = {
@@ -162,7 +163,7 @@ const host: any = {
   store: { keys: async () => [...store.keys()], get: async (key: string) => store.get(key), set: async (key: string, value: unknown) => { store.set(key, value) } },
   ui: {
     ask: async () => { approvalAskCount++; return approvalAnswer },
-    log: () => {}, status: () => {}, toast: () => {},
+    log: (text: string, options: any) => { if (options?.to === 'transcript') diagnostics.push(text) }, status: () => {}, toast: () => {},
   },
   clock: { now: async () => 1_800_000_000_000, sleep: async () => {} },
   session: {
@@ -193,6 +194,7 @@ const step = async (type: string, model: string) => {
   const agent = { id, type, description: 'offline review control', status: 'running' }
   agents.push(agent)
   let nextCalls = 0
+  const diagnosticStart = diagnostics.length
   const generator = hook('turn.step')(host, { agentId: id, model, turnId: 'fixture-turn', index: 0 }, async function* () {
     nextCalls++
     return { passthrough: true }
@@ -201,7 +203,7 @@ const step = async (type: string, model: string) => {
   const chunks: any[] = []
   while (!item.done) { chunks.push(item.value); item = await generator.next() }
   agent.status = 'completed'
-  return { result: item.value, chunks, nextCalls, id }
+  return { result: item.value, chunks, nextCalls, id, diagnostics: diagnostics.slice(diagnosticStart) }
 }
 const executeHelper = async (wire: any) => {
   const result = []
@@ -300,8 +302,8 @@ test('fresh discovered input and context bounds refuse oversized routed turns be
       const refreshes = discoveries.length
       const refused = await step('general-purpose', model.model)
       expect(refused.nextCalls).toBe(0)
-      expect(JSON.stringify(refused.result)).toContain('512 token input bound')
-      expect(JSON.stringify(refused.result)).toContain('compact the conversation')
+      expect(refused.diagnostics.join('\n')).toContain('token input bound')
+      expect(refused.diagnostics.join('\n')).toContain('compact the conversation')
       expect(wires.length).toBe(beforeWires)
       expect(discoveries.length).toBe(refreshes)
     }
@@ -329,7 +331,7 @@ test('a smaller freshly refreshed bound applies to the next routed subagent turn
     await hook('command.run', 'rice-models')(host, { args: 'refresh' })
     const refused = await step('general-purpose', model.model)
     expect(refused.nextCalls).toBe(0)
-    expect(JSON.stringify(refused.result)).toContain('512 token input bound')
+    expect(refused.diagnostics.join('\n')).toContain('token input bound')
     expect(wires.length).toBe(before + 1)
   } finally {
     host.session.messages = messages
@@ -354,7 +356,7 @@ test('oversized complete and fork requests refuse without helper dispatch or nat
     const next = async () => { nativeCalls++; return { value: { isAnswered: true, text: 'unsafe native fallback' } } }
     for (const event of ['model.complete', 'model.fork']) {
       const result = await hook(event)(host, { model: model.model, prompt: 'oversized fixture prompt '.repeat(400), system: 'fixture instructions' }, next)
-      expect(result.value).toMatchObject({ isAnswered: false, reason: 'api-error', usage: { input_tokens: 0, output_tokens: 0 } })
+      expect(result.value).toMatchObject(event === 'model.fork' ? { isAnswered: false, reason: 'nothing-to-fork' } : { isAnswered: false, reason: 'api-error', error: 'invalid_request', usage: { input_tokens: 0, output_tokens: 0 } })
       expect(wires.length).toBe(beforeWires)
     }
     expect(nativeCalls).toBe(0)
@@ -498,11 +500,11 @@ test('tagged built-in route switches use the exact inference target bounds', asy
     await reload({})
     let calls = 0
     const next = async () => { calls++; return { permissionDecision: 'allow' } }
-    const denied = await hook('classic.PreModelSwitch')(host, switchInput(`${model.model}[1m]`, 32001), next)
+    const denied = await hook('classic.PreModelSwitch')(host, switchInput(`${model.model}[1m]`, 27905), next)
     expect(denied.permissionDecision).toBe('deny')
-    expect(denied.permissionDecisionReason).toContain('32000 token')
+    expect(denied.permissionDecisionReason).toContain('27904 token')
     expect(calls).toBe(0)
-    expect((await hook('classic.PreModelSwitch')(host, switchInput(`${model.model}[1m]`, 32000), next)).permissionDecision).toBe('allow')
+    expect((await hook('classic.PreModelSwitch')(host, switchInput(`${model.model}[1m]`, 27904), next)).permissionDecision).toBe('allow')
     expect(calls).toBe(1)
   } finally { discoveryOverride = undefined; await reload({}) }
 })
@@ -517,17 +519,15 @@ test('model switch denies context exceeding fresh exact destination bounds witho
   const beforeEnvironment = new Map(environment)
   host.session.model = async () => 'codex/gpt-6.1-sol'
   try {
-    for (const metadata of [
-      { contextWindow: 32000, maxContextWindow: 872000 },
-      { inputTokenLimit: 16000 },
-      { contextWindow: 32000, inputTokenLimit: 16000 },
-      { maxContextWindow: 64000 },
-    ]) {
+    for (const [metadata, bound] of [
+      [{ contextWindow: 32000, maxContextWindow: 872000 }, 27904],
+      [{ inputTokenLimit: 16000 }, 8192],
+      [{ contextWindow: 32000, inputTokenLimit: 16000 }, 13952],
+    ] as const) {
       const model = discoveredModel('codex/small')
       model.metadata = { ...unknownMetadata(), ...metadata }
       discoveryOverride = { models: [model], providers: [{ provider: 'codex', status: 'fresh', source: 'fixture switch bounds', observedAt }] }
       await reload({})
-      const bound = Math.min(model.metadata.inputTokenLimit ?? Infinity, model.metadata.contextWindow ?? model.metadata.maxContextWindow ?? Infinity)
       const beforeWires = wires.length
       const beforeState = JSON.stringify([...sessionState])
       const beforeEnv = JSON.stringify([...environment])
@@ -561,6 +561,7 @@ test('switch guard does not invent bounds for unknown, stale, worker or native C
   try {
     for (const [status, metadata] of [
       ['fresh', {}],
+      ['fresh', { maxContextWindow: 64000 }],
       ['unavailable', { contextWindow: 32000 }],
     ] as const) {
       const model = discoveredModel('codex/unknown', 'fixture')
@@ -585,7 +586,7 @@ test('switch guard resolves aliases and fails closed if its hook fails', async (
     await reload({ fixture: provider('small') }, { small: model.model })
     const denied = await hook('classic.PreModelSwitch')(host, switchInput('small', 32001), async () => { throw new Error('Unsafe switch reached native hook') })
     expect(denied.permissionDecision).toBe('deny')
-    expect(denied.permissionDecisionReason).toContain('32000 token')
+    expect(denied.permissionDecisionReason).toContain('25856 token')
     const failed = await hook('classic.PreModelSwitch')(host, switchInput('codex/missing', 0), async () => { throw new Error('fixture downstream failure') })
     expect(failed.permissionDecision).toBe('deny')
     expect(failed.permissionDecisionReason).toContain('context check failed')
@@ -659,7 +660,7 @@ test('routes the exact custom agent frontmatter model through agent.spawn', asyn
     const refused = await step(name, 'local/qwen')
     expect(approvalAskCount).toBeGreaterThan(asks)
     expect(wires.length).toBe(before)
-    expect(JSON.stringify(refused.result)).toContain('not approved')
+    expect(refused.diagnostics.join('\n')).toContain('not approved')
   } finally {
     host.session.cwd = oldCwd
   }
@@ -695,7 +696,7 @@ test('declared provider turns do not repeat discovery', async () => {
   const refused = await step('general-purpose', 'local/qwen')
   expect(discoveries.length).toBe(beforeTurn)
   expect(wires.length).toBe(beforeWires)
-  expect(JSON.stringify(refused.result)).toContain('not approved')
+  expect(refused.diagnostics.join('\n')).toContain('not approved')
 })
 
 test('a retargeted declared provider asks for approval again before compaction', async () => {
@@ -743,7 +744,8 @@ test('a declared model whose config does not validate is refused instead of sent
     let item = await generator.next()
     while (!item.done) { chunks.push(item.value); item = await generator.next() }
     expect(nativeCalls).toBe(0)
-    expect(JSON.stringify(chunks)).toContain('does not validate')
+    expect(chunks).toEqual([{ kind: 'stop', stopReason: null, usage: null }])
+    expect(diagnostics.at(-1)).toContain('does not validate')
   } finally {
     host.session.model = sessionModel
     await reload({})
@@ -789,12 +791,52 @@ test("routed steps send the installed claude's tool definitions, and a subagent 
   expect(status).toContain("Tool definitions and agent prompts: Claude Code's own, read from the installed claude 2.1.296 (built-in agent types Explore, general-purpose)")
 })
 
+test('workflow and resumed native spawns retain exact ownership and pinned permissions', async () => {
+  await reload({ local: provider('qwen') })
+  for (const shape of [
+    { workflow: { runId: 'owned-workflow', agentIndex: 1 }, background: true },
+    { isTeammate: true, name: 'owned-peer', background: true },
+    { background: false },
+  ]) {
+    const input = { ...spawnInput('codex/gpt-6.1-sol', 'general-purpose', 'local/qwen'), ...shape, permissionMode: 'plan' }
+    let dispatched: any
+    const result = await hook('agent.spawn')(host, input, async (e: any) => { dispatched = e; return { model: 'local/qwen', agentId: `owned-lifecycle-${agents.length}` } })
+    expect(dispatched).toMatchObject({ model: 'local/qwen', permissionMode: 'plan', background: shape.background, provider: input.provider })
+    expect(result.model).toBe('local/qwen')
+  }
+  const resumedId = 'owned-resumed-exact'
+  agents.push({ id: resumedId, type: 'general-purpose', description: 'owned resumed context' })
+  const input = { ...spawnInput('codex/gpt-6.1-sol', 'general-purpose'), resume: { agentId: resumedId }, permissionMode: 'plan' }
+  let seen: any
+  await hook('agent.spawn')(host, input, async (e: any) => { seen = e; return { model: 'local/qwen', agentId: resumedId } })
+  expect(seen).toBe(input)
+  const output: any[] = []
+  const generator = hook('turn.step')(host, { agentId: resumedId, model: 'haiku', turnId: 'resumed-turn', index: 0 }, async function* () { throw new Error('must not borrow native or main model') })
+  for await (const chunk of generator) output.push(chunk)
+  expect(wires.at(-1).req).toMatchObject({ target: 'local/qwen', who: resumedId })
+  await reload({})
+})
+
+test('a child with an unknown parent never borrows the main model', async () => {
+  const id = 'owned-unknown-parent-child'
+  agents.push({ id, parentId: 'unobserved-parent', type: 'general-purpose', description: 'owned unknown lineage' })
+  const before = wires.length
+  const start = diagnostics.length
+  let nativeCalls = 0
+  const chunks: any[] = []
+  for await (const chunk of hook('turn.step')(host, { agentId: id, model: 'haiku', turnId: 'unknown-owner', index: 0 }, async function* () { nativeCalls++; return {} })) chunks.push(chunk)
+  expect(wires.length).toBe(before)
+  expect(nativeCalls).toBe(0)
+  expect(chunks).toEqual([{ kind: 'stop', stopReason: null, usage: null }])
+  expect(diagnostics.slice(start).join('\n')).toContain('no observed model or verified parent model')
+})
+
 test('a built-in agent type the installed claude did not start is refused, never sent with a made-up prompt', async () => {
   const before = wires.length
   const refused = await step('claude-code-guide', 'codex/gpt-6.1-sol')
   expect(refused.nextCalls).toBe(0)
   expect(wires.length).toBe(before)
-  expect(JSON.stringify(refused.result)).toContain('did not start a claude-code-guide agent')
+  expect(refused.diagnostics.join('\n')).toContain('did not start a claude-code-guide agent')
 })
 
 test("without the installed claude's definitions a main step falls back and says so, and a subagent step is refused", async () => {
@@ -814,7 +856,7 @@ test("without the installed claude's definitions a main step falls back and says
     const refused = await step('general-purpose', 'codex/gpt-6.1-sol')
     expect(refused.nextCalls).toBe(0)
     expect(wires.length).toBe(before)
-    expect(JSON.stringify(refused.result)).toContain("Claude Code's own prompt for the general-purpose agent could not be read from the installed claude (fixture tool capture failure)")
+    expect(refused.diagnostics.join('\n')).toContain("Claude Code's own prompt for the general-purpose agent could not be read from the installed claude (fixture tool capture failure)")
     // A failed read is not run again for every step; a refresh tries it again.
     const runs = toolCaptureRuns
     await step('general-purpose', 'codex/gpt-6.1-sol')

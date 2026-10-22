@@ -69,7 +69,7 @@ const provider = createServer(async (request, response) => {
   // conversation's prompt (the main request echoes the task in its tool calls).
   const familyChild = !serialized.includes(FAMILY_PROMPT) ? userText.match(/OWNED_FAMILY_([A-Z]+)/)?.[1] : undefined
   const child = !serialized.includes(CHILDREN_PROMPT) ? userText.match(/OWNED_CHILD_([AB])/)?.[1] : undefined
-  const entry = { phase, kind: 'provider', family, model: body.model, unreadableTask: serialized.includes('is not readable by plugins'), ...(auxiliary ? { auxiliary } : {}), ...(fork ? { fork } : {}), ...(child && phase === 'children' ? { child } : {}), ...(familyChild && phase === 'family' ? { familyChild } : {}), classify: userText.includes('labels'), compaction,
+  const entry = { phase, kind: 'provider', family, model: body.model, unreadableTask: serialized.includes('is not readable by plugins'), ...(auxiliary ? { auxiliary } : {}), ...(fork ? { fork } : {}), ...(child && phase === 'children' ? { child } : {}), ...(familyChild && phase === 'family' ? { familyChild } : {}), classify: userText.includes('Owned classification fixture'), compaction,
     evaluator: serialized.includes('OWNED_EVALUATOR'), formatKeys: Object.keys(body.response_format?.json_schema?.schema?.properties ?? {}), commandRan: (body.messages ?? []).some(message => message.role === 'tool' && JSON.stringify(message.content).includes('OWNED_CLASSIFIER_OK')), started: performance.now() }
   observations.push(entry)
   let content = 'Owned provider answer', calls
@@ -91,7 +91,7 @@ const provider = createServer(async (request, response) => {
   // The routed permission judgment is a tool-less request whose answer must
   // match its { decision, reason } JSON schema (hooks/permission.ts).
   } else if (body.response_format?.json_schema) content = JSON.stringify(schemaValue(body.response_format.json_schema.schema))
-  else if (userText.includes('labels')) content = 'owned'
+  else if (userText.includes('Owned classification fixture')) content = 'owned'
   entry.ended = performance.now()
   response.setHeader('content-type', 'text/event-stream')
   const send = value => response.write(`data: ${JSON.stringify(value)}\n\n`)
@@ -150,8 +150,8 @@ try {
     if (e.agentId && e.index === 0 && ownedPhase === 'children') {
       const settle = async work => { try { return await work() } catch (error) { return { threw: String(error?.message ?? error).slice(0, 300) } } }
       const report = { agentId: e.agentId, model: e.model }
-      report.complete = await settle(async () => { const answer = await $.model.complete({ model: 'haiku', prompt: 'OWNED_AUX_' + e.agentId }); return { isAnswered: answer.isAnswered, text: answer.text ?? null } })
-      report.classify = await settle(async () => ({ label: await $.model.classify('Owned classification fixture', ['owned', 'other']) ?? null }))
+      report.complete = await settle(async () => { const answer = await $.model.complete({ model: e.model, prompt: 'OWNED_AUX_' + e.agentId }); return { isAnswered: answer.isAnswered, text: answer.text ?? null } })
+      report.classify = await settle(async () => ({ label: await $.model.classify('Owned classification fixture', ['owned', 'other'], { model: e.model }) ?? null }))
       report.fork = await settle(async () => { const answer = await $.model.fork({ prompt: 'OWNED_FORK_' + e.agentId }); return { isAnswered: answer.isAnswered, text: answer.text ?? null } })
       await settle(() => $.fs.write('owned-prelude/' + e.agentId + '.json', JSON.stringify(report)))
     }
@@ -178,9 +178,8 @@ try {
   const env = Object.fromEntries(['PATH', 'PATHEXT', 'TMPDIR', 'LANG', 'LC_ALL', 'SystemRoot', 'SystemDrive', 'WINDIR', 'ComSpec', 'ProgramFiles', 'ProgramFiles(x86)', 'CLAUDE_CODE_GIT_BASH_PATH', 'TEMP', 'TMP', 'RICE_CLAUDE_EXECUTABLE'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]))
   Object.assign(env, { ...(process.platform === 'win32' ? { OS: 'Windows_NT' } : {}), HOME: fixture, USERPROFILE: fixture, CLAUDE_CONFIG_DIR: configDir, CODEX_HOME: join(fixture, '.codex'), ANTHROPIC_API_KEY: 'owned-no-account', ANTHROPIC_BASE_URL: base,
     RICE_MULTI_MODELS_SEARCH_URL: `http://127.0.0.1:${search.address().port}/search`, ENABLE_TOOL_SEARCH: 'true', DISABLE_AUTOUPDATER: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1' })
-  // Public hooks answer a refusal or a failed response as the step's own text,
-  // so the host reports an ordinary result: exit 0 and is_error false. Exit 1
-  // with is_error is reserved for a host API error (here only the denied stub).
+  // A failed plugin response uses the public null stop reason, not fabricated answer text.
+  // The host still owns CLI error bookkeeping; the failure proof records that boundary.
   async function run(name, extra, prompt, { permission = 'dontAsk', model = 'a/main', expectSuccess = true } = {}) {
     phase = name; mainCalls = 0
     const started = Date.now()
@@ -214,16 +213,16 @@ try {
     }
     const turns = observations.filter(event => event.phase === 'children' && event.child)
     assert.deepEqual(turns.map(event => `${event.child}:${event.family}/${event.model}`).sort(), ['A:a/child', 'B:b/child'], 'each child receives its task on its explicit provider/model')
-    // Public auxiliary calls carry no caller identity: they belong to the main
-    // conversation, so they use its family even from inside a child loop.
+    // Explicit auxiliary models belong to the caller's request, not a guessed main owner.
+    // A public fork alone is documented to use the main thread's last sent prefix.
     const agentIds = reports.map(report => report.agentId).sort()
     const requests = observations.filter(event => event.phase === 'children' && event.auxiliary)
     assert.deepEqual(requests.map(event => event.auxiliary).sort(), agentIds, 'one completion per child loop')
-    assert.ok(requests.every(event => event.family === 'a' && event.model === 'main'), 'auxiliary completions use the main conversation family')
+    assert.deepEqual(requests.map(event => event.family+'/'+event.model).sort(), ['a/child','b/child'], 'auxiliary completions honor each explicit child model')
     assert.ok(Math.max(...requests.map(event => event.started)) < Math.min(...requests.map(event => event.ended)), 'concurrent auxiliary completions overlap')
     const labels = observations.filter(event => event.phase === 'children' && event.classify)
     assert.equal(labels.length, 2, 'one classification per child loop')
-    assert.ok(labels.every(event => event.family === 'a' && event.model === 'main'), 'classifications use the main conversation family')
+    assert.deepEqual(labels.map(event => event.family+'/'+event.model).sort(), ['a/child','b/child'], 'classifications honor each explicit child model')
     const forks = observations.filter(event => event.phase === 'children' && event.fork)
     assert.deepEqual(forks.map(event => event.fork).sort(), agentIds, 'one fork per child loop')
     assert.ok(forks.every(event => event.family === 'a' && event.model === 'main'), 'forks of the main thread use the main conversation family')
@@ -232,7 +231,7 @@ try {
     // its task. The child is refused visibly; nothing reaches any provider.
     await run('children-unsaved', ['--no-session-persistence'], CHILDREN_PROMPT)
     assert.equal(observations.filter(event => event.phase === 'children-unsaved' && event.model === 'child').length, 0, 'a child without a readable task sends nothing')
-    assert.ok(observations.some(event => event.phase === 'children-unsaved' && event.model === 'main' && event.unreadableTask), 'the parent receives the visible refusal')
+    assert.ok(observations.some(event => event.phase === 'children-unsaved' && event.model === 'main'), 'the native parent loop remains operational without inventing child answers')
     assert.equal(denied.filter(event => event.phase === 'children-unsaved').length, 0, 'a child without a readable task never reaches native Claude')
   }
   if (wants('family')) {
@@ -273,19 +272,22 @@ try {
     assert.ok(observations.some(event => event.phase === 'skill-temp' && event.family === 'a' && event.model === 'main'), 'temporary skill alias retains the selected primary provider')
     assert.ok(observations.some(event => event.phase === 'skill-fork' && event.family === 'b' && event.model === 'child'), 'forked skill uses its explicitly selected provider')
     const unsaved = await run('skill-fork-unsaved', ['--no-session-persistence'], '/owned-fork')
-    assert.match(unsaved.result, /transcript of .+ is unreadable/, 'without persistence the fork refuses visibly')
+    assert.equal(unsaved.stop_reason, null, 'an unreadable fork produces an unsuccessful stop instead of fabricated assistant text')
     assert.equal(observations.filter(event => event.phase === 'skill-fork-unsaved' && event.kind === 'provider').length, 0, 'an unreadable fork sends nothing')
     assert.equal(denied.filter(event => event.phase === 'skill-fork-unsaved').length, 0, 'an unreadable fork never falls back to Claude')
   }
   if (wants('budget')) {
     const result = await run('budget', ['--no-session-persistence', '--tools', ''], 'Owned oversized context. '.repeat(250), { model: 'budget/main' })
-    assert.match(result.result, /95% safety threshold.*512 token input bound/, 'the configured input bound refuses visibly as the step answer')
+    assert.equal(result.stop_reason, null, 'the bounded guard produces an unsuccessful step, not an assistant answer')
+    assert.equal(result.result, '', 'the budget diagnostic is not fabricated assistant content')
     assert.equal(observations.filter(event => event.phase === 'budget' && event.kind === 'provider').length, 0, 'an oversized request stops before provider dispatch')
   }
   if (wants('failure')) {
     const result = await run('partial-failure', ['--no-session-persistence'], 'Return the owned partial output.')
     assert.equal(observations.filter(event => event.phase === 'partial-failure' && event.kind === 'provider').length, 1, 'a committed partial response is not replayed')
-    assert.match(result.result, /rice-multi-models: .*response failed/, 'the incomplete response is reported as the step answer')
+    assert.equal(result.result, 'Owned partial output', 'only real partial output is retained, never fabricated success or failure text')
+    assert.equal(result.stop_reason, null, 'the provider failure retains the supported unsuccessful stop shape')
+    console.log(JSON.stringify({ nativeFailureBoundary: { stopReason: result.stop_reason, cliIsError: result.is_error, providerReplayed: false, fabricatedAnswer: false } }))
   }
   if (wants('evaluators')) {
     // Prompt-type Stop evaluators are routed. Agent-type evaluators run natively
