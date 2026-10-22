@@ -317,6 +317,111 @@ test('fork uses the last completed main request snapshot, not current context', 
   expect(JSON.stringify(sent.at(-1))).not.toContain('CURRENT_CONTEXT_MUST_NOT_LEAK')
 })
 
+test('fork snapshots the last dispatched main request even when that request fails', async () => {
+  const f = contextFixture(10_000, 10_000)
+  await startContext(f)
+  let messages: any[] = [{ role: 'user', content: 'LAST_SUCCESS_PREFIX' }]
+  f.host.session.messages = async () => messages
+  f.host.prompt = { compose: async () => ({ sections: [{ id: 'base', text: messages[0]!.content === 'LAST_SENT_FAILED_PREFIX' ? 'LAST_SENT_FAILED_SYSTEM' : 'LAST_SUCCESS_SYSTEM' }] }) }
+  const sent: any[] = []
+  let failMain = false
+  f.host.process.spawn = async function* (input: any) {
+    const req = JSON.parse(input.input).req
+    sent.push(req)
+    const events = req.who === 'main' && failMain
+      ? [{ type: 'text', text: 'partial failed output' }, { type: 'error', kind: 'request', text: 'owned request failed' }]
+      : [{ type: 'text', text: 'owned completed output' }, { type: 'stop', reason: 'end_turn' }]
+    yield { stream: 'stdout', text: events.map(event => JSON.stringify(event)).join('\n') + '\n' }
+    return { code: 0 }
+  }
+  const noNative = async function* () { throw new Error('must not use native inference') }
+  for await (const _chunk of callbacks.get('turn.step')!(f.host, { model: 'codex/fresh', turnId: 'last-success', index: 0, messageCount: 1 }, noNative)) {}
+  const failedMessages = [{ role: 'user', content: 'LAST_SENT_FAILED_PREFIX' }]
+  messages = failedMessages
+  failMain = true
+  for await (const _chunk of callbacks.get('turn.step')!(f.host, { model: 'codex/fresh', turnId: 'last-sent-failure', index: 0, messageCount: 1 }, noNative)) {}
+  const dispatchedContext = JSON.stringify(sent[1]!.transcript)
+  failedMessages[0]!.content = 'MUTATED_AFTER_DISPATCH'
+  messages = [{ role: 'user', content: 'x'.repeat(30_000) }]
+  for await (const _chunk of callbacks.get('turn.step')!(f.host, { model: 'codex/fresh', turnId: 'unsent-over-budget', index: 0, messageCount: 1 }, noNative)) {}
+  expect(sent.filter(request => request.who === 'main')).toHaveLength(2)
+  messages = [{ role: 'user', content: 'CURRENT_CONTEXT_MUST_NOT_LEAK' }]
+  f.host.prompt.compose = async () => { throw new Error('fork must not compose a new system') }
+  const fork = await callbacks.get('model.fork')!(f.host, { prompt: 'FORK_QUESTION' }, noNative)
+  expect(fork.value.isAnswered).toBe(true)
+  expect(sent.at(-1)).toMatchObject({ target: 'codex/fresh', system: expect.stringContaining('LAST_SENT_FAILED_SYSTEM'), tools: [], who: 'fork' })
+  const forkTranscript = JSON.stringify(sent.at(-1).transcript)
+  expect(forkTranscript).toContain('LAST_SENT_FAILED_PREFIX')
+  expect(forkTranscript).not.toContain('LAST_SUCCESS_PREFIX')
+  expect(forkTranscript).not.toContain('MUTATED_AFTER_DISPATCH')
+  expect(forkTranscript).not.toContain('CURRENT_CONTEXT_MUST_NOT_LEAK')
+  expect(forkTranscript).toContain('FORK_QUESTION')
+  expect(JSON.stringify(sent[1]!.transcript)).toBe(dispatchedContext)
+  expect(sent.at(-1).transcript).toEqual([{ role: 'user', content: [{ type: 'text', text: 'LAST_SENT_FAILED_PREFIX' }, { type: 'text', text: 'FORK_QUESTION' }] }])
+})
+
+test('a failed routed stream preserves text after an incomplete tool without committing the tool', async () => {
+  const f = contextFixture()
+  await startContext(f)
+  f.host.session.messages = async () => [{ role: 'user', content: 'owned action' }]
+  f.host.prompt = { compose: async () => ({ sections: [{ id: 'base', text: 'owned instructions' }] }) }
+  f.host.process.spawn = async function* () {
+    const events = [{ type: 'tool_use', id: 'toolu_uncommitted', name: 'Bash', input: { command: 'must not execute' } }, { type: 'text', text: 'real partial after tool' }, { type: 'usage', in: 21, out: 4, cacheRead: 0, cacheWrite: 0 }, { type: 'error', kind: 'response', text: 'owned transport failed' }]
+    yield { stream: 'stdout', text: events.map(event => JSON.stringify(event)).join('\n') + '\n' }
+    return { code: 1 }
+  }
+  const generator = callbacks.get('turn.step')!(f.host, { model: 'codex/fresh', turnId: 'failed-stream-after-tool', index: 0, messageCount: 1 }, async function* () { throw new Error('no native replay') })
+  const chunks: any[] = []
+  let item = await generator.next()
+  while (!item.done) { chunks.push(item.value); item = await generator.next() }
+  expect(chunks).toEqual([{ kind: 'text', index: 1, text: 'real partial after tool' }, { kind: 'stop', stopReason: null, usage: { input_tokens: 21, output_tokens: 4, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'codex/fresh' } }])
+  expect(item.value).toMatchObject({ answer: 'real partial after tool', toolUses: [], stopReason: null, usage: { input_tokens: 21, output_tokens: 4 } })
+  expect(f.notices.join('\n')).toContain('owned transport failed')
+})
+
+test('successful stream preserves text, tool, and trailing text order', async () => {
+  const f = contextFixture()
+  await startContext(f)
+  f.host.session.messages = async () => [{ role: 'user', content: 'owned action' }]
+  f.host.prompt = { compose: async () => ({ sections: [{ id: 'base', text: 'owned instructions' }] }) }
+  f.host.process.spawn = async function* () {
+    const events = [{ type: 'text', text: 'before' }, { type: 'tool_use', id: 'toolu_success', name: 'Read', input: { file_path: '/owned' } }, { type: 'text', text: 'after' }, { type: 'usage', in: 12, out: 3, cacheRead: 0, cacheWrite: 0 }, { type: 'stop', reason: 'tool_use' }]
+    yield { stream: 'stdout', text: events.map(event => JSON.stringify(event)).join('\n') + '\n' }
+    return { code: 0 }
+  }
+  const generator = callbacks.get('turn.step')!(f.host, { model: 'codex/fresh', turnId: 'successful-interleave', index: 0, messageCount: 1 }, async function* () { throw new Error('no native replay') })
+  const chunks: any[] = []
+  let item = await generator.next()
+  while (!item.done) { chunks.push(item.value); item = await generator.next() }
+  expect(chunks.map(chunk => chunk.kind)).toEqual(['text', 'tool', 'input', 'text', 'stop'])
+  expect(chunks[0]).toMatchObject({ index: 0, text: 'before' })
+  expect(chunks[3]).toMatchObject({ index: 2, text: 'after' })
+  expect(chunks.at(-1)).toMatchObject({ stopReason: 'tool_use', usage: { input_tokens: 12, output_tokens: 3 } })
+  expect(item.value).toMatchObject({ answer: 'beforeafter', toolUses: [{ name: 'Read', input: { file_path: '/owned' } }], stopReason: 'tool_use' })
+})
+
+test('cancellation keeps only observed text and never reports a completed answer', async () => {
+  const f = contextFixture()
+  await startContext(f)
+  f.host.session.messages = async () => [{ role: 'user', content: 'owned action' }]
+  f.host.prompt = { compose: async () => ({ sections: [{ id: 'base', text: 'owned instructions' }] }) }
+  const controller = new AbortController()
+  f.host.process.spawn = async function* () {
+    yield { stream: 'stdout', text: JSON.stringify({ type: 'text', text: 'observed before cancellation' }) + '\n' }
+    yield { stream: 'stdout', text: JSON.stringify({ type: 'tool_use', id: 'toolu_cancelled', name: 'Bash', input: { command: 'must not execute' } }) + '\n' }
+    return { code: 0 }
+  }
+  const generator = callbacks.get('turn.step')!(f.host, { model: 'codex/fresh', turnId: 'cancelled-stream', index: 0, messageCount: 1 }, { signal: controller.signal })
+  const first = await generator.next()
+  expect(first.value).toMatchObject({ kind: 'text', text: 'observed before cancellation' })
+  controller.abort()
+  const remaining: any[] = []
+  let item = await generator.next()
+  while (!item.done) { remaining.push(item.value); item = await generator.next() }
+  expect(remaining).toEqual([{ kind: 'stop', stopReason: null, usage: null }])
+  expect(item.value).toMatchObject({ answer: 'observed before cancellation', toolUses: [], stopReason: null, usage: null })
+})
+
 test('a failed routed stream preserves partial text and usage but commits no pending tool', async () => {
   const f = contextFixture()
   await startContext(f)
@@ -331,8 +436,8 @@ test('a failed routed stream preserves partial text and usage but commits no pen
   const chunks: any[] = []
   let item = await generator.next()
   while (!item.done) { chunks.push(item.value); item = await generator.next() }
-  expect(chunks).toEqual([{ kind: 'text', index: 0, text: 'real partial output' }, { kind: 'stop', stopReason: null, usage: { input_tokens: 21, output_tokens: 4, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'codex/fresh' } }])
-  expect(item.value).toMatchObject({ answer: 'real partial output', toolUses: [], stopReason: null })
+  expect(chunks).toEqual([{ kind: 'text', index: 0, text: 'real partial output' }, { kind: 'text', index: 2, text: 'uncommitted tail' }, { kind: 'stop', stopReason: null, usage: { input_tokens: 21, output_tokens: 4, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'codex/fresh' } }])
+  expect(item.value).toMatchObject({ answer: 'real partial outputuncommitted tail', toolUses: [], stopReason: null })
   expect(f.notices.join('\n')).toContain('owned transport failed')
 })
 

@@ -178,9 +178,12 @@ test('maxTokensParam sends exactly the declared key, or none when the output cei
   }
 })
 
-test('a known OpenAI output ceiling without an explicit dialect refuses instead of guessing a cap key', () => {
-  for (const params of [undefined, { max_tokens: 100 }, { max_completion_tokens: 100 }]) {
-    expect(() => body({ model: { maxTokensParam: undefined }, provider: { params } })).toThrow('requires an explicit maxTokensParam request policy (max_tokens or max_completion_tokens)')
+test('a known OpenAI output ceiling requires a declared or parameter-supplied dialect', () => {
+  expect(() => body({ model: { maxTokensParam: undefined }, provider: { params: undefined } })).toThrow('requires an explicit maxTokensParam request policy (max_tokens or max_completion_tokens)')
+  for (const [param, other] of [['max_tokens', 'max_completion_tokens'], ['max_completion_tokens', 'max_tokens']] as const) {
+    const sent = body({ model: { maxTokensParam: undefined, params: { [param]: 100 } } })
+    expect(sent[param]).toBe(100)
+    expect(sent[other]).toBeUndefined()
   }
 })
 

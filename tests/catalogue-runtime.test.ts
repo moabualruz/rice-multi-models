@@ -5,6 +5,8 @@ import { fingerprint, inputBudget, parseConfig, type Kind } from '../hooks/confi
 import { resolve } from '../hooks/names'
 import { loadText } from '../hooks/providers'
 import { CODECS } from '../helper/styx/codecs'
+import { nativeConstraints } from '../helper/native/constraints'
+import { requestInputBudget } from '../hooks/budget'
 
 const provider = { kind: 'openai', baseUrl: 'https://gateway.example/v1', auth: { command: ['/usr/bin/security', 'find-generic-password', '-w'], ttlSeconds: 90 } }
 const source = (models?: Record<string, unknown>, extra: Record<string, unknown> = {}) => loadText('/unchanged/rice-multi-models.json', JSON.stringify({ version: 1, providers: { gateway: { ...provider, ...extra, ...(models === undefined ? {} : { models }) } } }))
@@ -193,6 +195,31 @@ test('OpenAI discovered output ceilings require an explicit dialect without drop
     expect(capped[maxTokensParam]).toBe(777)
     expect(['max_tokens', 'max_completion_tokens'].filter(key => key in capped)).toEqual([maxTokensParam])
   }
+})
+
+test('OpenAI native output caps retain the configured request dialect and input reservation', () => {
+  const declaredParams = remote(source({ m: { contextWindow: 32_000, params: { max_tokens: 512 } } }), 'm')
+  const declaredEncoded = CODECS.openai.encode(neutral, declaredParams.provider, declaredParams.model)
+  const declaredBody = JSON.parse(nativeConstraints(declaredEncoded.body, declaredParams.model, { maxTokens: 2_048 }))
+  expect(declaredBody.max_tokens).toBe(512)
+  expect(declaredBody.max_completion_tokens).toBeUndefined()
+  expect(inputBudget(declaredParams.model)).toBe(31_488)
+  expect(requestInputBudget({ contextWindow: 32_000, outputTokenLimit: 2_048 }, { outputReserve: 2_048 })).toBe(27_904)
+
+  const explicit = remote(source({ m: { contextWindow: 32_000, maxOutputTokens: 2_048, maxTokensParam: 'max_completion_tokens', params: { max_tokens: 512 } } }), 'm')
+  const explicitEncoded = CODECS.openai.encode(neutral, explicit.provider, explicit.model)
+  const explicitBody = JSON.parse(nativeConstraints(explicitEncoded.body, explicit.model, { maxTokens: 2_048 }))
+  expect(explicitBody.max_completion_tokens).toBe(2_048)
+  expect(explicitBody.max_tokens).toBeUndefined()
+  expect(inputBudget(explicit.model)).toBe(29_952)
+
+  const fallback = remote(source({ m: { contextWindow: 32_000 } }), 'm')
+  const fallbackEncoded = CODECS.openai.encode(neutral, fallback.provider, fallback.model)
+  const fallbackBody = JSON.parse(nativeConstraints(fallbackEncoded.body, fallback.model, { maxTokens: 2_048 }))
+  expect(fallbackBody.max_completion_tokens).toBe(2_048)
+  expect(fallbackBody.max_tokens).toBeUndefined()
+  expect(inputBudget(fallback.model)).toBe(32_000)
+  expect(requestInputBudget({ contextWindow: 32_000, outputTokenLimit: 2_048 }, { outputReserve: 2_048 })).toBe(27_904)
 })
 
 test('provider params cannot lift a discovered output ceiling, while lower request policies stay intact', () => {

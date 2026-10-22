@@ -1,3 +1,4 @@
+import { openAIOutputTokenParam } from '../../hooks/config.ts'
 import type { ModelConfig } from '../../hooks/config.ts'
 import type { StepRequest } from '../../hooks/protocol.ts'
 import { record } from './ownership.ts'
@@ -20,8 +21,11 @@ export function nativeConstraints(body: string, model: ModelConfig, native: Step
     if (native.outputSchema) sent.output_config = { ...object(sent.output_config), format: { type: 'json_schema', schema: native.outputSchema } }
   } else if (model.kind === 'openai' || model.kind === 'responses') {
     const responses = model.kind === 'responses'
-    const key = responses ? 'max_output_tokens' : model.maxTokensParam ?? 'max_completion_tokens'
-    if (native.maxTokens) sent[key] = cap(sent[key])
+    const key = responses ? 'max_output_tokens' : openAIOutputTokenParam(model, sent) ?? 'max_completion_tokens'
+    if (native.maxTokens) {
+      if (!responses) delete sent[key === 'max_tokens' ? 'max_completion_tokens' : 'max_tokens']
+      sent[key] = cap(sent[key])
+    }
     // Reasoning Chat models and Responses have no uniform server stop support.
     // nativeContracts enforces the exact strings without unsupported API fields.
     if (choice) {

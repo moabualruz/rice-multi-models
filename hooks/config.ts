@@ -457,10 +457,23 @@ export function undeclared(config: Config, name: string): string | undefined {
 // argv (or "none"), so any change to the helper asks again.
 export const fingerprint = (p: ProviderConfig) => `${p.kind}|${p.origin}|${p.auth === 'none' ? 'none' : `cmd:${JSON.stringify(p.auth.command)}`}`
 
+// Which Chat Completions output field the request already declares, with model policy taking precedence.
+export function openAIOutputTokenParam(model: Pick<ModelConfig, 'kind' | 'maxTokensParam'>, params: Record<string, unknown>): 'max_tokens' | 'max_completion_tokens' | undefined {
+  if (model.kind !== 'openai') return undefined
+  if (model.maxTokensParam) return model.maxTokensParam
+  if (isCount(params['max_tokens'])) return 'max_tokens'
+  if (isCount(params['max_completion_tokens'])) return 'max_completion_tokens'
+  return undefined
+}
+
 // Shared context must leave room for every output cap the selected codec emits.
-export function inputBudget(m: Pick<ModelConfig, 'kind' | 'contextWindow' | 'maxInputTokens' | 'maxOutputTokens' | 'maxTokensParam'>): number | null {
+export function inputBudget(m: Pick<ModelConfig, 'kind' | 'contextWindow' | 'maxInputTokens' | 'maxOutputTokens' | 'maxTokensParam' | 'params'>): number | null {
   if (m.contextWindow === undefined && m.maxInputTokens === undefined) return null
-  const reserved = KINDS[m.kind].sendsMaxTokens || m.kind === 'responses' || m.kind === 'gemini' || m.maxTokensParam ? (m.maxOutputTokens ?? 0) : 0
+  const openAIParam = openAIOutputTokenParam(m, m.params)
+  const openAIReserve = openAIParam ? Number(m.params[openAIParam]) : 0
+  const reserved = KINDS[m.kind].sendsMaxTokens || m.kind === 'responses' || m.kind === 'gemini' || m.maxTokensParam || openAIParam
+    ? m.maxOutputTokens ?? openAIReserve
+    : 0
   const contextBudget = m.contextWindow === undefined ? Infinity : m.contextWindow - reserved
   return Math.min(m.maxInputTokens ?? Infinity, contextBudget)
 }

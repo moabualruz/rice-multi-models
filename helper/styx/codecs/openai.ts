@@ -3,7 +3,7 @@
 // Modified by Mo Abualruz: import paths for this layout.
 // The `openai` kind: Chat Completions request bodies from the normalized transcript, and a decoder for the
 // provider's SSE stream. Pure.
-import { isObject } from '../../../hooks/config'
+import { isObject, openAIOutputTokenParam } from '../../../hooks/config'
 import type { ModelConfig } from '../../../hooks/config'
 import { decoderOver, isIndex, params, parseJson, sseReader } from '../codec'
 import type { Codec, Neutral, Sink } from '../codec'
@@ -163,15 +163,20 @@ function decoder() {
 
 export const openai: Codec = {
   encode(n, p, m) {
-    if (m.maxOutputTokens !== undefined && !m.maxTokensParam) throw new Error('openai output ceiling requires an explicit maxTokensParam request policy (max_tokens or max_completion_tokens)')
     const tools = m.tools ? n.tools : []
     const base: Json = {}
     if (m.maxTokensParam && m.maxOutputTokens !== undefined) base[m.maxTokensParam] = m.maxOutputTokens
     if (!m.parallelToolCalls && tools.length > 0) base['parallel_tool_calls'] = false
     const { body, level } = params(base, p, m, n.effort)
+    const outputParam = openAIOutputTokenParam(m, body)
+    if (m.maxOutputTokens !== undefined && !outputParam) throw new Error('openai output ceiling requires an explicit maxTokensParam request policy (max_tokens or max_completion_tokens)')
+    if (outputParam && (m.maxTokensParam || m.maxOutputTokens !== undefined)) delete body[outputParam === 'max_tokens' ? 'max_completion_tokens' : 'max_tokens']
+    const output = outputParam && m.maxOutputTokens !== undefined
+      ? { [outputParam]: Math.min(m.maxOutputTokens, typeof body[outputParam] === 'number' ? body[outputParam] as number : Infinity) }
+      : {}
     const sent = {
       ...body,
-      ...(m.maxTokensParam && m.maxOutputTokens !== undefined ? { [m.maxTokensParam]: Math.min(m.maxOutputTokens, typeof body[m.maxTokensParam] === 'number' ? body[m.maxTokensParam] as number : Infinity) } : {}),
+      ...output,
       model: m.id,
       messages: toMessages(n, m),
       ...(tools.length > 0 ? { tools: tools.map(t => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.schema } })) } : {}),

@@ -4080,9 +4080,18 @@ function undeclared(config, name) {
   return void 0;
 }
 var fingerprint = (p) => `${p.kind}|${p.origin}|${p.auth === "none" ? "none" : `cmd:${JSON.stringify(p.auth.command)}`}`;
+function openAIOutputTokenParam(model2, params3) {
+  if (model2.kind !== "openai") return void 0;
+  if (model2.maxTokensParam) return model2.maxTokensParam;
+  if (isCount(params3["max_tokens"])) return "max_tokens";
+  if (isCount(params3["max_completion_tokens"])) return "max_completion_tokens";
+  return void 0;
+}
 function inputBudget(m) {
   if (m.contextWindow === void 0 && m.maxInputTokens === void 0) return null;
-  const reserved = KINDS[m.kind].sendsMaxTokens || m.kind === "responses" || m.kind === "gemini" || m.maxTokensParam ? m.maxOutputTokens ?? 0 : 0;
+  const openAIParam = openAIOutputTokenParam(m, m.params);
+  const openAIReserve = openAIParam ? Number(m.params[openAIParam]) : 0;
+  const reserved = KINDS[m.kind].sendsMaxTokens || m.kind === "responses" || m.kind === "gemini" || m.maxTokensParam || openAIParam ? m.maxOutputTokens ?? openAIReserve : 0;
   const contextBudget = m.contextWindow === void 0 ? Infinity : m.contextWindow - reserved;
   return Math.min(m.maxInputTokens ?? Infinity, contextBudget);
 }
@@ -7280,15 +7289,18 @@ function decoder4() {
 }
 var openai = {
   encode(n, p, m) {
-    if (m.maxOutputTokens !== void 0 && !m.maxTokensParam) throw new Error("openai output ceiling requires an explicit maxTokensParam request policy (max_tokens or max_completion_tokens)");
     const tools = m.tools ? n.tools : [];
     const base = {};
     if (m.maxTokensParam && m.maxOutputTokens !== void 0) base[m.maxTokensParam] = m.maxOutputTokens;
     if (!m.parallelToolCalls && tools.length > 0) base["parallel_tool_calls"] = false;
     const { body: body2, level } = params2(base, p, m, n.effort);
+    const outputParam = openAIOutputTokenParam(m, body2);
+    if (m.maxOutputTokens !== void 0 && !outputParam) throw new Error("openai output ceiling requires an explicit maxTokensParam request policy (max_tokens or max_completion_tokens)");
+    if (outputParam && (m.maxTokensParam || m.maxOutputTokens !== void 0)) delete body2[outputParam === "max_tokens" ? "max_completion_tokens" : "max_tokens"];
+    const output = outputParam && m.maxOutputTokens !== void 0 ? { [outputParam]: Math.min(m.maxOutputTokens, typeof body2[outputParam] === "number" ? body2[outputParam] : Infinity) } : {};
     const sent = {
       ...body2,
-      ...m.maxTokensParam && m.maxOutputTokens !== void 0 ? { [m.maxTokensParam]: Math.min(m.maxOutputTokens, typeof body2[m.maxTokensParam] === "number" ? body2[m.maxTokensParam] : Infinity) } : {},
+      ...output,
       model: m.id,
       messages: toMessages3(n, m),
       ...tools.length > 0 ? { tools: tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.schema } })) } : {},
@@ -7617,8 +7629,11 @@ function nativeConstraints(body2, model2, native) {
     if (native.outputSchema) sent.output_config = { ...object(sent.output_config), format: { type: "json_schema", schema: native.outputSchema } };
   } else if (model2.kind === "openai" || model2.kind === "responses") {
     const responses2 = model2.kind === "responses";
-    const key = responses2 ? "max_output_tokens" : model2.maxTokensParam ?? "max_completion_tokens";
-    if (native.maxTokens) sent[key] = cap(sent[key]);
+    const key = responses2 ? "max_output_tokens" : openAIOutputTokenParam(model2, sent) ?? "max_completion_tokens";
+    if (native.maxTokens) {
+      if (!responses2) delete sent[key === "max_tokens" ? "max_completion_tokens" : "max_tokens"];
+      sent[key] = cap(sent[key]);
+    }
     if (choice) {
       sent.tool_choice = choice.type === "any" ? "required" : choice.type === "tool" ? responses2 ? { type: "function", name: choice.name } : { type: "function", function: { name: choice.name } } : choice.type;
       if (choice.disable_parallel_tool_use) sent.parallel_tool_calls = false;

@@ -137,7 +137,7 @@ let interactiveSession: boolean | undefined
 const spawnBackground = new Map<string, boolean>()
 let seenTranscriptPath: string | undefined
 
-/** Immutable last successfully sent routed main request prefix, never reconstructed from current context. */
+/** Immutable last dispatched routed main request prefix, never reconstructed from current context. */
 let mainSnapshot: StepRequest | undefined
 
 function activeContext(model: string) {
@@ -711,7 +711,6 @@ async function* routedStep($: EngineInterface, e: TurnStepInput, signal?: AbortS
   const assembler = createAssembler(e.model)
   let handback: string | undefined
   let anchorMessages: number | undefined
-  let sent: StepRequest | undefined
   const pending: TurnStepChunk[] = []
   let holdingTools = false
   let visibleAnswer = ''
@@ -734,10 +733,12 @@ async function* routedStep($: EngineInterface, e: TurnStepInput, signal?: AbortS
     const metadata = catalogue.models.find(entry => entry.model === (remote?.target ?? e.model))?.metadata
     if (metadata?.tools === false && built.req.tools.length) throw new Error(`${e.model} reports no tool-call support; choose a tool-capable model for this session`)
     if (typeof built.req.effort === 'string' && metadata?.reasoningEfforts && !metadata.reasoningEfforts.includes(built.req.effort)) throw new Error(`${e.model} reports reasoning efforts ${metadata.reasoningEfforts.join(', ') || 'none'}; requested ${built.req.effort}`)
-    sent = JSON.parse(JSON.stringify(built.req)) as StepRequest
+    const wire = await wireFor($, built.req)
+    signal?.throwIfAborted()
+    if (e.agentId === undefined) mainSnapshot = JSON.parse(JSON.stringify(wire.req)) as StepRequest
     const reasoning: Reasoning[] = []
     let firstTool: string | undefined
-    for await (const event of helperStep(helperPort($), await wireFor($, built.req))) {
+    for await (const event of helperStep(helperPort($), wire)) {
       signal?.throwIfAborted()
       if (event.type === 'signature') reasoning.push({ thinking: event.thinking, signature: event.signature })
       else if (event.type === 'limits') {
@@ -752,13 +753,13 @@ async function* routedStep($: EngineInterface, e: TurnStepInput, signal?: AbortS
       else {
         if (event.type === 'tool_use') { firstTool ??= event.id; holdingTools = true }
         const chunks = assembler.feed(event)
-        // Text before the first tool remains live. A failed stream must not leave an executable
-        // tool block behind, so tool chunks and their following blocks commit only on success.
+        // Text before the first tool remains live. Tool chunks stay pending until success; on failure,
+        // the caller keeps real text but withholds every tool chunk.
         if (holdingTools) pending.push(...chunks)
         else {
-          for (const chunk of chunks) if (chunk.kind === 'text') visibleAnswer += chunk.text
           yield* chunks
         }
+        for (const chunk of chunks) if (chunk.kind === 'text') visibleAnswer += chunk.text
       }
     }
     remember(carryFor(who), firstTool, reasoning)
@@ -768,9 +769,10 @@ async function* routedStep($: EngineInterface, e: TurnStepInput, signal?: AbortS
   const end = assembler.end({ ...(handback ? { handback } : {}), ...(signal?.aborted ? { failure: `${PLUGIN}: request aborted` } : {}) })
   const reported = reportedInput(end.usage)
   if (reported !== undefined && anchorMessages !== undefined) setCapped(usageAnchors, who, { model: e.model, tokens: reported, messages: anchorMessages })
-  if (end.failure !== undefined) $.ui.log(end.failure, { to: 'transcript' })
-  else {
-    if (e.agentId === undefined && sent !== undefined) mainSnapshot = sent
+  if (end.failure !== undefined) {
+    $.ui.log(end.failure, { to: 'transcript' })
+    for (const chunk of pending) if (chunk.kind === 'text') yield chunk
+  } else {
     yield* pending
   }
   yield* end.chunks

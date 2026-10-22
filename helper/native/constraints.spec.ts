@@ -5,7 +5,7 @@ import { nativeConstraints } from './constraints.ts'
 test('native caps, named choice and structured output follow each direct protocol without raising ceilings', () => {
   const schema = { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] }
   for (const kind of ['openai', 'responses', 'anthropic', 'gemini', 'bedrock'] as const) {
-    const config = parseConfig(JSON.stringify({ providers: { owned: { kind, baseUrl: 'https://owned.example', auth: kind === 'bedrock' ? { command: ['/owned-key'] } : 'none', models: { main: { maxOutputTokens: 12 } } } } })).config!
+    const config = parseConfig(JSON.stringify({ providers: { owned: { kind, baseUrl: 'https://owned.example', auth: kind === 'bedrock' ? { command: ['/owned-key'] } : 'none', models: { main: { maxOutputTokens: 12, ...(kind === 'openai' ? { maxTokensParam: 'max_completion_tokens' } : {}) } } } } })).config!
     const model = config.providers.owned.models.main
     const sent = JSON.parse(nativeConstraints(JSON.stringify({ max_tokens: 12, max_completion_tokens: 12, max_output_tokens: 12, generationConfig: { maxOutputTokens: 12, responseSchema: {} }, inferenceConfig: { maxTokens: 12 } }), model,
       { maxTokens: 32, stopSequences: ['STOP'], toolChoice: { type: 'tool', name: 'Check', disable_parallel_tool_use: true }, outputSchema: schema }))
