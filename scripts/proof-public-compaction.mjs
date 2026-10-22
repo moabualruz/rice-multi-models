@@ -9,12 +9,12 @@ import { randomUUID } from 'node:crypto'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const fixture = mkdtempSync(join(tmpdir(), 'rice-public-compact-'))
-const plugin = join(fixture, 'plugin'), config = join(fixture, '.claude'), evidence = join(fixture, 'wires.json')
+const plugin = join(fixture, 'plugin'), config = join(fixture, '.claude'), evidence = join(fixture, 'wires.json'), lifecycle = join(fixture, 'lifecycle.json')
 const native = process.env.RICE_CLAUDE_EXECUTABLE || 'claude'
 let child
 try {
   mkdirSync(plugin); mkdirSync(config)
-  for (const directory of ['.claude-plugin', 'hooks', 'types', 'dist', 'scripts']) cpSync(join(root, directory), join(plugin, directory), { recursive: true })
+  for (const directory of ['.claude-plugin', 'hooks', 'types', 'dist', 'scripts', 'README.md']) cpSync(join(root, directory), join(plugin, directory), { recursive: true })
   writeFileSync(join(fixture, '.claude.json'), JSON.stringify({ hasCompletedOnboarding: true }))
   writeFileSync(join(config, 'settings.json'), '{}')
   const file = join(plugin, 'hooks/register.ts')
@@ -42,16 +42,48 @@ try {
     return {value:{code:0,signal:null}}
   })
 ` + source.slice(close)
+  const receiptTap = 'if (saved) await publishReceipt($, row)'
+  assert.ok(source.includes(receiptTap), 'production receipt tap exists')
+  source = source.replace(receiptTap, `if (saved) {
+    await publishReceipt($, row)
+    const records=await $.fs.exists(${JSON.stringify(lifecycle)})?JSON.parse(await $.fs.read(${JSON.stringify(lifecycle)})):[]
+    records.push({session:await $.session.id(),entries:(await read($,receiptsAtom)).entries})
+    await $.fs.write(${JSON.stringify(lifecycle)},JSON.stringify(records))
+  }`)
+  const observeTap = 'const observed = await observedReceipt(row, active, session, model ?? (agentId === undefined ? await $.session.model() : agentModels.get(agentId)), now)'
+  assert.ok(source.includes(observeTap))
+  source = source.replace(observeTap, `const snapshots=await $.fs.exists(${JSON.stringify(lifecycle + '.observations')})?JSON.parse(await $.fs.read(${JSON.stringify(lifecycle + '.observations')})):[]
+    snapshots.push({status:row.status,expected:row.expected,active:active.slice(0,3)})
+    await $.fs.write(${JSON.stringify(lifecycle + '.observations')},JSON.stringify(snapshots.slice(-6)))
+    ${observeTap}`)
   writeFileSync(file, source)
   const env = Object.fromEntries(['PATH', 'PATHEXT', 'SystemRoot', 'SystemDrive', 'WINDIR', 'ComSpec', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'ProgramFiles', 'ProgramFiles(x86)', 'CLAUDE_CODE_GIT_BASH_PATH'].filter(name => process.env[name] !== undefined).map(name => [name, process.env[name]]))
   Object.assign(env, { HOME: fixture, USERPROFILE: fixture, CLAUDE_CONFIG_DIR: config, CODEX_HOME: join(fixture, '.codex'), ANTHROPIC_API_KEY: 'owned-no-network', ANTHROPIC_BASE_URL: 'http://127.0.0.1:1', DISABLE_AUTOUPDATER: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' })
   const checked = spawnSync(native, ['plugin', 'validate', '--strict', plugin], { cwd: fixture, env, encoding: 'utf8', timeout: 10000 })
+  if (checked.status !== 0) process.stderr.write(checked.stdout + checked.stderr)
   assert.equal(checked.status, 0, (checked.stdout + checked.stderr).slice(-2000))
   async function run(label, session, args, prompt) {
     // Native Windows limits a command line to 32767 characters; claude -p reads a long prompt from stdin.
-    const viaStdin = prompt.length > 8000
-    child = spawn(native, ['-p', '--model', 'codex/owned-public', '--plugin-dir', plugin, '--setting-sources', 'user', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--tools', '', '--output-format', 'json', ...args, ...(viaStdin ? [] : [prompt])], { cwd: fixture, env, detached: process.platform !== 'win32', stdio: [viaStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'] })
-    if (viaStdin) child.stdin.end(prompt)
+    const script = Array.isArray(prompt) ? prompt : undefined
+    const viaStdin = script !== undefined || prompt.length > 8000
+    child = spawn(native, ['-p', '--model', 'codex/owned-public', '--plugin-dir', plugin, '--setting-sources', 'user', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--tools', '', '--output-format', script ? 'stream-json' : 'json', ...(script ? ['--input-format', 'stream-json', '--verbose'] : []), ...args, ...(viaStdin ? [] : [prompt])], { cwd: fixture, env, detached: process.platform !== 'win32', stdio: [viaStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'] })
+    let pending = '', results = 0
+    const outputs = []
+    const send = text => child.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content: text } }) + '\n')
+    if (script) {
+      child.stdin.on('error', () => {})
+      child.stdout.on('data', bytes => {
+        pending += bytes
+        for (let newline; (newline = pending.indexOf('\n')) !== -1;) {
+          const line = pending.slice(0, newline); pending = pending.slice(newline + 1)
+          let event; try { event = JSON.parse(line) } catch { continue }
+          if (event.type !== 'result') continue
+          outputs.push(event); results++
+          if (results < script.length) send(script[results]); else child.stdin.end()
+        }
+      })
+      send(script[0])
+    } else if (viaStdin) child.stdin.end(prompt)
     console.log(JSON.stringify({ phase: label, ownedPid: child.pid, session, preload: false }))
     let stdout = '', stderr = '', expired = false
     child.stdout.on('data', bytes => stdout += bytes); child.stderr.on('data', bytes => stderr += bytes)
@@ -59,13 +91,18 @@ try {
     const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve) }); clearTimeout(timer)
     assert.equal(expired, false, label + ' deadline')
     assert.equal(code, 0, label + ': ' + (stdout + stderr).slice(-2000))
-    const output = JSON.parse(stdout)
+    if (script) assert.equal(results, script.length, label + ': all native steps completed')
+    const output = script ? outputs.at(-1) : JSON.parse(stdout)
     assert.equal(output.is_error, false, label + ': ' + output.result)
     return output
   }
   const manual = randomUUID()
   await run('manual-seed', manual, ['--session-id', manual], 'Preserve /repo/task.ts. Publication requires my approval.')
   await run('manual-compact', manual, ['--resume', manual], '/compact Retain the publication approval gate')
+  const manualReceipts = JSON.parse(readFileSync(lifecycle, 'utf8')).flatMap(row => row.entries).filter(row => row.session === manual)
+  console.log(JSON.stringify({ manualCompactionReceipts: manualReceipts }))
+  assert.ok(manualReceipts.some(row => row.trigger === 'manual' && row.status === 'prepared'), 'mod receipt records preparation without claiming installation')
+  assert.ok(manualReceipts.some(row => row.usage?.input_tokens === 10000 && row.usage?.output_tokens === 20), 'actual provider usage is retained in separate mod accounting')
   const afterCompact = JSON.parse(readFileSync(evidence, 'utf8'))
   const summary = afterCompact.find(row => row.summary)
   assert.equal(summary?.target, 'codex/owned-public')
@@ -85,6 +122,12 @@ try {
   assert.ok(/read the full transcript at: \S+\.jsonl/.test(resumed), 'it cites the session transcript file')
   assert.ok(resumed.includes('Continue the conversation from where it left off'), 'it carries the engine\'s continuation directive')
   assert.ok(!resumed.includes('The conversation was compacted. Continue from this summary'), 'the old mod-made wrapper is gone')
+  const inProcess = randomUUID()
+  await run('in-process-manual', inProcess, ['--session-id', inProcess], ['Preserve the in-process publication approval.', '/compact Keep the approval gate', 'Continue without publishing.'])
+  const installed = JSON.parse(readFileSync(lifecycle, 'utf8')).flatMap(row => row.entries).filter(row => row.session === inProcess)
+  const installationObserved = installed.some(row => row.status === 'installed' && row.observedAt === 'persisted-history')
+  if (!installationObserved) console.log(JSON.stringify({ inProcessReceipts: installed, observations: JSON.parse(readFileSync(lifecycle + '.observations', 'utf8')) }))
+  assert.ok(installationObserved, 'a later native turn observes the actual installed summary, never the hook return alone')
   env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = '1'
   const automatic = randomUUID()
   await run('auto-seed', automatic, ['--session-id', automatic], 'Preserve the approval gate. ' + 'OWNED_HISTORY '.repeat(2500))

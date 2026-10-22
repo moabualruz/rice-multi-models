@@ -3,7 +3,7 @@
 // transcript, system prompt and tools, the shipped Node helper (dist/helper.mjs) calls
 // the provider, and its stream comes back as the engine's own chunks. Claude models pass through untouched.
 import { atom, read, update } from 'claude-code'
-import type { AgentModelOwner } from '../types'
+import type { AgentModelOwner, CompactionReceipt } from '../types'
 import type { EngineInterface, ModelCompleteResult, ModelUsage, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
 import { AGENT_TOOL, CARRIER_VALUE, classifyCall, emptyCarrier, entryOf, exactModelIds, forgetEntry, markDescription, pickRequested, recordEntry, unmarkDescription, withDescriptionSuffix } from './agent-model'
@@ -20,6 +20,7 @@ import { carryFor, remember, withCarry } from './carry'
 import type { Reasoning } from './carry'
 import { retainedTail, withUserText } from './compact'
 import type { CompactMessage } from './compact'
+import { compactOwner, compactionPolicyBlock, historyContains, historyDigest, observedReceipt, putReceipt, RECEIPT_TTL_MS, receiptText } from './compaction-receipt'
 import { compactionPrompt, fitTranscript, isTemplate, summaryBody, summaryMessage } from './native-compaction'
 import type { CompactionTemplate } from './native-compaction'
 import { classifierRequest, isClassifyTemplate } from './native-classify'
@@ -83,6 +84,7 @@ const prefsAtom = atom({ plugin: 'rice-multi-models', key: 'prefs' } as const, {
 /** Exact Agent model ids carried from a call's tool.call to its agent.spawn (see agent-model.ts), by tool_use_id; host state, so a hot reload keeps it. */
 const carrierAtom = atom({ plugin: 'rice-multi-models', key: 'agent-model-carrier' } as const, emptyCarrier)
 const ownersAtom = atom({ plugin: 'rice-multi-models', key: 'agent-model-owners' } as const, { entries: [] as readonly AgentModelOwner[] })
+const receiptsAtom = atom({ plugin: 'rice-multi-models', key: 'compaction-receipts' } as const, { entries: [] as readonly CompactionReceipt[] })
 /** The main transcript's file, as the engine's classic hooks name it; a compaction cites it in its summary message. */
 const transcriptAtom = atom({ plugin: 'rice-multi-models', key: 'transcript' } as const, { path: null })
 
@@ -782,6 +784,37 @@ async function* routedStep($: EngineInterface, e: TurnStepInput, signal?: AbortS
 
 const NO_USAGE: ModelUsage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 
+/** Public system notices, never assistant text or native accounting. */
+async function publishReceipt($: EngineInterface, row: CompactionReceipt): Promise<void> {
+  try {
+    $.ui.status(`Compaction (${row.owner}): ${row.status === 'installed' ? 'installed-observed' : row.status}`)
+    await $.session.append({ message: { type: 'system', content: [{ type: 'text', text: receiptText(row) }] }, ...(row.owner === 'main' ? {} : { agentId: row.owner.slice(6) }) })
+  } catch { $.ui.log(`${PLUGIN}: compaction receipt notice unavailable; /rice-models doctor retains transaction status`, { to: 'debug' }) }
+}
+
+async function saveReceipt($: EngineInterface, row: CompactionReceipt, prior?: CompactionReceipt): Promise<boolean> {
+  let saved = false
+  await update($, receiptsAtom, state => {
+    saved = prior === undefined || state.entries.some(item => item.id === prior.id && item.status === prior.status && item.at === prior.at)
+    return saved ? { entries: putReceipt(state.entries, row) } : state
+  })
+  if (saved) await publishReceipt($, row)
+  return saved
+}
+
+async function reconcileCompaction($: EngineInterface, agentId?: string, model?: string): Promise<void> {
+  const owner = compactOwner(agentId)
+  const pending = (await read($, receiptsAtom)).entries.filter(row => row.owner === owner && ['preparing', 'prepared'].includes(row.status))
+  if (!pending.length) return
+  const active = await $.session.messages(agentId === undefined ? {} : { agentId })
+  if (!Array.isArray(active)) return
+  const session = await $.session.id(), now = await $.clock.now()
+  for (const row of pending) {
+    const observed = await observedReceipt(row, active, session, model ?? (agentId === undefined ? await $.session.model() : agentModels.get(agentId)), now)
+    if (observed !== row && await saveReceipt($, observed, row) && observed.status === 'installed') usageAnchors.delete(agentId ?? 'main')
+  }
+}
+
 /** A one-shot completion on a routed model, for `model.complete` and `model.fork`. */
 async function complete($: EngineInterface, req: StepRequest, timeoutMs?: number, requireFinished = false, signal?: AbortSignal): Promise<ModelCompleteResult> {
   if (signal?.aborted) return { isAnswered: false, reason: 'aborted', usage: NO_USAGE }
@@ -1073,7 +1106,8 @@ async function statusText($: EngineInterface): Promise<string> {
     await capabilitySummary($),
     `Primary context (${context.model}): active context ${context.activeContextWindow ?? 'unknown'}, maximum context ${context.maxContextWindow ?? 'unknown'}, reported input ${context.inputTokenLimit ?? 'unknown'}, effective input bound ${context.effectiveInputBound ?? 'unknown'}, native window ${context.nativeWindow}; override ${context.override}.`,
     `Native context scope: ${context.scope}. Numeric per-model registration is unsupported.`,
-    'Compaction: native-like session.compact replacement on the same exact active model only, using captured native wording and bounded input/output capacity. Core summarizer lifecycle/UI/accounting is not equivalent. Failed, cancelled or incomplete summaries retain original history; clipped source coverage is disclosed.',
+    'Compaction: native-like session.compact replacement on the same exact active model only, using captured native wording and bounded input/output capacity. Mod-owned preparing/prepared/aborted receipts confirm installed-observed only from actual active context. Core summarizer lifecycle/UI/accounting is not equivalent. Configured PreCompact policy is never bypassed or manually dispatched: replacement is refused when present or unreadable. Failed, cancelled or incomplete summaries retain original history; clipped source coverage is disclosed.',
+    `Compaction receipts: ${JSON.stringify((await read($, receiptsAtom)).entries.map(({ id, owner, trigger, status, reason }) => ({ id, owner, trigger, status, reason })))}`,
     tools.source === 'installed claude'
       ? `Tool definitions and agent prompts: Claude Code's own, read from the installed claude ${tools.version} (built-in agent types ${tools.agentTypes.join(', ') || 'none'}); a tool it did not show (MCP, or interactive only) uses ${table}.`
       : `Tool definitions and agent prompts: ${tools.error === 'not read yet' ? 'not read from the installed claude yet' : `the installed claude's could not be read (${tools.error})`}; built-in tools use ${table}, and a routed subagent step is refused until they are read.`,
@@ -1238,7 +1272,7 @@ async function currentWebSearchStatus($: EngineInterface, checked: Runtime = run
 async function doctorCommand($: EngineInterface): Promise<string> {
   const checked = await detectRuntime($)
   return JSON.stringify({ runtime: checked.info || { node: { executable: checked.executable, version: checked.version } }, error: checked.error || null,
-    integration: { kind: 'public plugin hooks', start: 'claude', compaction: 'session.compact', toolDefinitions: await toolDefinitionsState($), webSearch: await currentWebSearchStatus($, checked) },
+    integration: { kind: 'public plugin hooks', start: 'claude', compaction: 'session.compact', compactionReceipts: (await read($, receiptsAtom)).entries, compactionAccounting: 'mod-owned provider usage, not native ledger', toolDefinitions: await toolDefinitionsState($), webSearch: await currentWebSearchStatus($, checked) },
     modelCapabilities: await configuredCapabilities($),
     actions: checked.error ? ['/rice-models setup repair'] : ['/rice-models setup repair', ...(!checked.info?.auth.codex ? ['codex login', ...(!checked.info?.clis.codex ? ['/rice-models setup codex'] : [])] : [])] }, null, 2)
 }
@@ -1414,6 +1448,8 @@ export const register: Register = on => {
     permissionContextNonce = crypto.randomUUID()
     await $.env.set('RICE_MULTI_MODELS_PERMISSION_CONTEXT_NONCE', permissionContextNonce)
     const started = await next(e)
+    // A reloaded module cannot finish a previous module's in-flight provider call.
+    for (const row of (await read($, receiptsAtom)).entries) if (row.status === 'preparing') await saveReceipt($, { ...row, status: 'aborted', reason: 'interrupted' }, row)
     // Keep the repair and doctor command available even when runtime checks fail.
     await $.command.register({
       name: 'rice-models',
@@ -1469,9 +1505,15 @@ export const register: Register = on => {
   })
 
   on('session.end', async ($, e, next) => {
+    if (e.reason === 'clear') for (const row of (await read($, receiptsAtom)).entries) if (['preparing', 'prepared'].includes(row.status)) await saveReceipt($, { ...row, status: 'aborted', reason: 'clear' }, row)
     await syncNativeContext($, true)
     return next(e)
   })
+
+  on('turn.start', async ($, e, next) => {
+    await reconcileCompaction($, e.agentId)
+    return next(e)
+  }).catch(($, e, next) => next.called ? { turnId: e.turnId } : next(e))
 
   on('prompt.compose', async ($, e, next) => {
     const answer = await next(e)
@@ -1683,6 +1725,7 @@ export const register: Register = on => {
       return yield* refusedStep($, e, `${PLUGIN}: the model family of this conversation could not be resolved (${error instanceof Error ? error.message : String(error)}); nothing was sent`)
     }
     if (e.agentId !== undefined) await rememberOwner($, e.agentId, e.model, spawnBackground.get(e.agentId))
+    await reconcileCompaction($, e.agentId, e.model)
     const claimed = claimedRefusal(e.model)
     if (claimed) return yield* refusedStep($, e, claimed)
     if (!isRouted(e.model)) return yield* next(e)
@@ -1706,62 +1749,85 @@ export const register: Register = on => {
     const claimed = claimedRefusal(model)
     if (claimed || e.agentId !== undefined && spawnDecisions.get(e.agentId)?.family !== CLAUDE_FAMILY && spawnDecisions.has(e.agentId) && !isRouted(model)) return { skip: `${PLUGIN}: the observed compaction model is unavailable; original transcript retained` }
     if (!isRouted(model)) return next(e)
-    next.signal.throwIfAborted()
     const who = e.agentId ?? 'main'
-    // The engine cannot send its own summary request to another provider, so this hook sends it: the engine's
-    // prompt and summary format (learned from the installed claude), over the conversation as the engine holds
-    // it, to the conversation's own provider. Nothing is sent to Claude, and a failure keeps the transcript.
-    let template: CompactionTemplate
+    const now = await $.clock.now()
+    const receipt: CompactionReceipt = { id: crypto.randomUUID(), session: await $.session.id(), owner: compactOwner(e.agentId), model, trigger: e.trigger, status: 'preparing', at: now, expiresAt: now + RECEIPT_TTL_MS, source: await historyDigest(e.messages) }
+    await saveReceipt($, receipt)
+    const skip = async (text: string, reason: CompactionReceipt['reason'] = 'failed') => {
+      await saveReceipt($, { ...receipt, status: 'aborted', reason }, receipt)
+      return { skip: text }
+    }
     try {
-      template = await nativeCompaction($)
-    } catch (error) {
-      return { skip: `${PLUGIN}: Claude Code's own compaction text could not be read from the installed claude (${error instanceof Error ? error.message : String(error)}); ${model} was not asked to compact, original transcript retained` }
+      next.signal.throwIfAborted()
+      // Core's configured PreCompact hooks do not run for this replacement. Never
+      // execute their shell ourselves, or silently compact around a blocking policy.
+      let hooks: unknown
+      try { hooks = await $.settings.read({ key: 'hooks' }) } catch { return skip(`${PLUGIN}: effective compaction policy is unreadable; replacement refused, original transcript retained`, 'configured-policy') }
+      if (compactionPolicyBlock(hooks)) return skip(`${PLUGIN}: configured PreCompact policy requires native dispatch, which the replacement cannot preserve; no hook was bypassed or manually run, original transcript retained`, 'configured-policy')
+      // The engine cannot send its own summary request to another provider, so this hook sends it: the engine's
+      // prompt and summary format (learned from the installed claude), over the conversation as the engine holds
+      // it, to the conversation's own provider. Nothing is sent to Claude, and a failure keeps the transcript.
+      let template: CompactionTemplate
+      try {
+        template = await nativeCompaction($)
+      } catch (error) {
+        return skip(`${PLUGIN}: Claude Code's own compaction text could not be read from the installed claude (${error instanceof Error ? error.message : String(error)}); ${model} was not asked to compact, original transcript retained`)
+      }
+      next.signal.throwIfAborted()
+      const api = await $.session.messages({ as: 'api', ...(e.agentId === undefined ? {} : { agentId: e.agentId }) })
+      if (!Array.isArray(api)) return skip(`${PLUGIN}: the conversation of ${who} is unreadable (${api.deny}); original transcript retained`)
+      await ensureFreshCapacity($)
+      next.signal.throwIfAborted()
+      const budget = requestBudget(model)
+      let retained: readonly CompactMessage[]
+      try {
+        retained = retainedTail(e.messages, budget === null ? {} : { retainChars: Math.floor(budget * 0.15 * 3.5) })
+      } catch (error) {
+        return skip(`${PLUGIN}: ${error instanceof Error ? error.message : String(error)}; original transcript retained`)
+      }
+      const outputBound = outputLimit(model)
+      const prefs = await read($, prefsAtom)
+      const effort = prefs.effort ?? (model.startsWith('codex/') ? codexDefaults.effort : undefined)
+      const system = rewriteMain((await $.prompt.compose({ model })).sections, identityLine(targetOf(model)?.model ?? model, targetOf(model)?.label ?? 'codex'))
+      const prompt = compactionPrompt(template, e.instructions)
+      const session = await $.session.id()
+      // Fit the conversation to the model's input bound by shortening tool outputs, then leaving out the oldest
+      // exchanges; halve the share until the local guard accepts the request.
+      let share = 1
+      let request: StepRequest | undefined
+      let coverage = ''
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const room = Math.floor(budget * 0.9 * 3.5 * share) - system.length - prompt.length - 2048
+        const fitted = fitTranscript(api as ApiMessage[], Math.max(room, 0))
+        if (!fitted.fits) break
+        coverage = fitted.omitted || fitted.clipped ? fitted.explanation : ''
+        const instructions = coverage ? `Source coverage notice: ${coverage}. Only summarize content actually supplied. Never reconstruct excluded content.\n\n${prompt}` : prompt
+        request = { target: model, system, tools: [], transcript: withUserText(fitted.messages, instructions), who, session, ...(effort === undefined ? {} : { effort }), native: { maxTokens: outputBound } }
+        if (!budgetError(request)) break
+        request = undefined
+        share /= 2
+      }
+      if (!request) return skip(`${PLUGIN}: the summary request does not fit ${model}'s bounded input capacity with intact tool pairs; original transcript retained`)
+      if (coverage) $.ui.log(`${PLUGIN}: compaction request coverage: ${coverage}`, { to: 'transcript' })
+      const answer = await complete($, request, undefined, true, next.signal)
+      receipt.usage = answer.usage
+      next.signal.throwIfAborted()
+      if (!answer.isAnswered) return skip(`${PLUGIN}: ${model} compaction failed (${answer.reason}); original transcript retained`, answer.reason === 'aborted' ? 'cancelled' : 'failed')
+      const body = summaryBody(answer.text)
+      if (body === undefined) return skip(`${PLUGIN}: ${model} returned no summary; original transcript retained`)
+      // A context/model switch, superseding attempt or cancellation cannot install a
+      // summary of an older snapshot. Original tail objects keep their opaque handles.
+      const active = await $.session.messages(e.agentId === undefined ? {} : { agentId: e.agentId })
+      if (await $.session.id() !== receipt.session || (e.agentId === undefined ? await $.session.model() : agentModels.get(e.agentId)) !== model || !Array.isArray(active) || await historyDigest(active) !== receipt.source) return skip(`${PLUGIN}: compaction context changed while preparing; stale result discarded, original transcript retained`, 'stale-context')
+      const cite = e.agentId === undefined ? await transcriptPath($) : undefined
+      const messages = [{ role: 'user' as const, text: summaryMessage(template, coverage ? `[Compaction source coverage: ${coverage}. Excluded content was not summarized.]\n\n${body}` : body, cite), toolUses: [] }, ...retained]
+      next.signal.throwIfAborted()
+      const expected = await historyDigest(messages)
+      if (!await saveReceipt($, { ...receipt, status: 'prepared', expected, expectedCount: messages.length, expectedWasPresent: await historyContains(e.messages, expected, messages.length) }, receipt)) return { skip: `${PLUGIN}: compaction attempt was superseded; stale result discarded, original transcript retained` }
+      return { messages }
+    } catch {
+      return skip(`${PLUGIN}: compaction ${next.signal.aborted ? 'cancelled' : 'failed'}; original transcript retained`, next.signal.aborted ? 'cancelled' : 'failed')
     }
-    next.signal.throwIfAborted()
-    const api = await $.session.messages({ as: 'api', ...(e.agentId === undefined ? {} : { agentId: e.agentId }) })
-    if (!Array.isArray(api)) return { skip: `${PLUGIN}: the conversation of ${who} is unreadable (${api.deny}); original transcript retained` }
-    await ensureFreshCapacity($)
-    next.signal.throwIfAborted()
-    const budget = requestBudget(model)
-    let retained: readonly CompactMessage[]
-    try {
-      retained = retainedTail(e.messages, budget === null ? {} : { retainChars: Math.floor(budget * 0.15 * 3.5) })
-    } catch (error) {
-      return { skip: `${PLUGIN}: ${error instanceof Error ? error.message : String(error)}; original transcript retained` }
-    }
-    const outputBound = outputLimit(model)
-    const prefs = await read($, prefsAtom)
-    const effort = prefs.effort ?? (model.startsWith('codex/') ? codexDefaults.effort : undefined)
-    const system = rewriteMain((await $.prompt.compose({ model })).sections, identityLine(targetOf(model)?.model ?? model, targetOf(model)?.label ?? 'codex'))
-    const prompt = compactionPrompt(template, e.instructions)
-    const session = await $.session.id()
-    // Fit the conversation to the model's input bound by shortening tool outputs, then leaving out the oldest
-    // exchanges; halve the share until the local guard accepts the request.
-    let share = 1
-    let request: StepRequest | undefined
-    let coverage = ''
-    for (let attempt = 0; attempt < 5; attempt++) {
-      const room = Math.floor(budget * 0.9 * 3.5 * share) - system.length - prompt.length - 2048
-      const fitted = fitTranscript(api as ApiMessage[], Math.max(room, 0))
-      if (!fitted.fits) break
-      coverage = fitted.omitted || fitted.clipped ? fitted.explanation : ''
-      const instructions = coverage ? `Source coverage notice: ${coverage}. Only summarize content actually supplied. Never reconstruct excluded content.\n\n${prompt}` : prompt
-      request = { target: model, system, tools: [], transcript: withUserText(fitted.messages, instructions), who, session, ...(effort === undefined ? {} : { effort }), native: { maxTokens: outputBound } }
-      if (!budgetError(request)) break
-      request = undefined
-      share /= 2
-    }
-    if (!request) return { skip: `${PLUGIN}: the summary request does not fit ${model}'s bounded input capacity with intact tool pairs; original transcript retained` }
-    if (coverage) $.ui.log(`${PLUGIN}: compaction request coverage: ${coverage}`, { to: 'transcript' })
-    const answer = await complete($, request, undefined, true)
-    next.signal.throwIfAborted()
-    if (!answer.isAnswered) return { skip: `${PLUGIN}: ${model} compaction failed (${answer.reason}); original transcript retained` }
-    const body = summaryBody(answer.text)
-    if (body === undefined) return { skip: `${PLUGIN}: ${model} returned no summary; original transcript retained` }
-    usageAnchors.delete(who)
-    // The summary message is the engine's own wording; a subagent's transcript file is not known, so its line is left out.
-    const cite = e.agentId === undefined ? await transcriptPath($) : undefined
-    return { messages: [{ role: 'user' as const, text: summaryMessage(template, coverage ? `[Compaction source coverage: ${coverage}. Excluded content was not summarized.]\n\n${body}` : body, cite), toolUses: [] }, ...retained] }
   }).catch(() => ({ skip: `${PLUGIN}: compaction routing check failed; original transcript retained` }))
 
 

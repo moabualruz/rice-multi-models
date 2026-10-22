@@ -7,11 +7,23 @@ export type ModelPrefs = {
 
 export type AgentModelOwner = { id: string; model: string; explicitNative: boolean; background?: boolean }
 
+/** Mod-owned transaction receipt. Hashes identify context, never retain its content. */
+export type CompactionReceipt = {
+  id: string; session: string; owner: string; model: string
+  trigger: 'manual' | 'auto' | 'plugin' | 'precompute'
+  status: 'preparing' | 'prepared' | 'installed' | 'aborted'
+  at: number; expiresAt: number; source: string
+  expected?: string; expectedCount?: number; expectedWasPresent?: boolean; observedAt?: 'persisted-history'
+  reason?: 'superseded' | 'session-changed' | 'expired' | 'model-changed' | 'stale-context' | 'cancelled' | 'failed' | 'configured-policy' | 'interrupted' | 'clear'
+  usage?: { input_tokens: number; output_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number }
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'rice-multi-models': {
       prefs: ModelPrefs
       'agent-model-owners': { entries: readonly AgentModelOwner[] }
+      'compaction-receipts': { entries: readonly CompactionReceipt[] }
       nativeContext: { original: string | null; applied: string | null; relinquished: boolean }
       /** The main transcript's file, as the engine's classic hooks name it (a compaction summary cites it). */
       transcript: { path: string | null }
