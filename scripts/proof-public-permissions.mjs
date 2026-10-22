@@ -136,9 +136,9 @@ try {
   for (const test of tests) {
     phase = test.name
     writeFileSync(phaseFile, JSON.stringify(test)); writeFileSync(eventsFile, '[]')
-    writeFileSync(join(config, 'settings.json'), JSON.stringify({ autoMode: { classifyAllShell: true }, permissions: test.permissions }))
+    const settings = JSON.stringify({ autoMode: { classifyAllShell: true }, permissions: test.permissions })
     const start = requests.length, started = Date.now()
-    child = spawn(native, [...(interactive ? [] : ['-p', '--output-format', 'json', '--no-session-persistence']), '--model', 'selected/main', '--plugin-dir', caller, '--plugin-dir', plugin, '--setting-sources', 'user', '--permission-mode', test.mode, '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--tools', 'Bash,WebSearch,WebFetch,AskUserQuestion', '--', 'Print only the owned marker or perform this owned local web permission fixture. Do not access any other resource.'], { cwd: fixture, env, detached: process.platform !== 'win32', stdio: interactive ? 'inherit' : ['ignore', 'pipe', 'pipe'] })
+    child = spawn(native, [...(interactive ? [] : ['-p', '--output-format', 'json', '--no-session-persistence']), '--model', 'selected/main', '--plugin-dir', caller, '--plugin-dir', plugin, '--setting-sources', 'user', '--settings', settings, '--permission-mode', test.mode, '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--tools', 'Bash,WebSearch,WebFetch,AskUserQuestion', '--', 'Print only the owned marker or perform this owned local web permission fixture. Do not access any other resource.'], { cwd: fixture, env, detached: process.platform !== 'win32', stdio: interactive ? 'inherit' : ['ignore', 'pipe', 'pipe'] })
     console.log(JSON.stringify({ phase, ownedPid: child.pid, startedAt: new Date().toISOString(), fixture, preload: false }))
     let stdout = '', stderr = '', timedOut = false
     child.stdout?.on('data', bytes => stdout += bytes); child.stderr?.on('data', bytes => stderr += bytes)

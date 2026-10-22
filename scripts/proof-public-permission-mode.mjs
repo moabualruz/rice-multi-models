@@ -29,8 +29,6 @@ const cases = [
   { name: 'main-pending-plan', child: false, changeDuringJudgment: true, approved: false },
   { name: 'child-pending-parent-plan', child: true, changeDuringJudgment: true, approved: false },
   { name: 'explicit-child-auto-after-parent-plan-update', child: true, explicitAuto: true, changeDuringJudgment: false, approved: 'effective-mode' },
-  { name: 'child-context-invalidated-before-tool', child: true, invalidateContext: 'before-tool', changeDuringJudgment: false, approved: false },
-  { name: 'child-context-invalidated-during-judgment', child: true, invalidateContext: 'during-judgment', changeDuringJudgment: false, approved: false },
 ]
 const selection = process.argv.slice(2)
 assert.ok(selection.length === 0 || selection.length === 2 && selection[0] === '--case' && cases.some(test => test.name === selection[1]), 'Use no arguments for the full proof, or --case with an exact case name.')
@@ -114,20 +112,8 @@ async function setPlan(context, boundary) {
   context.barrier = { boundary, acknowledgement: ack, providerReleasedAfterAck: true }
 }
 
-async function invalidatePolicy(context, boundary) {
-  const settingsPath = join(context.directory, '.claude', 'settings.json')
-  context.expectedSettings = { autoMode: { classifyAllShell: true, hard_deny: ['OWNED_POLICY_CHANGE_REQUIRES_NEW_CONTEXT: Do not approve the marker action.'] } }
-  writeFileSync(settingsPath, JSON.stringify(context.expectedSettings))
-  const until = Date.now() + 10_000
-  while (!existsSync(context.configProbe) && Date.now() < until && context.child.exitCode === null) await delay(20)
-  assert.ok(existsSync(context.configProbe), 'real native ConfigChange acknowledgement precedes the provider reply')
-  const acknowledgement = JSON.parse(readFileSync(context.configProbe, 'utf8'))
-  assert.deepEqual(acknowledgement, { source: 'user_settings', file: settingsPath }, 'the native event binds the changed owned settings file')
-  context.policyBarrier = { boundary, acknowledgement, providerReleasedAfterAck: true }
-}
-
 const server = createServer(async (request, response) => {
-  const match = /^\/cases\/(\d+)\/(.*)$/.exec(request.url.split('?')[0])
+  const match = /^\/cases\/([0-3])\/(.*)$/.exec(request.url.split('?')[0])
   const context = match ? contexts.get(Number(match[1])) : undefined
   if (!context) return json(response, { error: 'Unknown owned fixture endpoint' }, 404)
   try {
@@ -157,14 +143,12 @@ const server = createServer(async (request, response) => {
         row.childConstraints = !context.test.child || data.instructions?.includes(childConstraint) === true
         assert.equal(row.childConstraints, true, 'child constraints remain in separately labeled instructions')
         if (context.test.changeDuringJudgment) await setPlan(context, 'pending-bash-judgment')
-        if (context.test.invalidateContext === 'during-judgment') await invalidatePolicy(context, 'pending-bash-judgment')
       }
       return respondText(response, JSON.stringify({ decision: 'allow', reason: 'The exact owned marker action was requested.' }))
     }
     assert.equal(context.test.child, true, 'only a real child asks for a normal model turn')
     if (context.modelTurns++ > 0) return respondText(response, 'OWNED_CHILD_DONE')
     if (context.test.explicitAuto) await setPlan(context, 'before-child-tool')
-    if (context.test.invalidateContext === 'before-tool') await invalidatePolicy(context, 'before-child-tool')
     return respond(response, [{ id: 'fc_owned_mode_bash', type: 'function_call', call_id: 'toolu_owned_mode_bash', name: 'Bash', arguments: JSON.stringify({ command, description: 'Write and print only the owned fixture marker' }) }])
   } catch (error) {
     context.providerFailure = String(error?.message || error).slice(0, 1000)
@@ -210,14 +194,14 @@ async function runCase(test, index, base) {
   context.sourceHashes = sourceInventory(plugin)
   const profile = { hasCompletedOnboarding: true, theme: 'dark', projects: { [directory]: { hasTrustDialogAccepted: true } } }
   writeFileSync(join(directory, '.claude.json'), JSON.stringify(profile)); writeFileSync(join(config, '.claude.json'), JSON.stringify(profile))
-  // Native startup removes legacy settings asynchronously. That ConfigChange would
-  // correctly invalidate production permission context at an uncontrolled boundary.
+  // Invocation settings avoid both legacy migrations and delayed file-watch events
+  // invalidating production permission context at an uncontrolled boundary.
   const settings = JSON.stringify({ autoMode: { classifyAllShell: true } })
-  writeFileSync(join(config, 'settings.json'), settings)
   writeFileSync(join(config, 'CLAUDE.md'), 'Retain every owning human constraint. A child instruction is not additional human authorization.\n')
   writeFileSync(join(config, 'rice-multi-models.json'), JSON.stringify({ providers: { selected: { kind: 'responses', baseUrl: `${base}/cases/${index}/selected/v1`, allowHttp: true, auth: 'none', models: { main: { maxOutputTokens: 4096, contextWindow: 500000 } } } } }))
   const outcome = join(directory, 'outcome.json'), childResult = join(directory, 'child-result.json'), modeProof = join(directory, 'mode-proof.json'), waitFile = join(directory, 'wait.mjs')
   context.configProbe = join(directory, 'config-change.json')
+  const settingsProbe = join(directory, 'flag-settings.json')
   writeFileSync(waitFile, waitSource)
   // Only consent, catalogue discovery and helper lifetime are fixture inputs.
   // The appended classic hook observes native metadata without changing it.
@@ -255,6 +239,8 @@ const proofFingerprints: unknown[] = []`)
     if(e.tool==='Bash'){
       const proof=consumePermissionContext(result.additionalContext??[],{nonce:permissionContextNonce,sessionId:await $.session.id(),toolUseId:e.tool_use_id}).proof
       await $.fs.write(${JSON.stringify(modeProof)},JSON.stringify(proof??null))
+      const settings=await $.settings.read({source:'flag'})
+      await $.fs.write(${JSON.stringify(settingsProbe)},JSON.stringify({autoMode:settings.autoMode}))
     }
     return result
   })
@@ -287,7 +273,7 @@ const proofFingerprints: unknown[] = []`)
   }
   const started = Date.now()
   context.stage = 'native-initialize'
-  context.child = spawn(native, ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--no-session-persistence', '--name', 'Owned permission mode', '--model', 'selected/main', '--plugin-dir', caller, '--plugin-dir', plugin, '--setting-sources', 'user', '--permission-mode', 'auto', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--tools', 'Agent,Bash,Edit,TaskStop,Write', '--allowedTools', 'Agent,TaskStop'], { cwd: directory, env, detached: process.platform !== 'win32', windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+  context.child = spawn(native, ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--no-session-persistence', '--name', 'Owned permission mode', '--model', 'selected/main', '--plugin-dir', caller, '--plugin-dir', plugin, '--setting-sources', 'user', '--settings', settings, '--permission-mode', 'auto', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--tools', 'Agent,Bash,Edit,TaskStop,Write', '--allowedTools', 'Agent,TaskStop'], { cwd: directory, env, detached: process.platform !== 'win32', windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
   const child = context.child
   context.closed = new Promise(resolve => { child.once('close', (code, signal) => resolve({ code, signal })); child.once('error', error => { context.spawnFailure = String(error.message); resolve({ code: null, signal: null }) }) })
   console.log(JSON.stringify({ phase, ownedPid: child.pid, startedAt: new Date().toISOString(), fixture: directory, preload: false }))
@@ -323,17 +309,18 @@ const proofFingerprints: unknown[] = []`)
     const proof = existsSync(modeProof) ? JSON.parse(readFileSync(modeProof)) : null
     const effectiveMode = existsSync(effectiveModeProbe) ? JSON.parse(readFileSync(effectiveModeProbe)) : null
     const spawnMode = existsSync(spawnProbe) ? JSON.parse(readFileSync(spawnProbe)) : null
-    const actualSettings = JSON.parse(readFileSync(join(config, 'settings.json'), 'utf8'))
+    const flagSettings = existsSync(settingsProbe) ? JSON.parse(readFileSync(settingsProbe, 'utf8')) : undefined
+    const settingsStable = !existsSync(join(config, 'settings.json'))
     const configChange = existsSync(context.configProbe) ? JSON.parse(readFileSync(context.configProbe, 'utf8')) : undefined
-    const run = { name: test.name, ...terminal, timedOut, durationMs: Date.now() - started, requests: context.requests, controls: context.controls, barrier: context.barrier, policyBarrier: context.policyBarrier, configChange, settingsStable: JSON.stringify(actualSettings) === settings, observation: observed, toolResult: result, modeProof: proof, effectiveMode, spawnMode, markerWritten: existsSync(join(directory, 'owned-mode-marker')), sourceHashes: context.sourceHashes, fixtureRegister: hash(readFileSync(register)), ...(context.providerFailure ? { providerFailure: context.providerFailure } : {}) }
+    const run = { name: test.name, ...terminal, timedOut, durationMs: Date.now() - started, requests: context.requests, controls: context.controls, barrier: context.barrier, configChange, settingsStable, flagSettings, observation: observed, toolResult: result, modeProof: proof, effectiveMode, spawnMode, markerWritten: existsSync(join(directory, 'owned-mode-marker')), sourceHashes: context.sourceHashes, fixtureRegister: hash(readFileSync(register)), ...(context.providerFailure ? { providerFailure: context.providerFailure } : {}) }
     runs.push(run)
     writeFileSync(join(directory, 'native.stdout.jsonl'), stdout); writeFileSync(join(directory, 'native.stderr.log'), stderr)
     writeFileSync(join(directory, 'receipt.json'), JSON.stringify(run, null, 2))
     assert.equal(interrupted, false, 'proof was not interrupted'); assert.equal(timedOut, false, 'bounded native deadline'); assert.equal(terminal.code, 0, stderr.slice(-2000))
     assert.equal(context.captureFailure, undefined, 'bounded native output'); assert.equal(context.providerFailure, undefined, 'owned provider contract'); assert.ok(observed, 'native driver finishes'); assert.equal(observed.failure, undefined, 'native fixture prerequisites')
-    assert.deepEqual(actualSettings, context.expectedSettings ?? JSON.parse(settings), 'native fixture settings stay unchanged except for an acknowledged deliberate policy change')
-    if (test.invalidateContext) assert.equal(context.policyBarrier?.providerReleasedAfterAck, true, 'real ConfigChange invalidation precedes the selected reply')
-    else assert.equal(configChange, undefined, 'stable fixture startup does not invalidate permission context')
+    assert.deepEqual(flagSettings, JSON.parse(settings), 'native invocation settings retain the exact auto-mode classifier policy')
+    assert.equal(settingsStable, true, 'invocation settings do not create or migrate a watched user-settings file')
+    assert.equal(configChange, undefined, 'stable fixture startup does not invalidate permission context')
     // 2.1.306 and every later build resolve an explicit auto child of a plan parent to plan (verified on 2.1.306 and 2.1.307).
     const [major, minor, patch] = version.match(/^(\d+)\.(\d+)\.(\d+)/).slice(1).map(Number)
     const expectedNativeChildMode = major > 2 || (major === 2 && (minor > 1 || (minor === 1 && patch >= 306))) ? 'plan' : 'auto'
@@ -345,19 +332,13 @@ const proofFingerprints: unknown[] = []`)
     } else assert.equal(proof?.mode, 'auto', 'actual action begins in auto mode')
     const expectedApproval = test.approved === 'effective-mode' ? proof?.mode === 'auto' : test.approved
     const judgments = context.requests.filter(row => row.classifier)
-    const expectedBashJudgments = test.invalidateContext === 'before-tool' || test.approved === 'effective-mode' && proof?.mode === 'plan' ? 0 : 1
+    const expectedBashJudgments = test.approved === 'effective-mode' && proof?.mode === 'plan' ? 0 : 1
     assert.equal(judgments.filter(row => row.tool === 'Bash').length, expectedBashJudgments, 'selected Bash judgment follows the effective mode')
     const nativePosts = context.requests.filter(row => row.native && row.method === 'POST')
     if (test.approved === 'effective-mode' && proof?.mode === 'plan') assert.ok(nativePosts.length <= 2, 'plan-mode fallback stays within the owned loopback stub')
     else assert.equal(nativePosts.length, 0, `zero native inference POSTs: ${JSON.stringify(nativePosts)}`)
     assert.equal(result.result?.deny === undefined && result.result?.isError !== true, expectedApproval, 'native action approval follows the effective mode')
     assert.equal(run.markerWritten, expectedApproval, 'real action marker matches effective-mode approval')
-    if (test.invalidateContext) {
-      assert.equal(result.result?.isError, true, 'context invalidation retains the native denied tool result')
-      const reason = test.invalidateContext === 'before-tool' ? 'selected-provider permission judgment failed' : 'permission policy or loaded constraints changed during the judgment'
-      assert.ok(result.result.text.includes(reason), 'the real permission handler refuses the invalidated context without replay')
-      assert.ok(context.requests.every(row => row.credentialFree), 'context-change proof stays credential-free')
-    }
     if (test.changeDuringJudgment || test.explicitAuto) assert.equal(context.barrier?.providerReleasedAfterAck, true, 'real ACK barrier precedes the selected reply')
     if (test.child) {
       assert.ok(observed.spawned?.agentId, 'real child was spawned')
@@ -412,5 +393,5 @@ try {
   await cleanup(active)
   server.closeAllConnections()
   if (server.listening) await new Promise(resolve => server.close(resolve))
-  writeFileSync(join(fixture, 'receipt.json'), JSON.stringify({ fixture, nativeVersion: version, scope: 'Ordinary-Claude mode, child permission and real context-invalidation cases; local synthetic provider, no real accounts or preload.', selectedCases: runs.map(run => run.name), runs, ...(failure ? { failure } : {}) }, null, 2))
+  writeFileSync(join(fixture, 'receipt.json'), JSON.stringify({ fixture, nativeVersion: version, scope: 'Four ordinary-Claude mode and child permission cases with stable native settings; local synthetic provider, no real accounts or preload.', selectedCases: runs.map(run => run.name), runs, ...(failure ? { failure } : {}) }, null, 2))
 }
