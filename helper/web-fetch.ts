@@ -290,7 +290,7 @@ export function createWebFetch(ports: Partial<Ports> = {}) {
   }
 }
 
-/** Final recovery tier after both hosted and Claude-native WebFetch are unavailable. */
+/** Explicit direct-retrieval action. Callers may opt into it before Claude-native WebFetch; the default WebFetch flow never invokes it. */
 export function createDirectWebFetch(ports: Partial<Ports> = {}) {
   const io: Ports = { request: pinnedRequest, resolve: resolveAddresses,
     step: runStep, endpoints: fetchEndpoints, configured: configuredFetch, now: Date.now, observe: () => {}, ...ports }
@@ -309,4 +309,6 @@ export function createDirectWebFetch(ports: Partial<Ports> = {}) {
 }
 
 export const runWebFetch = createWebFetch()
-export const runDirectWebFetch = createDirectWebFetch()
+export const runPreNativeDirectWebFetch = createDirectWebFetch()
+/** Retained for the helper CLI; hook callers should use the explicit pre-native action. */
+export const runDirectWebFetch = runPreNativeDirectWebFetch
