@@ -119,7 +119,7 @@ for (const reply of [
 ] satisfies Reply[]) {
   test(`permanent streamed rejection is not retried: ${JSON.stringify(reply.events)}`, async () => {
     const result = await fake([reply])
-    expect(result.calls).toBe(1)
+    expect(result.calls, JSON.stringify({ calls: result.calls, events: result.events })).toBe(1)
     expect(result.events.some(event => event.type === 'error')).toBe(true)
   })
 }
