@@ -1,6 +1,21 @@
 import { expect, test } from 'bun:test'
-import { anchoredEstimate, reportedInput } from '../hooks/budget'
+import { anchoredEstimate, reportedInput, requestInputBudget } from '../hooks/budget'
 import { estimateTokens } from '../hooks/providers'
+
+test('request budgets use the active context, reserve output and overhead, and never expand to max context', () => {
+  expect(requestInputBudget({ contextWindow: 32_000, maxContextWindow: 872_000, inputTokenLimit: 28_000, outputTokenLimit: 8_000 })).toBe(21_952)
+  expect(requestInputBudget({ contextWindow: 400_000, inputTokenLimit: 20_000, outputTokenLimit: 8_000 })).toBe(17_952)
+  expect(requestInputBudget({ contextWindow: 8_000, outputTokenLimit: 7_000 })).toBe(0)
+})
+
+test('missing or invalid capacity metadata yields a bounded conservative request budget', () => {
+  expect(requestInputBudget(undefined)).toBe(8_192)
+  expect(requestInputBudget({ contextWindow: 0, maxContextWindow: Number.POSITIVE_INFINITY, inputTokenLimit: 3.5, outputTokenLimit: -1 })).toBe(8_192)
+  expect(requestInputBudget({ maxContextWindow: 8_000, outputTokenLimit: 2_000 })).toBe(3_952)
+  expect(requestInputBudget({ maxContextWindow: 872_000 })).toBe(8_192)
+  expect(requestInputBudget({ inputTokenLimit: 123_456 })).toBe(8_192)
+  expect(requestInputBudget({ contextWindow: 100_000 }, { outputReserve: 4_000, overhead: 3_000 })).toBe(93_000)
+})
 
 test('reported input counts fresh input plus cache reads and writes', () => {
   expect(reportedInput({ input_tokens: 532, cache_read_input_tokens: 126464, cache_creation_input_tokens: 0 })).toBe(126996)

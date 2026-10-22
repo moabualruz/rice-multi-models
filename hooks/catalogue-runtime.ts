@@ -4,7 +4,7 @@ import type { ModelCatalogue } from './catalogue'
 import type { Loaded } from './providers'
 
 type Json = Record<string, unknown>
-const limit = (value: number | null): number | undefined => typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined
+const limit = (value: number | null): number | undefined => typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined
 
 /** Derive helper configText from a fresh session snapshot, preserving auth and request params verbatim. */
 export function runtimeConfig(loaded: Loaded, catalogue: ModelCatalogue): Loaded {
@@ -26,12 +26,19 @@ export function runtimeConfig(loaded: Loaded, catalogue: ModelCatalogue): Loaded
     const declared = own(models, mid)
     const model: Json = isObject(declared) ? { ...declared } : {}
     const metadata = discovered.metadata
-    const context = limit(metadata.contextWindow) ?? limit(metadata.maxContextWindow)
+    const active = limit(metadata.contextWindow)
+    const maximum = limit(metadata.maxContextWindow)
+    // The advertised maximum only caps an active or explicitly configured window. It never
+    // supplies an active window on its own, or enlarges one.
+    const configuredContext = limit(model['contextWindow'] as number | null)
+    const context = active !== undefined
+      ? Math.min(active, maximum ?? Infinity)
+      : configuredContext !== undefined && maximum !== undefined ? Math.min(configuredContext, maximum) : configuredContext
     const input = limit(metadata.inputTokenLimit)
     const output = limit(metadata.outputTokenLimit)
     if (context !== undefined) model['contextWindow'] = context
     if (input !== undefined) model['maxInputTokens'] = input
-    // An input policy cannot exceed the known context, even when the provider reports no separate input cap.
+    // A discovered input limit cannot exceed the effective active context.
     if (typeof model['contextWindow'] === 'number' && typeof model['maxInputTokens'] === 'number') model['maxInputTokens'] = Math.min(model['maxInputTokens'], model['contextWindow'])
     if (output !== undefined) model['maxOutputTokens'] = typeof model['maxOutputTokens'] === 'number' ? Math.min(model['maxOutputTokens'], output) : output
     // Provider support only removes capabilities. It never enables a user-denied feature or allowlist.
