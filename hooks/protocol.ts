@@ -27,6 +27,8 @@ export type SearchEvidence = { sources: SearchSource[]; searched: boolean; calls
  * (`main` or an agentId) and the session it belongs to.
  */
 export type StepRequest = {
+  /** Only opt-in dispatches carry durable candidates; native turn/step IDs are authoritative. */
+  continuation?: { boundary: { turnId: string; index: number }; maxAgeSeconds: number; records: readonly unknown[] }
   target: string
   system: string
   tools: readonly RemoteTool[]
@@ -65,6 +67,9 @@ export type StepEvent =
   | { type: 'text'; text: string }
   | { type: 'thinking'; text: string }
   | { type: 'signature'; thinking: string; signature: string }
+  /** Internal helper protocol metadata, never a native chunk, transcript row or UI value. */
+  | { type: 'continuation'; record: import('./continuation').ContinuationRecord }
+  | { type: 'continuation_status'; status: 'restored' | 'no-compatible-state' | 'opaque-state-not-retained' | 'no-extra-required' }
   | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
   /** Server-tool blocks executed by the direct native adapter, within the same owner. */
   | { type: 'native_block'; block: Record<string, unknown> }

@@ -1,5 +1,6 @@
 // Node 22+ helper entry point. Source imports are inert; the bundled file dispatches only when run.
 import { realpathSync } from 'node:fs'
+import { continuationLock } from './continuation-lock.ts'
 import { isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { StepWire } from '../hooks/protocol.ts'
@@ -61,7 +62,10 @@ async function once(lifetime?: AbortSignal): Promise<void> {
 export async function main(lifetime?: AbortSignal): Promise<void> {
   if (Number(process.versions.node.split('.')[0]) < 22) throw new Error('rice-multi-models requires Node 22 or newer')
   const mode = process.argv[2] ?? 'once'
-  if (mode === 'once') await once(lifetime)
+  if (mode === 'continuation-lock') {
+    if (!process.argv[3]) throw new Error('Continuation lock requires a config directory')
+    await continuationLock(process.argv[3], lifetime)
+  } else if (mode === 'once') await once(lifetime)
   else if (mode === 'serve') serve(lifetime)
   else if (mode === 'client') {
     if (!process.argv[3]) throw new Error('client requires a socket path')

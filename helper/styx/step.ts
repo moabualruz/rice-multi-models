@@ -15,6 +15,7 @@ import { coalesce } from '../../hooks/coalesce'
 import { createKeys } from './auth'
 import type { Runner } from './auth'
 import { cacheIdentityKey } from './cache-identity'
+import { continuationScope, createContinuation, restoreContinuations, continuationOutput } from '../continuation'
 import { joinUrl, parseJson } from './codec'
 import type { Codec, Decoded } from './codec'
 import { CODECS } from './codecs'
@@ -46,13 +47,14 @@ const finishToken = (reason: string) => reason.toLowerCase().match(/^[a-z0-9_.-]
 // input parses as an object. The first error ends the reading (`failed`); `end` gives the usage and one stop, or
 // one error, and the finish reason as a token; `turn` gives the calls minted and the thinking blocks read, each
 // with the number of text blocks (a run of text deltas is one, as the mod builds them) and calls before it.
-export function assembler(codec: Codec, provider: string, ids: ReturnType<typeof remoteIds>, mint = mintToolId) {
+export function assembler(codec: Codec, provider: string, ids: ReturnType<typeof remoteIds>, mint = mintToolId, captureContinuation = false) {
+  const output = captureContinuation ? continuationOutput() : undefined
   let failure: string | undefined
   let finish: string | undefined
   let usage: Usage | undefined
   let before = 0
   let inText = false
-  const turn = { calls: [] as string[], blocks: [] as Placed[] }
+  const turn = { calls: [] as string[], blocks: [] as Placed[], content: output?.content ?? [], tools: [] as { id: string; name: string; input: Record<string, unknown>; providerId?: string }[] }
   return {
     feed(ds: readonly Decoded[]): StepEvent[] {
       const out: StepEvent[] = []
@@ -76,12 +78,14 @@ export function assembler(codec: Codec, provider: string, ids: ReturnType<typeof
             const id = mint()
             if (d.id !== undefined) ids.remember(provider, id, d.id)
             turn.calls.push(id)
+            turn.tools.push({ id, name: d.name, input, ...(d.id === undefined ? {} : { providerId: d.id }) })
             before++
             inText = false
             out.push({ type: 'tool_use', id, name: d.name, input })
           }
         }
       }
+      for (const event of out) output?.feed(event)
       return out
     },
     // `cut` is the transport's failure text, when the response was cut short.
@@ -153,7 +157,7 @@ export function createStepper(env: Env) {
     const codec = CODECS[m.kind]
     let key = await keys.get(p, approved)
     if ('error' in key) return yield* refuse(key.error)
-    const conversationKey = cacheIdentityKey({
+    const identity = {
       providerId: p.id,
       providerKind: p.kind,
       endpointOrigin: p.origin,
@@ -163,12 +167,22 @@ export function createStepper(env: Env) {
       modelId: m.id,
       session: req.session,
       owner: req.who,
-    })
-    // Opaque continuation has the same exact identity boundary, even while transient.
-    const owner = conversationKey
+    }
+    const conversationKey = cacheIdentityKey(identity)
+    const scope = continuationScope(identity, p.baseUrl)
+    // Durable candidates are verified against the immutable request prefix and completed native calls.
+    const restored = restoreContinuations(req, m.kind, scope, env.now())
+    for (const record of restored) {
+      for (const call of record.calls) if (call.providerId !== undefined) ids.remember(scope, call.id, call.providerId)
+      thinking.seal(scope, record.calls.map(call => call.id), record.blocks)
+    }
+    if (req.continuation) yield { type: 'continuation_status', status: m.kind === 'openai' ? 'no-extra-required' : restored.length ? 'restored' : 'no-compatible-state' }
+    // Durable mode never falls through to an unvalidated helper-lifetime continuation.
+    const owner = req.continuation ? scope : conversationKey
+    const sealed = req.continuation ? (id: string) => restored.find(record => record.calls.some(call => call.id === id))?.blocks : thinking.sealed(owner)
     let enc: ReturnType<Codec['encode']>
     try {
-      enc = codec.encode({ system: req.system, messages: normalize(req.transcript, m.vision, ids.of(p.id), thinking.sealed(owner)), tools: req.tools, ...(req.effort === undefined ? {} : { effort: req.effort }), cacheKey: conversationKey }, p, m)
+      enc = codec.encode({ system: req.system, messages: normalize(req.transcript, m.vision, ids.of(req.continuation ? scope : p.id), sealed), tools: req.tools, ...(req.effort === undefined ? {} : { effort: req.effort }), cacheKey: conversationKey, ...(req.continuation ? { durableContinuation: true } : {}) }, p, m)
       enc.body = nativeConstraints(enc.body, m, req.native)
       const body = parseJson(enc.body)
       if (isObject(body) && (m.kind === 'responses' || Object.hasOwn(body, 'prompt_cache_key')) && body['prompt_cache_key'] !== conversationKey) {
@@ -204,7 +218,7 @@ export function createStepper(env: Env) {
     http = String(answer.status)
     if (answer.status < 200 || answer.status > 299) return yield* refuse(httpErrorText(p, answer.status, await errorBody(answer), m.id), answer.status)
     const decoder = codec.decoder()
-    const asm = assembler(codec, p.id, ids)
+    const asm = assembler(codec, req.continuation ? scope : p.id, ids, mintToolId, req.continuation !== undefined)
     let cut: Cut | undefined
     while (!signal.aborted && !asm.failed()) {
       const piece = await answer.body.next()
@@ -224,6 +238,11 @@ export function createStepper(env: Env) {
     if (end.finish !== 'error' && calls.length > 0) {
       thinking.seal(owner, calls, blocks)
       if (blocks.length > 0) notes += ` thinking=${blocks.length}`
+    }
+    if (req.continuation && end.finish !== 'error' && end.events.some(event => event.type === 'stop' && event.reason === 'tool_use')) {
+      const record = createContinuation(req, m.kind, scope, enc.body, asm.turn().tools, blocks, env.now(), asm.turn().content)
+      if (record) yield { type: 'continuation', record }
+      else if (blocks.length) yield { type: 'continuation_status', status: 'opaque-state-not-retained' }
     }
     yield* coalesce(tail)
     yield* close(end.events, end.finish, end.finish === 'error' ? undefined : asm.usage(), end.note === undefined ? '' : ` note=${logJson(end.note)}`)

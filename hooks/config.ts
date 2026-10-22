@@ -10,6 +10,8 @@
 // pure texts and schemas derived from a config. No I/O.
 import type { Effort } from './protocol'
 import { parseTiers } from './family'
+import { parseContinuation } from './continuation'
+import type { ContinuationPolicy } from './continuation'
 import type { TierMap } from './family'
 
 export type JsonSchema = Readonly<Record<string, unknown>>
@@ -74,7 +76,7 @@ export type ProviderConfig = {
 // only to requests made through the alias.
 // An alias's `cache` key, when present, replaces its model's: absent `cache` there means the cache is off.
 export type Alias = { target: string; note?: string; params?: Json; effort?: ModelConfig['effort']; cache?: Cache; headers?: Record<string, string> }
-export type Config = { providers: Readonly<Record<string, ProviderConfig>>; aliases: Readonly<Record<string, Alias>>; tiers?: TierMap }
+export type Config = { providers: Readonly<Record<string, ProviderConfig>>; aliases: Readonly<Record<string, Alias>>; tiers?: TierMap; continuation?: ContinuationPolicy }
 
 // What a model name names: a native model (passed to the engine) or a declared remote one. A remote
 // target's `label` is the name it was asked for (an alias or `provider/model`), which routes keep and steps
@@ -404,7 +406,8 @@ export function parseConfig(text: string): { config?: Config; errors: string[] }
   }
   const errors: string[] = []
   if (!isObject(raw)) return { errors: ['the config must be a JSON object'] }
-  allowKeys(raw, ['$schema', 'version', 'providers', 'aliases', 'tiers'], '$', errors)
+  allowKeys(raw, ['$schema', 'version', 'providers', 'aliases', 'tiers', 'continuation'], '$', errors)
+  const continuation = parseContinuation(raw['continuation'], errors)
   const parsedTiers = parseTiers(raw['tiers'])
   errors.push(...parsedTiers.errors)
   if (raw['version'] !== undefined && raw['version'] !== 1) errors.push('version: unsupported (styx reads version 1)')
@@ -446,7 +449,7 @@ export function parseConfig(text: string): { config?: Config; errors: string[] }
     const max = aimed?.maxOutputTokens ?? Infinity
     aliases[name] = { target, ...(typeof note === 'string' ? { note } : {}), ...(set && host !== undefined ? requests(alias as Json, aimed?.kind ?? host.kind, path, errors, max, true) : {}) }
   }
-  return errors.length > 0 ? { errors } : { config: { providers, aliases, ...(raw['tiers'] === undefined ? {} : { tiers: parsedTiers.tiers }) }, errors }
+  return errors.length > 0 ? { errors } : { config: { providers, aliases, ...(raw['tiers'] === undefined ? {} : { tiers: parsedTiers.tiers }), ...(raw['continuation'] === undefined ? {} : { continuation }) }, errors }
 }
 
 // Why `name` (`provider/model`) is not a declared target, or undefined when it is one.

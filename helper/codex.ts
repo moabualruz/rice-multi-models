@@ -2,6 +2,8 @@
 // The Anthropic <-> Responses translation and the Codex login are cc-multi-cli-plugin's (helper/core,
 // helper/openai); the transports, the event mapping and the request identity are this mod's own.
 import { createHash } from 'node:crypto'
+import { continuationScope, createContinuation, restoreContinuations, continuationOutput } from './continuation.ts'
+import { withCarry } from '../hooks/carry.ts'
 import { homedir } from 'node:os'
 
 import type { Limits, SearchEvidence, StepEvent, StepRequest, StopReason, Transport } from '../hooks/protocol.ts'
@@ -272,6 +274,24 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
   let ttfb: number | null = null
   let transport: string = 'none'
   const authFile = options.authFile ?? codexAuthFile(options.env)
+  const original = req
+  let scope: string | undefined
+  let expectedAccount: string | undefined
+  if (req.continuation) try {
+    // The account id is an opaque identity reference, never an access/refresh token or token-derived hash.
+    const auth = await readCodexAuth(authFile)
+    expectedAccount = auth['chatgpt-account-id']
+    const endpoint = options.httpUrl ?? HTTP_URL
+    scope = continuationScope({ providerId: 'codex', providerKind: 'responses', endpointOrigin: new URL(endpoint).origin, modelKind: 'responses', modelId: model, session: req.session, owner: req.who, accountRef: expectedAccount }, endpoint, options.wsUrl ?? WS_URL)
+    const restored = restoreContinuations(req, 'codex-responses', scope, Date.now())
+    const carry = new Map(restored.flatMap(record => record.calls.map(call => [call.id, record.blocks.flatMap(placed => placed.block.type === 'thinking' ? [{ ...placed.block, at: placed.at }] : [])] as const)))
+    req = { ...req, transcript: withCarry(req.transcript.map(message => ({ ...message, content: typeof message.content === 'string' ? message.content : message.content.filter(block => block.type !== 'thinking' && block.type !== 'redacted_thinking') })), carry) }
+    yield { type: 'continuation_status', status: restored.length ? 'restored' : 'no-compatible-state' }
+  } catch {
+    yield { type: 'error', kind: 'request', text: 'codex: durable account scope unavailable; no provider request was sent' }
+    yield { type: 'stats', ttfbMs: null, totalMs: Date.now() - started, transport }
+    return
+  }
   const body = messagesBody(req, model)
   let request: ResponsesRequest
   try {
@@ -296,7 +316,7 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
   const onAuth = (auth: CodexAuthHeaders) => {
     credentials.add(auth.authorization.slice('Bearer '.length))
     credentials.add(auth['chatgpt-account-id'])
-    if (accountId !== undefined && accountId !== auth['chatgpt-account-id']) throw new CodexAuthError('Codex account changed during the step. Retry in the intended account.')
+    if (expectedAccount !== undefined && expectedAccount !== auth['chatgpt-account-id'] || accountId !== undefined && accountId !== auth['chatgpt-account-id']) throw new CodexAuthError('Codex account changed during the step. Retry in the intended account.')
     accountId = auth['chatgpt-account-id']
   }
   const finalText = (failure: ProviderFailure, attempts: number) => {
@@ -349,6 +369,8 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
       for (let attempt = 1; attempt <= OVERLOAD_MAX_ATTEMPTS; attempt++) {
         attempts = attempt
         let pending: StepEvent[] = []
+        const continuationCalls: { id: string; name: string; input: Record<string, unknown> }[] = []
+        const output = scope ? continuationOutput() : undefined
         let committed = false
         const flush = () => {
           for (const event of pending) queue.push(event)
@@ -365,6 +387,8 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
         arm()
         const push = (event: StepEvent) => {
           ttfb ??= Date.now() - started
+          if (event.type === 'tool_use') continuationCalls.push({ id: event.id, name: event.name, input: event.input })
+          output?.feed(event)
           if (event.type === 'text' || event.type === 'thinking' || event.type === 'search_sources' || event.type === 'tool_use') {
             committed = true
             flush()
@@ -391,6 +415,11 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
             cacheWrite: usage.cache_creation_input_tokens ?? 0,
             reasoning: response.multi_usage?.reasoning_tokens,
           })
+          if (scope && stopOf(response, mapper.toolCalls()) === 'tool_use') {
+            const record = createContinuation(original, 'codex-responses', scope, request, continuationCalls, output?.blocks ?? [], Date.now(), output?.content)
+            if (record) queue.push({ type: 'continuation', record })
+            else if (output?.blocks.length) queue.push({ type: 'continuation_status', status: 'opaque-state-not-retained' })
+          }
           queue.push({ type: 'stop', reason: stopOf(response, mapper.toolCalls()) })
           return
         } catch (error) {

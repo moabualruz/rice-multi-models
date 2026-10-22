@@ -28,7 +28,7 @@ export const count = (v: unknown) => (isIndex(v) ? v : 0)
 
 // A step's request as a codec encodes it. `cacheKey` is a stable hash of the conversation, for a kind that
 // routes its prompt cache by one.
-export type Neutral = { system: string; messages: Message[]; tools: readonly RemoteTool[]; effort?: Effort | number; cacheKey?: string }
+export type Neutral = { system: string; messages: Message[]; tools: readonly RemoteTool[]; effort?: Effort | number; cacheKey?: string; durableContinuation?: true }
 
 // A request path under a provider's base URL. A base that already ends in the path's leading `/v1` (an
 // OpenAI-style base such as https://gateway/v1 serving an Anthropic-style model) is not given it twice.
