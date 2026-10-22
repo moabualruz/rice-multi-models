@@ -34,12 +34,18 @@ const on: any = (event: string, matcherOrCallback: any, callback?: any) => {
   } }
 }
 register(on)
+let compactRows: readonly any[] | undefined
 const hook = (event: string, name?: string) => {
   // This fixture targets the unfiltered routing callback. Other modules can
   // register an earlier, filtered callback for the same native event.
   const found = hooks.get(event)?.find(item => name === undefined ? item.matcher === undefined : item.matcher?.tool === name || item.matcher?.command === name)
   if (!found) throw new Error(`Missing hook ${event} ${name ?? ''}`)
-  return found.callback
+  if (event !== 'session.compact') return found.callback
+  return async (...args: any[]) => {
+    const previous = compactRows
+    compactRows = args[1].messages
+    try { return await found.callback(...args) } finally { compactRows = previous }
+  }
 }
 const defs = new Map<string, any>()
 const toolDefs = new Map<string, any>()
@@ -103,6 +109,7 @@ const host: any = {
   env: { get: async (key: string) => environment.get(key), set: async (key: string, value: string | undefined) => { if (value === undefined) environment.delete(key); else environment.set(key, value) } },
   state: { get: async (ref: { key: string }) => ({ value: sessionState.get(ref.key), version: 0 }), set: async (ref: { key: string }, value: unknown) => { sessionState.set(ref.key, value); return { isSet: true, version: 1 } } },
   plugin: { root },
+  settings: { read: async () => undefined },
   fs: {
     exists: async (path: string) => path.endsWith('/dist/helper.mjs') || path.endsWith('rice-multi-models.json') || fixtureFiles.has(path) || fixtureDirs.has(path),
     read: async (path: string) => {
@@ -172,7 +179,8 @@ const host: any = {
     model: async () => 'codex/gpt-6.1-sol',
     usage: async () => ({ context: { window: Number(environment.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS') ?? 200000) } }),
     version: async () => ({ version: '2.1.296' }),
-    messages: async () => [{ role: 'user', content: 'fixture conversation' }],
+    messages: async (args: any = {}) => args.as === 'api' ? [{ role: 'user', content: 'fixture conversation' }] : (compactRows ?? []).map(({ handle, ...row }) => row),
+    append: async ({ message }: any) => { expect(message.type).toBe('system'); return { message, uuid: 'owned-receipt' } },
   },
   prompt: { compose: async () => ({ sections: [{ id: 'base', scope: 'shared', text: 'fixture base' }] }) },
 }
