@@ -126,8 +126,17 @@ export const register: Register = on => {`)
   assert.deepEqual(targetOf('B'), ['codex/owned-other', 'codex/owned-other'], 'background call B and its resumed turn retain the exact model')
   assert.deepEqual(targetOf('C'), ['codex/owned-public'], 'the sonnet alias still resolves inside the session family, as before')
   assert.deepEqual(targetOf('D'), [], 'the unknown id started no subagent')
-  assert.deepEqual(targetOf('F'), ['codex/owned-public'], 'a native fork inherits the active main model')
+  // 2.1.301 predates the native fork agent type. Exercise the call there too, but
+  // require its explicit native refusal and no dispatch, not a nonexistent feature.
+  const supportsNativeFork = installedVersion !== '2.1.301'
+  assert.deepEqual(targetOf('F'), supportsNativeFork ? ['codex/owned-public'] : [], 'a supported native fork inherits main; an unavailable fork never dispatches')
+  if (!supportsNativeFork) {
+    const forkResult = events.filter(event => event.type === 'user').flatMap(event => event.message?.content ?? []).find(block => block.type === 'tool_result' && block.tool_use_id === 'toolu_owned_f')
+    assert.equal(forkResult?.is_error, true, 'the unavailable native fork is an explicit error')
+    assert.match(forkResult?.content ?? '', /Agent type 'fork' not found\./, '2.1.301 visibly refuses its unavailable native fork')
+  }
   const spawns = JSON.parse(readFileSync(lifecycle, 'utf8'))
+  assert.equal(spawns.filter(row => row.fork).length, supportsNativeFork ? 1 : 0, 'native fork lifecycle matches the actual host capability')
   assert.ok(spawns.some(row => row.background && row.model === 'codex/owned-other'), 'native background dispatch retained the exact model')
   assert.ok(spawns.some(row => row.resume && row.model === 'codex/owned-other'), 'native resume retained the original invocation model')
   assert.ok(spawns.every(row => row.permissionMode === 'bypassPermissions'), 'all native dispatches inherited the owned permission mode without rewriting it')
@@ -138,7 +147,7 @@ export const register: Register = on => {`)
   const refusal = /Agent model \\"codex\/not-discovered\\" is not a model this session can run[^"]*/.exec(answered.transcript)?.[0] ?? ''
   assert.ok(refusal, 'the unknown id was refused in a visible tool result')
   for (const id of ['haiku', 'sonnet', 'opus', 'fable', ...DISCOVERED]) assert.ok(refusal.includes(id), `the refusal lists ${id}`)
-  assert.equal(children.length, 5, 'four valid native child paths plus one resumed turn were observed')
+  assert.equal(children.length, supportsNativeFork ? 5 : 4, 'every supported native child path and the resumed turn were observed')
   const parentText = answered.transcript
   assert.equal([...parentText].some(character => [0x2062, 0x2063].includes(character.codePointAt(0))), false, 'no invisible carrier marks reach the provider transcript')
   const toolCalls = events.filter(event => event.type === 'assistant').flatMap(event => event.message?.content ?? []).filter(block => block.type === 'tool_use' && block.name === 'Agent')
