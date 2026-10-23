@@ -109,6 +109,7 @@ test('actual session.start activates an empty Node-only picker and explains unav
   expect(f.notices.join('\n')).not.toContain('/model codex/')
   expect(f.calls.some(argv => argv[0]?.includes('bun'))).toBe(false)
   expect(f.calls.some(argv => argv[2] === 'setup-codex')).toBe(false)
+  expect(f.calls.some(argv => argv[2] === 'serve')).toBe(false)
 })
 
 test('unchanged startup is idempotent and persists its one-time interactive notice', async () => {
@@ -320,6 +321,33 @@ test('real compaction callback prepares each trigger, retains original tail hand
     expect(f.receipts.at(-1).message.content[0].text).toContain('installed-observed')
     expect(JSON.stringify(f.requests)).not.toContain('mod-owned compaction')
   }
+})
+
+test('repeat compaction compares the public history snapshot with the same public scope', async () => {
+  for (const changed of [false, true]) {
+    const f = await compactFixture()
+    const archived = { role: 'user', text: 'archived before the native compact boundary', toolUses: [] }
+    f.active.rows = [archived, ...f.rows]
+    if (changed) f.active.afterProvider = () => { f.active.rows.push({ role: 'user', text: 'new goal or work while summarizing', toolUses: [] }) }
+    const result = await callbacks.get('session.compact')!(f.host, { trigger: 'manual', messages: f.rows }, f.next)
+    if (changed) {
+      expect(result.messages).toBeUndefined()
+      expect(result.skip).toContain('stale result discarded')
+    } else {
+      expect(result.messages?.[0].text).toContain('owned safe summary')
+      expect(result.messages?.slice(1)).toEqual(f.rows.slice(2))
+      expect(f.state.get('compaction-receipts')).toMatchObject({ entries: [{ status: 'prepared' }] })
+    }
+  }
+})
+
+test('a compact event already superseded before the public snapshot is read is refused', async () => {
+  const f = await compactFixture()
+  f.active.rows = [...f.rows, { role: 'user', text: 'new goal before preparation', toolUses: [] }]
+  const result = await callbacks.get('session.compact')!(f.host, { trigger: 'manual', messages: f.rows }, f.next)
+  expect(result.messages).toBeUndefined()
+  expect(result.skip).toContain('original transcript retained')
+  expect(f.requests).toEqual([])
 })
 
 test('compaction cancellation and changed active history discard prepared output and keep old history', async () => {

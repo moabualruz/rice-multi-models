@@ -80,7 +80,7 @@ import { createEvaluatorSources, registerEvaluatorSources } from './evaluator-so
 
 const PLUGIN = 'rice-multi-models'
 /** Who the requests to declared providers say they come from (OpenCode Go asks each client to name itself). */
-const USER_AGENT = 'rice-multi-models/0.15.0 (claude-code)'
+const USER_AGENT = 'rice-multi-models/0.16.0 (claude-code)'
 const PROVIDERS: Readonly<Record<string, string>> = { codex: 'OpenAI Codex (ChatGPT subscription)' }
 const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 const prefsAtom = atom({ plugin: 'rice-multi-models', key: 'prefs' } as const, { effort: null, transport: 'auto', helper: 'session' })
@@ -1496,7 +1496,8 @@ export const register: Register = on => {
     // is pending so its settings change cannot invalidate one.
     let routedMain = false
     try { routedMain = isRouted(await $.session.model()) } catch {}
-    if (routedFamilies().length || routedMain || Object.keys(loaded.config?.providers ?? {}).length) {
+    const needsRouting = Boolean(routedFamilies().length || routedMain || Object.keys(loaded.config?.providers ?? {}).length)
+    if (needsRouting) {
       void nativePermissionDefaults($).catch(() => {})
       // Ready before the first compaction; a one-shot run reads it only when it compacts.
       if (e.isInteractive) void nativeCompaction($).catch(() => {})
@@ -1504,7 +1505,7 @@ export const register: Register = on => {
       if (e.isInteractive) void $.tool.list().then(infos => stepTools($, builtinNames(infos)), () => {})
     }
     preferSession((await read($, prefsAtom)).helper !== 'once')
-    await ensureHelper($)
+    if (needsRouting) await ensureHelper($)
     const rows = routedRows()
     const picker = runtime.error ? undefined : await syncPicker($, runtime, rows)
     await startupNotice($, e.isInteractive, runtime, picker, rows, defaultModel('codex'), undefined, await capabilitySummary($))
@@ -1796,8 +1797,12 @@ export const register: Register = on => {
     if (claimed || e.agentId !== undefined && spawnDecisions.get(e.agentId)?.family !== CLAUDE_FAMILY && spawnDecisions.has(e.agentId) && !isRouted(model)) return { skip: `${PLUGIN}: the observed compaction model is unavailable; original transcript retained` }
     if (!isRouted(model)) return next(e)
     const who = e.agentId ?? 'main'
+    // Public reads can include pre-boundary history while the compact event contains only
+    // current context. Validate its suffix, then compare like-for-like public snapshots.
+    const snapshot = await $.session.messages(e.agentId === undefined ? {} : { agentId: e.agentId })
+    if (!Array.isArray(snapshot) || snapshot.length < e.messages.length || await historyDigest(snapshot.slice(snapshot.length - e.messages.length)) !== await historyDigest(e.messages)) return { skip: `${PLUGIN}: compaction context changed before preparing; original transcript retained` }
     const now = await $.clock.now()
-    const receipt: CompactionReceipt = { id: crypto.randomUUID(), session: await $.session.id(), owner: compactOwner(e.agentId), model, trigger: e.trigger, status: 'preparing', at: now, expiresAt: now + RECEIPT_TTL_MS, source: await historyDigest(e.messages) }
+    const receipt: CompactionReceipt = { id: crypto.randomUUID(), session: await $.session.id(), owner: compactOwner(e.agentId), model, trigger: e.trigger, status: 'preparing', at: now, expiresAt: now + RECEIPT_TTL_MS, source: await historyDigest(snapshot) }
     await saveReceipt($, receipt)
     const skip = async (text: string, reason: CompactionReceipt['reason'] = 'failed') => {
       await saveReceipt($, { ...receipt, status: 'aborted', reason }, receipt)
@@ -1869,7 +1874,7 @@ export const register: Register = on => {
       const messages = [{ role: 'user' as const, text: summaryMessage(template, coverage ? `[Compaction source coverage: ${coverage}. Excluded content was not summarized.]\n\n${body}` : body, cite), toolUses: [] }, ...retained]
       next.signal.throwIfAborted()
       const expected = await historyDigest(messages)
-      if (!await saveReceipt($, { ...receipt, status: 'prepared', expected, expectedCount: messages.length, expectedWasPresent: await historyContains(e.messages, expected, messages.length) }, receipt)) return { skip: `${PLUGIN}: compaction attempt was superseded; stale result discarded, original transcript retained` }
+      if (!await saveReceipt($, { ...receipt, status: 'prepared', expected, expectedCount: messages.length, expectedWasPresent: await historyContains(snapshot, expected, messages.length) }, receipt)) return { skip: `${PLUGIN}: compaction attempt was superseded; stale result discarded, original transcript retained` }
       return { messages }
     } catch {
       return skip(`${PLUGIN}: compaction ${next.signal.aborted ? 'cancelled' : 'failed'}; original transcript retained`, next.signal.aborted ? 'cancelled' : 'failed')

@@ -10,8 +10,12 @@ agent files remain native. Release 0.12.0 added credential-free web-tier
 eligibility and configuration diagnostics. Release 0.13.0 preserves more document
 and image content across provider codecs and reports configured model capabilities,
 including tool coverage and web tiers, in setup, doctor and status. Release 0.14.0 lets the
-Agent tool's `model` argument name any discovered `<provider>/<model>` id exactly. The single 0.15.0 candidate combines owner/model, capacity, failure, compaction, fork-snapshot and web-order repairs with mod-owned compaction receipts, scoped provider cache identity, explicit auxiliary caller provenance and default-off operational continuation. It registers no
-MCP tools and needs no launcher, proxy or gateway.
+Agent tool's `model` argument name any discovered `<provider>/<model>` id exactly.
+Release 0.16.0 fixes a false stale-context refusal on successive compactions by comparing
+like-for-like public history snapshots. Genuine context changes still discard the result.
+It also avoids starting the persistent inference helper in native-only sessions with no
+routed providers. Earlier owner/model, capacity, streaming, failure and fork repairs remain.
+The mod registers no MCP tools and needs no launcher, proxy or gateway.
 
 **Routed conversation inference follows its observed owner.** Exact provider/model ids are primary; family aliases are optional compatibility. Native agent dispatch, tool execution and permission ceilings remain authoritative. Compaction stays on the same exact active model with no alternate-provider fallback. Web tools alone have an explicit final native Claude fallback.
 
@@ -418,7 +422,7 @@ protocol is one provider. A provider's `authHeader` (`bearer`, `x-api-key` or
 reason takes `"params": { "include": null }`. A provider's `sessionHeader` carries a
 stable hash scoped to the configured provider, validated endpoint origin, exact model and protocol, session and loop/caller. Responses uses the same scope for `prompt_cache_key`; provider/model/alias overrides cannot replace it. For endpoints or accounts sharing a provider id and origin, set non-secret references such as `"cacheScope": { "endpoint": "deployment-a", "account": "profile-a" }` and change the references when that identity changes. Without them, that provider id denotes one logical endpoint/account scope. The key never hashes credentials, credential-helper arguments or URL paths. These keys do not promise cache hits, matching usage or matching latency across providers. Protocols without this key retain their own cache controls.
 
-### Operational continuation (0.15.0 candidate)
+### Operational continuation (default off)
 
 Native Claude Code already owns and persists conversation history. Every routed adapter keeps replaying that history; native Claude inference is unchanged. Optional durability stores only extra provider protocol state, not another transcript or personal memory backend. The default is **off**, with no migration or owner settings writes.
 
