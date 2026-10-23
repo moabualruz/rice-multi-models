@@ -384,6 +384,8 @@ async function approval($: EngineInterface, remote: Remote): Promise<string | un
 async function wireFor($: EngineInterface, req: StepRequest): Promise<StepWire> {
   const maxTokens = req.native?.maxTokens ?? outputLimit(req.target)
   if (maxTokens > outputLimit(req.target)) throw new Error('The requested output cap exceeds the active model output limit.')
+  // Readiness also marks an exhausted supervisor; do not restart it per dispatch.
+  if (helperReadiness === undefined) await ensureHelper($)
   return { configText: loaded.text, approved: [...(await approvedSet($))], req: { ...req, native: { ...req.native, maxTokens } }, userAgent: USER_AGENT }
 }
 

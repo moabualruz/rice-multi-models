@@ -96,6 +96,35 @@ function fixture() {
   }
 }
 
+test('a native-only startup starts the existing session helper on its first later routed dispatch', async () => {
+  const f = contextFixture()
+  const available = f.discovery.catalogue
+  f.discovery.catalogue = { models: [], providers: [] }
+  f.selection.model = 'sonnet'
+  f.state.set('prefs', { effort: null, transport: 'auto', helper: 'session' })
+  await startContext(f)
+  expect(f.calls.some(argv => argv[2] === 'serve')).toBe(false)
+  f.discovery.catalogue = available
+  await callbacks.get('command.run')!(f.host, { args: 'refresh' })
+  f.selection.model = 'codex/fresh'
+  f.host.session.messages = async () => [{ role: 'user', content: 'Owned late provider request' }]
+  f.host.prompt = { compose: async () => ({ sections: [{ id: 'base', text: 'Owned system' }] }) }
+  const spawn = f.host.process.spawn
+  f.host.process.spawn = async function* (options: any) {
+    if (!['once', 'client'].includes(options.argv[2])) return yield* spawn(options)
+    f.calls.push(options.argv)
+    for (const event of [{ type: 'text', text: 'owned routed answer' }, { type: 'stop', reason: 'end_turn' }]) yield { stream: 'stdout', text: JSON.stringify(event) + '\n' }
+    return { code: 0 }
+  }
+  const next = Object.assign(async function* () { throw new Error('no native fallback') }, { signal: new AbortController().signal })
+  const stream = callbacks.get('turn.step')!(f.host, { model: 'codex/fresh', turnId: 'late-provider', index: 0, messageCount: 1 }, next)
+  let result = await stream.next()
+  while (!result.done) result = await stream.next()
+  expect(result.value.answer).toBe('owned routed answer')
+  expect(f.calls.filter(argv => argv[2] === 'serve')).toHaveLength(1)
+  expect(f.calls.filter(argv => argv[2] === 'client')).toHaveLength(1)
+})
+
 test('actual session.start activates an empty Node-only picker and explains unavailable discovery without inventing a default', async () => {
   const f = fixture()
   const result = await callbacks.get('session.start')!(f.host, { isInteractive: true }, async () => ({ fixture: true }))
@@ -124,6 +153,34 @@ test('unchanged startup is idempotent and persists its one-time interactive noti
   await callbacks.get('session.start')!(f.host, { isInteractive: true }, async () => ({}))
   expect(f.notices.length).toBe(2)
   expect(f.notices.at(-1)).toContain('Codex login file is present')
+})
+
+test('selecting helper session after one-shot activation starts it on the next routed dispatch', async () => {
+  const fresh = await import('../hooks/register.ts?late-session-helper')
+  const local = new Map<string, (...args: any[]) => any>()
+  fresh.register(((event: string, match: any, callback: any) => { local.set(event, callback ?? match); return { catch: () => undefined } }) as any)
+  const f = contextFixture()
+  f.state.set('prefs', { effort: null, transport: 'auto', helper: 'once' })
+  await local.get('session.start')!(f.host, { isInteractive: false }, async () => ({}))
+  expect(f.calls.some(argv => argv[2] === 'serve')).toBe(false)
+  await local.get('command.run')!(f.host, { args: 'helper session' })
+  expect(f.calls.some(argv => argv[2] === 'serve')).toBe(false)
+  f.host.session.messages = async () => [{ role: 'user', content: 'Owned helper preference request' }]
+  f.host.prompt = { compose: async () => ({ sections: [{ id: 'base', text: 'Owned system' }] }) }
+  const spawn = f.host.process.spawn
+  f.host.process.spawn = async function* (options: any) {
+    if (!['once', 'client'].includes(options.argv[2])) return yield* spawn(options)
+    f.calls.push(options.argv)
+    for (const event of [{ type: 'text', text: 'owned helper answer' }, { type: 'stop', reason: 'end_turn' }]) yield { stream: 'stdout', text: JSON.stringify(event) + '\n' }
+    return { code: 0 }
+  }
+  const next = Object.assign(async function* () { throw new Error('no native fallback') }, { signal: new AbortController().signal })
+  const stream = local.get('turn.step')!(f.host, { model: 'codex/fresh', turnId: 'late-helper-preference', index: 0, messageCount: 1 }, next)
+  let result = await stream.next()
+  while (!result.done) result = await stream.next()
+  expect(result.value.answer).toBe('owned helper answer')
+  expect(f.calls.filter(argv => argv[2] === 'serve')).toHaveLength(1)
+  expect(f.calls.filter(argv => argv[2] === 'client')).toHaveLength(1)
 })
 
 test('headless activation syncs deterministically without asking or consuming the interactive notice', async () => {
