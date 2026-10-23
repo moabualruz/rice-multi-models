@@ -2,6 +2,7 @@
   "name": "rice-multi-models",
   "private": true,
   "scripts": {
+    "ci": "bun run check",
     "test": "bun test --isolate helper tests",
     "typecheck": "tsc -p helper/tsconfig.node.json",
     "typecheck:hooks": "node scripts/typecheck-hooks.mjs",
