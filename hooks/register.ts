@@ -260,7 +260,7 @@ async function syncNativeEnv($: EngineInterface, restore = false): Promise<void>
     const writeEnv = (name: NativeEnvName, value: string | undefined) => name === 'CLAUDE_CODE_MAX_CONTEXT_TOKENS' ? $.env.set('CLAUDE_CODE_MAX_CONTEXT_TOKENS', value) : $.env.set('CLAUDE_CODE_MODEL_CAPABILITIES', value)
     // The value found is recorded before any change, so a value the mod sets always has its owner record.
     for (const name of NATIVE_ENV_NAMES) held[name] ??= { original: await readEnv(name) ?? null, applied: null, relinquished: false }
-    if (NATIVE_ENV_NAMES.some(name => stored[name] === undefined)) await $.state.set(ref, held)
+    if (NATIVE_ENV_NAMES.some(name => stored[name] === undefined)) await $.state.set(ref, { ...held })
     const written: { name: NativeEnvName; previous: string | null; value: string | null }[] = []
     try {
       for (const name of NATIVE_ENV_NAMES) {
