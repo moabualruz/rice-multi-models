@@ -91,7 +91,7 @@ export function pickRequested(entry: CarrierEntry | undefined, model: string | u
     return { requested: entry.id, exact: entry.id }
   }
   if (marked) {
-    return { deny: `${PLUGIN}: this Agent call's exact model could not be recovered (no record for it), so it was not run as ${CARRIER_VALUE}. Retry, or choose a model with agent frontmatter. No subagent was started.` }
+    return { deny: `${PLUGIN}: this Agent call's exact model could not be recovered (no record for it), so it was not run as ${CARRIER_VALUE}. Retry with an exact model id. No subagent was started.` }
   }
   return { requested: model }
 }
@@ -116,3 +116,10 @@ export function descriptionSuffix(ids: readonly string[]): string {
 }
 
 export const withDescriptionSuffix = (description: string, ids: readonly string[]): string => description.includes(DESCRIPTION_MARK) ? description : `${description}${descriptionSuffix(ids)}`
+
+/** Presentation only. Never rewrite an agent's address/type or turn an exact model into a tier. */
+export function agentLabel(description: string, model: string, effort?: string | number): string {
+  const line = (value: string) => value.replace(/[\p{Cc}\p{Cf}]+/gu, ' ').replace(/\s+/g, ' ').trim()
+  const label = `(${line(model).slice(0, 200)}${effort === undefined ? '' : ` ${line(String(effort)).slice(0, 40)}`})`
+  return description.endsWith(label) ? description : `${description} ${label}`.trim()
+}

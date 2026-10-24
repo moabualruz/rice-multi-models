@@ -83,7 +83,7 @@ export const register: Register = on => {`)
     const transcript=JSON.stringify(req.transcript)
     const name=req.who+'-'+Math.random().toString(36).slice(2)
     const description=(await $.agent.list()).find(agent=>agent.id===req.who)?.description??'';
-    const tag=/Owned ([A-Z])$/.exec(description)?.[1];
+    const tag=/Owned ([A-Z])(?: \\([^)]*\\))?$/.exec(description)?.[1];
     if(tag==='B')ownedBackground=req.who;
     await $.fs.write(${JSON.stringify(evidence)}+'/'+name+'.json',JSON.stringify({who:req.who,target:req.target,transcript,tools:req.tools,tag}))
     const call=(id,model,tag)=>({type:'tool_use',id,name:'Agent',input:{description:'Owned '+tag,prompt:'OWNED_CHILD_'+tag,subagent_type:tag==='F'?'fork':'general-purpose',...(model?{model}:{}),run_in_background:tag==='B',...(tag==='B'?{name:'owned-background'}:{})}})

@@ -435,7 +435,7 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
             await waitForRetry(delay, signal)
             continue
           }
-          queue.push({ type: 'error', kind: error instanceof UpstreamError || error instanceof CodexAuthError ? 'request' : 'response', text: finalText(failure, attempt), ...(failure.info.status === undefined ? {} : { status: failure.info.status }), ...(signal.aborted ? { aborted: true } : {}) })
+          queue.push({ type: 'error', kind: error instanceof UpstreamError || error instanceof CodexAuthError ? 'request' : 'response', text: finalText(failure, attempt), ...(failure.info.cause ? { cause: failure.info.cause } : {}), ...(failure.info.status === undefined ? {} : { status: failure.info.status }), ...(signal.aborted ? { aborted: true } : {}) })
           return
         }
       }

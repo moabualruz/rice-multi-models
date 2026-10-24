@@ -58,6 +58,10 @@ export type Usage = { in: number; out: number; cacheRead: number; cacheWrite: nu
 /** A provider's own rate-limit report: the share of each window used and when it resets. */
 export type Limits = { plan?: string; windows: { label: string; usedPercent: number; resetsAt?: number }[] }
 
+/** Causes assigned by the owning budget guard or provider codec, never inferred from UI text. */
+export type StepFailureCause = 'input_budget_exceeded' | 'context_overflow'
+export type StepError = { type: 'error'; kind: 'request' | 'response'; text: string; status?: number; aborted?: boolean; cause?: StepFailureCause }
+
 /**
  * One event of a step's answer, in order. `text` and `thinking` stream as deltas; `signature` closes a
  * reasoning block the mod keeps and sends back before the tool calls it led to; a `tool_use` is a whole
@@ -77,7 +81,7 @@ export type StepEvent =
   | ({ type: 'usage' } & Usage)
   | { type: 'limits'; limits: Limits }
   | { type: 'stop'; reason: StopReason }
-  | { type: 'error'; kind: 'request' | 'response'; text: string; status?: number; aborted?: boolean }
+  | StepError
   | ({ type: 'stats' } & StepStats)
 
 /**

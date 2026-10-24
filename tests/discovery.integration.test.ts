@@ -295,7 +295,7 @@ test('subagents and aliases of a routed parent stay in its family', async () => 
   expect(fork.model).toBe('haiku')
 })
 
-test('fresh discovered input and context bounds refuse oversized routed turns before helper dispatch', async () => {
+test('fresh input and context metadata never pre-abort native routed turns', async () => {
   const messages = host.session.messages
   host.session.messages = async () => [{ role: 'user', content: 'oversized fixture transcript '.repeat(400) }]
   try {
@@ -311,11 +311,12 @@ test('fresh discovered input and context bounds refuse oversized routed turns be
       await reload({})
       const beforeWires = wires.length
       const refreshes = discoveries.length
-      const refused = await step('general-purpose', model.model)
-      expect(refused.nextCalls).toBe(0)
-      expect(refused.diagnostics.join('\n')).toContain('token input bound')
-      expect(refused.diagnostics.join('\n')).toContain('compact the conversation')
-      expect(wires.length).toBe(beforeWires)
+      const accepted = await step('general-purpose', model.model)
+      expect(accepted.nextCalls).toBe(0)
+      expect(accepted.diagnostics.join('\n')).not.toContain('token input bound')
+      expect(wires.length).toBe(beforeWires + 1)
+      expect(wires.at(-1).req.target).toBe(model.model)
+      expect(JSON.stringify(wires.at(-1).req.transcript)).toContain('oversized fixture transcript')
       expect(discoveries.length).toBe(refreshes)
     }
   } finally {
@@ -325,7 +326,7 @@ test('fresh discovered input and context bounds refuse oversized routed turns be
   }
 })
 
-test('a smaller freshly refreshed bound applies to the next routed subagent turn', async () => {
+test('refreshing smaller metadata does not install a child request guard', async () => {
   const messages = host.session.messages
   host.session.messages = async () => [{ role: 'user', content: 'same request '.repeat(500) }]
   const model = discoveredModel('codex/gpt-6.1-sol')
@@ -340,10 +341,11 @@ test('a smaller freshly refreshed bound applies to the next routed subagent turn
     expect(JSON.stringify(accepted.result)).toContain('fixture response')
     model.metadata = { ...unknownMetadata(), contextWindow: 32000, inputTokenLimit: 512 }
     await hook('command.run', 'rice-models')(host, { args: 'refresh' })
-    const refused = await step('general-purpose', model.model)
-    expect(refused.nextCalls).toBe(0)
-    expect(refused.diagnostics.join('\n')).toContain('token input bound')
-    expect(wires.length).toBe(before + 1)
+    const refreshed = await step('general-purpose', model.model)
+    expect(refreshed.nextCalls).toBe(0)
+    expect(refreshed.diagnostics.join('\n')).not.toContain('token input bound')
+    expect(wires.length).toBe(before + 2)
+    expect((await models()).models[0].metadata.inputTokenLimit).toBe(512)
   } finally {
     host.session.messages = messages
     discoveryOverride = undefined
@@ -351,7 +353,7 @@ test('a smaller freshly refreshed bound applies to the next routed subagent turn
   }
 })
 
-test('oversized complete and fork requests refuse without helper dispatch or native fallback', async () => {
+test('large explicit completions dispatch once without a plugin input guard or native fallback', async () => {
   const messages = host.session.messages
   const sessionModel = host.session.model
   host.session.model = async () => 'codex/gpt-6.1-sol'
@@ -367,8 +369,9 @@ test('oversized complete and fork requests refuse without helper dispatch or nat
     const next = async () => { nativeCalls++; return { value: { isAnswered: true, text: 'unsafe native fallback' } } }
     for (const event of ['model.complete', 'model.fork']) {
       const result = await hook(event)(host, { model: model.model, prompt: 'oversized fixture prompt '.repeat(400), system: 'fixture instructions' }, next)
-      expect(result.value).toMatchObject(event === 'model.fork' ? { isAnswered: false, reason: 'nothing-to-fork' } : { isAnswered: false, reason: 'api-error', error: 'invalid_request', usage: { input_tokens: 0, output_tokens: 0 } })
-      expect(wires.length).toBe(beforeWires)
+      expect(result.value).toMatchObject(event === 'model.fork' ? { isAnswered: false, reason: 'nothing-to-fork' } : { isAnswered: true, text: 'fixture response' })
+      expect(wires.length).toBe(beforeWires + 1)
+      expect(wires.at(-1).req.target).toBe(model.model)
     }
     expect(nativeCalls).toBe(0)
     expect(discoveries.length).toBe(refreshes)
@@ -503,7 +506,7 @@ test('subagent compaction fails closed for unknown models and follows the last n
   expect(wires.at(-1).req.who).toBe(routed.id)
 })
 
-test('tagged built-in route switches use the exact inference target bounds', async () => {
+test('tagged exact model switches retain native decisions rather than plugin bounds', async () => {
   try {
     const model = discoveredModel('codex/small')
     model.metadata = { ...unknownMetadata(), contextWindow: 32000, maxContextWindow: 872000 }
@@ -511,12 +514,13 @@ test('tagged built-in route switches use the exact inference target bounds', asy
     await reload({})
     let calls = 0
     const next = async () => { calls++; return { permissionDecision: 'allow' } }
-    const denied = await hook('classic.PreModelSwitch')(host, switchInput(`${model.model}[1m]`, 27905), next)
-    expect(denied.permissionDecision).toBe('deny')
-    expect(denied.permissionDecisionReason).toContain('27904 token')
-    expect(calls).toBe(0)
-    expect((await hook('classic.PreModelSwitch')(host, switchInput(`${model.model}[1m]`, 27904), next)).permissionDecision).toBe('allow')
+    const input = switchInput(`${model.model}[1m]`, 27905)
+    const allowed = await hook('classic.PreModelSwitch')(host, input, async (received: unknown) => { expect(received).toBe(input); return next() })
+    expect(allowed.permissionDecision).toBe('allow')
+    expect(allowed.permissionDecisionReason).toBeUndefined()
     expect(calls).toBe(1)
+    expect((await hook('classic.PreModelSwitch')(host, switchInput(`${model.model}[1m]`, 27904), next)).permissionDecision).toBe('allow')
+    expect(calls).toBe(2)
   } finally { discoveryOverride = undefined; await reload({}) }
 })
 
@@ -525,7 +529,7 @@ const switchInput = (to_model: string, context_tokens: number, from_model = 'cod
   prompt_cache_warm: false, cache_ttl: '1h', estimated_cache_write_usd: 0, pricing: 'default',
 })
 
-test('model switch denies context exceeding fresh exact destination bounds without compaction or mutation', async () => {
+test('native model switch owns its context decision without plugin compaction or mutation', async () => {
   const sessionModel = host.session.model
   const beforeEnvironment = new Map(environment)
   host.session.model = async () => 'codex/gpt-6.1-sol'
@@ -544,17 +548,16 @@ test('model switch denies context exceeding fresh exact destination bounds witho
       const beforeEnv = JSON.stringify([...environment])
       let nativeCalls = 0
       const next = async () => { nativeCalls++; return { permissionDecision: 'allow' } }
-      const denied = await hook('classic.PreModelSwitch')(host, switchInput(model.model, bound + 1), next)
-      expect(denied.permissionDecision).toBe('deny')
-      expect(denied.permissionDecisionReason).toContain(`${bound} token`)
-      expect(denied.permissionDecisionReason).toContain('Compact the current conversation')
-      expect(nativeCalls).toBe(0)
+      const native = await hook('classic.PreModelSwitch')(host, switchInput(model.model, bound + 1), next)
+      expect(native.permissionDecision).toBe('allow')
+      expect(native.permissionDecisionReason).toBeUndefined()
+      expect(nativeCalls).toBe(1)
       const allowed = await hook('classic.PreModelSwitch')(host, switchInput(model.model, bound), next)
       expect(allowed.permissionDecision).toBe('allow')
-      expect(nativeCalls).toBe(1)
+      expect(nativeCalls).toBe(2)
       const unchanged = await hook('classic.PreModelSwitch')(host, switchInput(model.model, bound + 1, model.model), next)
       expect(unchanged.permissionDecision).toBe('allow')
-      expect(nativeCalls).toBe(2)
+      expect(nativeCalls).toBe(3)
       expect(wires.length).toBe(beforeWires)
       expect(JSON.stringify([...sessionState])).toBe(beforeState)
       expect(JSON.stringify([...environment])).toBe(beforeEnv)
@@ -568,7 +571,7 @@ test('model switch denies context exceeding fresh exact destination bounds witho
   }
 })
 
-test('switch guard does not invent bounds for unknown, stale, worker or native Claude destinations', async () => {
+test('native switch decisions are retained for unknown, stale and native Claude destinations', async () => {
   try {
     for (const [status, metadata] of [
       ['fresh', {}],
@@ -589,18 +592,15 @@ test('switch guard does not invent bounds for unknown, stale, worker or native C
   } finally { discoveryOverride = undefined; await reload({}) }
 })
 
-test('switch guard resolves aliases and fails closed if its hook fails', async () => {
+test('aliases keep native switch decisions and downstream failures are not rewritten by a plugin guard', async () => {
   try {
     const model = discoveredModel('fixture/small')
     model.metadata = { ...unknownMetadata(), contextWindow: 32000 }
     discoveryOverride = { models: [model], providers: [{ provider: 'fixture', status: 'fresh', source: 'fixture alias bound', observedAt }] }
     await reload({ fixture: provider('small') }, { small: model.model })
-    const denied = await hook('classic.PreModelSwitch')(host, switchInput('small', 32001), async () => { throw new Error('Unsafe switch reached native hook') })
-    expect(denied.permissionDecision).toBe('deny')
-    expect(denied.permissionDecisionReason).toContain('25856 token')
-    const failed = await hook('classic.PreModelSwitch')(host, switchInput('codex/missing', 0), async () => { throw new Error('fixture downstream failure') })
-    expect(failed.permissionDecision).toBe('deny')
-    expect(failed.permissionDecisionReason).toContain('context check failed')
+    const native = { permissionDecision: 'deny', permissionDecisionReason: 'Owned native decision' }
+    expect(await hook('classic.PreModelSwitch')(host, switchInput('small', 32001), async () => native)).toBe(native)
+    await expect(hook('classic.PreModelSwitch')(host, switchInput('codex/missing', 0), async () => { throw new Error('fixture downstream failure') })).rejects.toThrow('fixture downstream failure')
   } finally { discoveryOverride = undefined; await reload({}) }
 })
 
@@ -613,7 +613,7 @@ test('the mod registers no tools and its family guidance is idempotent and nativ
   expect(second).toEqual(first)
   const section = first.sections.at(-1)
   expect(section).toMatchObject({ id: 'rice-multi-models:discovery', scope: 'session' })
-  expect(section.text).toContain('model: codex/gpt-6.1-sol')
+  expect(section.text).toContain('accepts every exact provider/model id')
   expect(section.text).not.toContain('mcp__')
   expect(processRunCount).toBe(runs)
   expect(toolDefs.size).toBe(0)
@@ -848,7 +848,8 @@ test('a child with an unknown parent never borrows the main model', async () => 
   for await (const chunk of hook('turn.step')(host, { agentId: id, model: 'haiku', turnId: 'unknown-owner', index: 0 }, async function* () { nativeCalls++; return {} })) chunks.push(chunk)
   expect(wires.length).toBe(before)
   expect(nativeCalls).toBe(0)
-  expect(chunks).toEqual([{ kind: 'stop', stopReason: null, usage: null }])
+  expect(chunks.at(-1)).toEqual({ kind: 'stop', stopReason: null, usage: null })
+  expect(chunks.filter(chunk => chunk.kind === 'text').map(chunk => chunk.text).join('')).toContain('child request failed')
   expect(diagnostics.slice(start).join('\n')).toContain('no observed model or verified parent model')
 })
 
@@ -861,7 +862,8 @@ test('an unowned root child is not assigned the main provider from its list row'
   for await (const chunk of hook('turn.step')(host, { agentId: id, model: 'haiku', turnId: 'unknown-root-owner', index: 0 }, async function* () { nativeCalls++; return {} })) chunks.push(chunk)
   expect(wires.length).toBe(before)
   expect(nativeCalls).toBe(0)
-  expect(chunks).toEqual([{ kind: 'stop', stopReason: null, usage: null }])
+  expect(chunks.at(-1)).toEqual({ kind: 'stop', stopReason: null, usage: null })
+  expect(chunks.filter(chunk => chunk.kind === 'text').map(chunk => chunk.text).join('')).toContain('child request failed')
 })
 
 test('a built-in agent type the installed claude did not start is refused, never sent with a made-up prompt', async () => {
@@ -956,7 +958,7 @@ test('Claude aliases and an absent model behave as without the carrier, and an e
     const plain = await spawn('codex/gpt-6.1-sol', 'general-purpose', model)
     expect(run.result.deny).toBeUndefined()
     expect(run.checked).toEqual([model])
-    expect(run.spawned[0].description).toBe('fixture')
+    expect(run.spawned[0].description).toBe(`fixture (${run.spawned[0].model})`)
     expect(run.spawned[0].model).toBe(plain.received.model)
   }
 })
@@ -971,7 +973,7 @@ test('parallel calls keep their own ids and leave no record behind', async () =>
   expect(a.spawned[0].model).toBe('codex/gpt-6.1-sol')
   expect(b.spawned[0].model).toBe('local/qwen')
   expect(c.spawned[0].model).toBe((await spawn('codex/gpt-6.1-sol', 'general-purpose', 'sonnet')).received.model)
-  expect(a.spawned[0].description).toBe('fixture')
+  expect(a.spawned[0].description).toBe('fixture (codex/gpt-6.1-sol)')
   const missing = await hook('agent.spawn')(host, { ...spawnInput('codex/gpt-6.1-sol', 'general-purpose', 'haiku'), tool_use_id: 'toolu_par_a', description: markDescription('fixture', 'local/qwen') }, async () => { throw new Error('must not start') })
   expect(missing.deny).toContain('could not be recovered')
 })

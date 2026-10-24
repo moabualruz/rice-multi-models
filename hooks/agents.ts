@@ -78,7 +78,7 @@ export type AgentDef = {
   tools?: readonly string[]
   disallowedTools?: readonly string[]
   model?: string
-  effort?: string
+  effort?: string | number
   isolation?: string
   permissionMode?: string
   omitClaudeMd?: true

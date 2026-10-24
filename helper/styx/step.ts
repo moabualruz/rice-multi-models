@@ -10,7 +10,7 @@ import { authHeaderOf, isObject, own, parseConfig } from '../../hooks/config'
 import type { Config, ProviderConfig } from '../../hooks/config'
 import { resolve } from '../../hooks/names'
 import { mintToolId } from '../../hooks/protocol'
-import type { ProviderStatus, StepEvent, StepWire, Usage, Wire } from '../../hooks/protocol'
+import type { ProviderStatus, StepEvent, StepFailureCause, StepWire, Usage, Wire } from '../../hooks/protocol'
 import { coalesce } from '../../hooks/coalesce'
 import { createKeys } from './auth'
 import type { Runner } from './auth'
@@ -50,6 +50,7 @@ const finishToken = (reason: string) => reason.toLowerCase().match(/^[a-z0-9_.-]
 export function assembler(codec: Codec, provider: string, ids: ReturnType<typeof remoteIds>, mint = mintToolId, captureContinuation = false) {
   const output = captureContinuation ? continuationOutput() : undefined
   let failure: string | undefined
+  let failureCause: StepFailureCause | undefined
   let finish: string | undefined
   let usage: Usage | undefined
   let before = 0
@@ -70,7 +71,7 @@ export function assembler(codec: Codec, provider: string, ids: ReturnType<typeof
         else if (d.t === 'search_sources') emit({ type: 'search_sources', sources: d.sources, searched: d.searched })
         else if (d.t === 'usage') usage = { in: d.in, out: d.out, cacheRead: d.cacheRead, cacheWrite: d.cacheWrite, ...(d.reasoning === undefined ? {} : { reasoning: d.reasoning }) }
         else if (d.t === 'finish') finish = finishToken(d.reason)
-        else if (d.t === 'error') failure = d.message
+        else if (d.t === 'error') { failure = d.message; failureCause = d.cause }
         else {
           const input = typeof d.args === 'string' ? parseJson(d.args.trim() === '' ? '{}' : d.args) : d.args
           if (d.name === '') failure = 'a tool call arrived with no name'
@@ -94,7 +95,7 @@ export function assembler(codec: Codec, provider: string, ids: ReturnType<typeof
       if (cut !== undefined) return { events: [...received, { type: 'error', kind: 'request', text: cut }], finish: 'error' }
       if (failure !== undefined) {
         const text = `rice-multi-models: ${p.id} response failed: ${oneLine(errorDetail(failure).message, 300)}; retry, or see the debug log`
-        return { events: [...received, { type: 'error', kind: 'response', text }], finish: 'error' }
+        return { events: [...received, { type: 'error', kind: 'response', text, ...(failureCause ? { cause: failureCause } : {}) }], finish: 'error' }
       }
       const reason = own(codec.stops, finish ?? 'stop')
       const events: StepEvent[] = [...received, { type: 'stop', reason: reason ?? 'end_turn' }]
@@ -150,7 +151,7 @@ export function createStepper(env: Env) {
       )
       return [...events, st]
     }
-    const refuse = (text: string, status?: number) => close([{ type: 'error', kind: 'request', text, ...(status === undefined ? {} : { status }) }], 'error')
+    const refuse = (text: string, status?: number, cause?: StepFailureCause) => close([{ type: 'error', kind: 'request', text, ...(status === undefined ? {} : { status }), ...(cause ? { cause } : {}) }], 'error')
     if (t?.kind !== 'remote') return yield* refuse(`rice-multi-models: ${req.target} is not configured in this session; run /rice-models reload`)
     const { provider: p, model: m } = t
     const approved = new Set(w.approved)
@@ -217,7 +218,10 @@ export function createStepper(env: Env) {
     // A cut made by the client going away is no failure.
     if ('cut' in answer) return signal.aborted ? void close([], 'aborted') : yield* refuse(cutText(p, answer.cut))
     http = String(answer.status)
-    if (answer.status < 200 || answer.status > 299) return yield* refuse(httpErrorText(p, answer.status, await errorBody(answer), m.id), answer.status)
+    if (answer.status < 200 || answer.status > 299) {
+      const body = await errorBody(answer)
+      return yield* refuse(httpErrorText(p, answer.status, body, m.id), answer.status, codec.errorCause?.(body))
+    }
     const decoder = codec.decoder()
     const asm = assembler(codec, req.continuation ? scope : p.id, ids, mintToolId, req.continuation !== undefined)
     let cut: Cut | undefined
