@@ -19,40 +19,52 @@ const windowOf = (value: number | null) => value !== null && Number.isSafeIntege
 /** Configured aliases and the `provider/model` each names: Claude sees an alias as its own model id. */
 export type AliasTargets = Readonly<Record<string, string>>
 
-/** Each alias whose target has data, under the alias id too. */
-function withAliases<T>(byModel: Record<string, T>, aliases: AliasTargets): Record<string, T> {
-  for (const [alias, target] of Object.entries(aliases)) if (Object.hasOwn(byModel, target)) byModel[alias] = byModel[target]!
-  return byModel
+type Metadata = ModelCatalogue['models'][number]['metadata']
+
+/** Every model id Claude can be given and its data: each catalogue model, and each alias with its target's. */
+function nativeIds(catalogue: ModelCatalogue, aliases: AliasTargets): [string, Metadata][] {
+  const byId = new Map(catalogue.models.map(({ model, metadata }) => [model, metadata] as [string, Metadata]))
+  for (const [alias, target] of Object.entries(aliases)) {
+    const metadata = byId.get(target)
+    if (metadata) byId.set(alias, metadata)
+  }
+  return [...byId]
 }
+
+/**
+ * Whether Claude reads an id as one of its own models, such as `opencode/claude-sonnet-4-6`: its
+ * `modelSettings` resolve to that Claude model and Claude's own window data applies, so the mod leaves both alone.
+ */
+const namesClaudeModel = (id: string) => /claude-/i.test(id)
 
 /** Each model's real window as its compaction window (Claude's range is 100000 to 1000000), and its top effort when it caps below xhigh. */
 export function nativeModelSettings(catalogue: ModelCatalogue, aliases: AliasTargets = {}): Record<string, NativeModelSettings> {
   const settings: Record<string, NativeModelSettings> = {}
-  for (const { model, metadata } of catalogue.models) {
+  for (const [id, metadata] of nativeIds(catalogue, aliases)) {
+    if (namesClaudeModel(id)) continue
     const window = windowOf(metadata.contextWindow)
     const top = EFFORTS.filter(level => metadata.reasoningEfforts?.includes(level)).at(-1)
     const entry: NativeModelSettings = {
       ...(window !== undefined && window >= 100_000 && window <= 1_000_000 ? { autoCompactWindow: window } : {}),
       ...(top === 'low' || top === 'medium' || top === 'high' ? { maxEffortLevel: top } : {}),
     }
-    if (Object.keys(entry).length) settings[model] = entry
+    if (Object.keys(entry).length) settings[id] = entry
   }
-  return withAliases(settings, aliases)
+  return settings
 }
 
 /**
- * Claude's process environment for non-Claude models: the largest reported window, which each model's own
- * `autoCompactWindow` then lowers to its real size, and each model's effort levels in Claude's capability syntax.
- * Unknown data adds nothing, so Claude's native defaults stay.
+ * Claude's process environment for non-Claude models: the largest reported window among the ids it applies
+ * to, which each model's own `autoCompactWindow` then lowers to its real size, and each id's effort levels in
+ * Claude's capability syntax (matched to the exact id). Unknown data adds nothing, so Claude's native defaults stay.
  */
 export function nativeModelEnv(catalogue: ModelCatalogue, aliases: AliasTargets = {}): Record<string, string> {
-  const windows = catalogue.models.flatMap(({ metadata }) => windowOf(metadata.contextWindow) ?? [])
-  const byModel: Record<string, string> = {}
-  for (const { model, metadata } of catalogue.models) {
-    const efforts = metadata.reasoningEfforts
-    if (efforts !== null) byModel[model] = efforts.length === 0 ? '-effort' : ['effort', efforts.includes('xhigh') ? 'xhigh_effort' : '-xhigh_effort', efforts.includes('max') ? 'max_effort' : '-max_effort'].join(',')
-  }
-  const capabilities = Object.entries(withAliases(byModel, aliases)).map(([model, value]) => `${model}=${value}`)
+  const ids = nativeIds(catalogue, aliases)
+  const windows = ids.flatMap(([id, metadata]) => namesClaudeModel(id) ? [] : windowOf(metadata.contextWindow) ?? [])
+  const capabilities = ids.flatMap(([id, { reasoningEfforts: efforts }]) => {
+    if (efforts === null) return []
+    return [`${id}=${efforts.length === 0 ? '-effort' : ['effort', efforts.includes('xhigh') ? 'xhigh_effort' : '-xhigh_effort', efforts.includes('max') ? 'max_effort' : '-max_effort'].join(',')}`]
+  })
   return {
     ...(windows.length ? { CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(Math.max(...windows)) } : {}),
     ...(capabilities.length ? { CLAUDE_CODE_MODEL_CAPABILITIES: capabilities.join(';') } : {}),

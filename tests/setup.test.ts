@@ -69,19 +69,24 @@ test('catalogue data maps to Claude\'s native per-model fields and leaves unknow
       { model: 'local/qwen', label: 'Qwen', execution: 'native provider', source: 'fixture', observedAt: 1, metadata: metadata(64000, ['low', 'high']) },
       { model: 'local/plain', label: 'Plain', execution: 'native provider', source: 'fixture', observedAt: 1, metadata: metadata(null, []) },
       { model: 'local/unknown', label: 'Unknown', execution: 'native provider', source: 'fixture', observedAt: 1, metadata: metadata(null, null) },
+      // Claude reads this id as its own claude-sonnet-4-6: its settings would change that model's, and Claude's own window data applies to it.
+      { model: 'opencode/claude-sonnet-4-6', label: 'Routed Sonnet', execution: 'native provider', source: 'fixture', observedAt: 1, metadata: metadata(900000, ['low', 'high']) },
     ],
     providers: [],
   } as ModelCatalogue
   expect(nativeModelSettings(catalogue)).toEqual({ 'codex/gpt-6.1-sol': { autoCompactWindow: 500000 }, 'local/qwen': { maxEffortLevel: 'high' } })
   expect(nativeModelEnv(catalogue)).toEqual({
     CLAUDE_CODE_MAX_CONTEXT_TOKENS: '500000',
-    CLAUDE_CODE_MODEL_CAPABILITIES: 'codex/gpt-6.1-sol=effort,xhigh_effort,-max_effort;local/qwen=effort,-xhigh_effort,-max_effort;local/plain=-effort',
+    CLAUDE_CODE_MODEL_CAPABILITIES: 'codex/gpt-6.1-sol=effort,xhigh_effort,-max_effort;local/qwen=effort,-xhigh_effort,-max_effort;local/plain=-effort;opencode/claude-sonnet-4-6=effort,-xhigh_effort,-max_effort',
   })
   expect(nativeModelEnv({ models: [], providers: [] })).toEqual({})
   // An alias is a model id of its own to Claude: it carries its target's fields, and nothing when its target has none.
-  const aliases = { preferred: 'local/qwen', quiet: 'local/unknown' }
-  expect(nativeModelSettings(catalogue, aliases)).toEqual({ 'codex/gpt-6.1-sol': { autoCompactWindow: 500000 }, 'local/qwen': { maxEffortLevel: 'high' }, preferred: { maxEffortLevel: 'high' } })
-  expect(nativeModelEnv(catalogue, aliases).CLAUDE_CODE_MODEL_CAPABILITIES).toBe('codex/gpt-6.1-sol=effort,xhigh_effort,-max_effort;local/qwen=effort,-xhigh_effort,-max_effort;local/plain=-effort;preferred=effort,-xhigh_effort,-max_effort')
+  const aliases = { preferred: 'local/qwen', quiet: 'local/unknown', steady: 'opencode/claude-sonnet-4-6' }
+  expect(nativeModelSettings(catalogue, aliases)).toEqual({ 'codex/gpt-6.1-sol': { autoCompactWindow: 500000 }, 'local/qwen': { maxEffortLevel: 'high' }, preferred: { maxEffortLevel: 'high' }, steady: { autoCompactWindow: 900000, maxEffortLevel: 'high' } })
+  expect(nativeModelEnv(catalogue, aliases)).toEqual({
+    CLAUDE_CODE_MAX_CONTEXT_TOKENS: '900000',
+    CLAUDE_CODE_MODEL_CAPABILITIES: 'codex/gpt-6.1-sol=effort,xhigh_effort,-max_effort;local/qwen=effort,-xhigh_effort,-max_effort;local/plain=-effort;opencode/claude-sonnet-4-6=effort,-xhigh_effort,-max_effort;preferred=effort,-xhigh_effort,-max_effort;steady=effort,-xhigh_effort,-max_effort',
+  })
 })
 
 test('picker sync never adds an empty picker block to settings that had none', async () => temporary(async configDir => {
