@@ -56,7 +56,7 @@ import { remoteTools } from './tools'
 import type { Described } from './tools'
 import { handbackState, withTask } from './transcript'
 import { commandText, detectRuntime as probeRuntime, helperFile, setupSummary, startupNotice as publishNotice, syncPicker as synchronizePicker } from './setup'
-import type { PickerResult, Runtime } from './setup'
+import type { PickerPort, PickerResult, Runtime } from './setup'
 import { searchConfigurationCommand } from './search-config'
 import type { SearchConfigurationResult, SearchEdit } from './search-config'
 import { fetchProviderProtocol, fetchTierConfigState } from './fetch-config'
@@ -245,17 +245,21 @@ async function refreshCatalogue($: EngineInterface): Promise<void> {
   await discoverCapacity({ now: await $.clock.now(), helper: helperFile($.plugin.root), approved: [...await approvedSet($)], run: (argv, options) => $.process.run(argv, options) })
 }
 
+/** The catalogue whose model data was last handed to the settings sync, whichever path discovered it. */
+let publishedCatalogue: ModelCatalogue | undefined
+
+/** Shared by routed requests and prompt evaluators: a discovery here writes its model data for Claude's next launch. */
 async function refreshCapacity(port: EvaluatorCapacityPort): Promise<void> {
   if (catalogueCheckedAt !== undefined && capacityExpiresAt !== undefined && port.now >= catalogueCheckedAt && port.now < capacityExpiresAt) return
   catalogueRefresh ??= discoverCapacity(port).finally(() => { catalogueRefresh = undefined })
   await catalogueRefresh
+  if (catalogue !== publishedCatalogue) {
+    await publishModelData({ helper: port.helper, run: async (argv, options) => ({ stderr: '', ...await port.run(argv, { stdin: options?.stdin ?? '', timeoutMs: options?.timeoutMs ?? 10_000 }) }) }, runtime, routedRows())
+  }
 }
 
 async function ensureFreshCapacity($: EngineInterface): Promise<void> {
-  const before = catalogue
   await refreshCapacity({ now: await $.clock.now(), helper: helperFile($.plugin.root), approved: [...await approvedSet($)], run: (argv, options) => $.process.run(argv, options) })
-  // A refresh that ran discovery writes its model data for Claude's next launch.
-  if (catalogue !== before) await syncPicker($, runtime, routedRows())
 }
 
 /** Each configured alias and the `provider/model` it names, so the alias id carries its target's native data. */
@@ -274,8 +278,14 @@ async function detectRuntime($: EngineInterface): Promise<Runtime> {
 }
 
 /** Picker rows, per-model settings and the env block, all in ~/.claude/settings.json, which Claude loads at launch. */
+/** The picker rows, per-model settings and env block of the current catalogue, for Claude's next launch. */
+function publishModelData(port: PickerPort, current: Runtime, rows: PickerRow[]): Promise<PickerResult> {
+  publishedCatalogue = catalogue
+  return synchronizePicker(port, current, rows, nativeModelSettings(catalogue, aliasTargets()), nativeModelEnv(catalogue, aliasTargets()))
+}
+
 async function syncPicker($: EngineInterface, current: Runtime, rows: PickerRow[]): Promise<PickerResult> {
-  return synchronizePicker({ helper: helperFile($.plugin.root), run: (argv, options) => $.process.run(argv, options) }, current, rows, nativeModelSettings(catalogue, aliasTargets()), nativeModelEnv(catalogue, aliasTargets()))
+  return publishModelData({ helper: helperFile($.plugin.root), run: (argv, options) => $.process.run(argv, options) }, current, rows)
 }
 
 async function startupNotice($: EngineInterface, interactive: boolean, current: Runtime, picker: PickerResult | undefined, rows: PickerRow[], defaultModel: string | undefined, catalogueSummary?: string, capabilities?: string): Promise<void> {

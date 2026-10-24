@@ -8838,7 +8838,7 @@ async function syncPicker(input) {
       if (key === "maxEffortLevel") return levels.includes(own3) && levels.indexOf(own3) <= levels.indexOf(value) ? void 0 : value;
       return typeof own3 === "number" && typeof value === "number" && own3 <= value ? void 0 : value;
     };
-    const sameModel = (id2) => id2.toLowerCase().replace(/-\d{8}$/, "");
+    const sameModel = (id2) => id2.toLowerCase().replace(/-\d{8}$/, "").replace(/\[1m\]$/, "");
     const theirs = (id2, key) => Object.entries(modelSettings).some(([other, entry]) => other !== id2 && sameModel(other) === sameModel(id2) && object2(entry) && entry[key] !== void 0 && !(object2(ownedSettings[other]) && ownedSettings[other][key] === entry[key]));
     for (const id2 of /* @__PURE__ */ new Set([...Object.keys(ownedSettings), ...Object.keys(wanted)])) {
       const existing = modelSettings[id2] === void 0 ? {} : object2(modelSettings[id2]) ? { ...modelSettings[id2] } : void 0;

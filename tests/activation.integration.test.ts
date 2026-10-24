@@ -1104,6 +1104,10 @@ test('an automatic catalogue refresh writes the new model data for the next laun
   expect(f.syncs.at(-1).modelSettings).toEqual({ 'codex/fresh': { autoCompactWindow: 500000 } })
   expect(f.syncs.at(-1).env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe('500000')
   expect(f.contextWrites).toEqual([])
+  // The discovery itself published its data (prompt evaluators share it), so a later request writes nothing again.
+  const synced = f.syncs.length
+  expect((await callbacks.get('model.complete')!(f.host, { model: 'codex/fresh', prompt: 'still fresh' }, native)).value.isAnswered).toBe(true)
+  expect(f.syncs).toHaveLength(synced)
 })
 
 test('unknown bounds, unavailable discovery and runtime failure never mutate native context', async () => {

@@ -118,9 +118,9 @@ export async function syncPicker(input: PickerSyncInput): Promise<PickerSyncResu
       if (key === 'maxEffortLevel') return levels.includes(own as string) && levels.indexOf(own as string) <= levels.indexOf(value as string) ? undefined : value
       return typeof own === 'number' && typeof value === 'number' && own <= value ? undefined : value
     }
-    // Claude keys a model's settings case-insensitively and without a trailing date, so the person's own
-    // entry under another spelling of the same model is theirs and the mod adds none beside it.
-    const sameModel = (id: string) => id.toLowerCase().replace(/-\d{8}$/, '')
+    // Claude keys a model's settings case-insensitively, without a trailing date and then without a trailing
+    // [1m], so the person's own entry under another spelling of the same model is theirs and the mod adds none beside it.
+    const sameModel = (id: string) => id.toLowerCase().replace(/-\d{8}$/, '').replace(/\[1m\]$/, '')
     const theirs = (id: string, key: string) => Object.entries(modelSettings).some(([other, entry]) =>
       other !== id && sameModel(other) === sameModel(id) && object(entry) && entry[key] !== undefined && !(object(ownedSettings[other]) && ownedSettings[other][key] === entry[key]))
     for (const id of new Set([...Object.keys(ownedSettings), ...Object.keys(wanted)])) {
