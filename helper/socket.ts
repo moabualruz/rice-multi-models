@@ -194,7 +194,7 @@ export class SocketPool {
     if (kept?.isUsable && !ageExpired) return { socket: kept, reused: true }
     if (kept && ageExpired) {
       kept.retire()
-      this.sockets.delete(key)
+      if (!kept.busy) this.sockets.delete(key)
     }
     const socket = await CodexSocket.open(url, headers, signal, this.now)
     if (!kept || kept.closed || !this.sockets.has(key)) this.sockets.set(key, socket)
