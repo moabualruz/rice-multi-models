@@ -39,6 +39,10 @@ Release 0.17.3 adds the two variables Claude resolves before that order: an agen
 run takes `CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL` in place of the call's and the definition's
 model, and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` outranks every other model, so its row shows
 `CLAUDE_CODE_SUBAGENT_MODEL`, or the parent's when that is unset.
+Release 0.17.4 skips description rewrites for first-party workflow `agent()` spawns, which
+Claude ignores, while nested agents remain labelled. It documents the native Explore label
+limit: credential-dependent gateway routing can run Explore on opus for fable or mythos parents
+while the label shows the parent's model.
 Earlier owner/model, capacity, streaming, failure and fork repairs remain.
 The mod registers no MCP tools and needs no launcher, proxy or gateway.
 
@@ -159,6 +163,10 @@ on the id.
   Transcripts can retain that visible note; the child task description does not. Upstream
   requests: let `tool.describe` override input-schema fields that are not pinned, or let
   `Agent.model` accept any string that `agent.spawn` resolves or denies.
+- **The native Explore label limit.** Claude Code runs built-in Explore on opus when a
+  first-party parent uses fable or mythos. The decision depends on gateway credential state
+  that `$.env.get` cannot read, so `agent.spawn` cannot know the resolved child model in that
+  case and the row may show the parent's model. Dispatch remains native.
 
 Map tiers to specific models per family in `rice-multi-models.json`:
 

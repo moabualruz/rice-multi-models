@@ -8,6 +8,7 @@ export const NATIVE_MODEL_LIMITATIONS = {
   childBudget: 'AgentSpawnInput and TurnStepInput expose no per-invocation context/input/output budget. AgentSpec.autoCompactWindow only lowers an existing custom definition window, from 100000 to 1000000; it is not a built-in/fork/resume fix and cannot represent a smaller budget.',
   recovery: 'TurnStepChunk has no provider error chunk or recovery directive. TurnStepResult cannot rewrite the already streamed native response. A null stop preserves failure, but cannot deliver a native-recognized context-overflow error or request child compaction. session.compact has no agentId selector and is refused during a running turn.',
   visibility: 'agent.spawn description, ToolUse, ToolProgress and task UserMessage display props are public. There is no AgentList/agent-row render component, no mutable resumed-spawn description, and no child identity on Spinner.',
+  exploreInherit: 'Claude Code runs built-in Explore on opus when a first-party parent uses fable or mythos. That decision depends on gateway credential state that $.env.get cannot read, so agent.spawn cannot label the resolved child model there and the row may show the parent model instead. Native dispatch is unchanged.',
   agentDefinition: 'No public resolved definition or composed per-child system prompt exists for project or SDK agents, so the mod reads the agent file Claude itself applies and sends its prompt unchanged to whichever model runs the agent.',
 } as const
 

@@ -1,7 +1,7 @@
 // Production lifecycle hooks in ordinary Claude. Only provider I/O is an owned fixture.
 import assert from 'node:assert/strict'
 import { cpSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { loadavg, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
@@ -12,6 +12,12 @@ const fixture = mkdtempSync(join(tmpdir(), 'rice-public-compact-'))
 const plugin = join(fixture, 'plugin'), config = join(fixture, '.claude'), evidence = join(fixture, 'wires.json'), lifecycle = join(fixture, 'lifecycle.json'), agentProjection = join(fixture, 'agent-projection.json')
 const native = process.env.RICE_CLAUDE_EXECUTABLE || 'claude'
 let child
+let succeeded = false
+let activeRun
+const tail = value => String(value ?? '').slice(-2000)
+const reportDeadline = (phase, startedAt, stdout, stderr) => {
+  process.stderr.write(`${JSON.stringify({ deadline: phase, elapsedMs: Math.round(performance.now() - startedAt), loadAverage1m: loadavg()[0], stdoutTail: tail(stdout), stderrTail: tail(stderr) })}\n`)
+}
 try {
   mkdirSync(plugin); mkdirSync(config)
   const readFixture = join(fixture, 'owned.txt')
@@ -84,13 +90,16 @@ try {
   writeFileSync(file, source)
   const env = Object.fromEntries(['PATH', 'PATHEXT', 'SystemRoot', 'SystemDrive', 'WINDIR', 'ComSpec', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'ProgramFiles', 'ProgramFiles(x86)', 'CLAUDE_CODE_GIT_BASH_PATH'].filter(name => process.env[name] !== undefined).map(name => [name, process.env[name]]))
   Object.assign(env, { HOME: fixture, USERPROFILE: fixture, CLAUDE_CONFIG_DIR: config, CODEX_HOME: join(fixture, '.codex'), ANTHROPIC_API_KEY: 'owned-no-network', ANTHROPIC_BASE_URL: 'http://127.0.0.1:1', DISABLE_AUTOUPDATER: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' })
+  const validationStarted = performance.now()
   const checked = spawnSync(native, ['plugin', 'validate', '--strict', plugin], { cwd: fixture, env, encoding: 'utf8', timeout: 10000 })
+  if (checked.error?.code === 'ETIMEDOUT') reportDeadline('plugin validate', validationStarted, checked.stdout, checked.stderr)
   if (checked.status !== 0) process.stderr.write(checked.stdout + checked.stderr)
   assert.equal(checked.status, 0, (checked.stdout + checked.stderr).slice(-2000))
   async function run(label, session, args, prompt, tools = '') {
     // Native Windows limits a command line to 32767 characters; claude -p reads a long prompt from stdin.
     const script = Array.isArray(prompt) ? prompt : undefined
     const viaStdin = script !== undefined || prompt.length > 8000
+    const startedAt = performance.now()
     child = spawn(native, ['-p', '--model', 'codex/owned-public', '--plugin-dir', plugin, '--setting-sources', 'user', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--tools', tools, ...(tools ? ['--permission-mode', 'bypassPermissions'] : []), '--output-format', script ? 'stream-json' : 'json', ...(script ? ['--input-format', 'stream-json', '--verbose'] : []), ...args, ...(viaStdin ? [] : [prompt])], { cwd: fixture, env, detached: process.platform !== 'win32', stdio: [viaStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'] })
     let pending = '', results = 0
     const outputs = []
@@ -112,8 +121,12 @@ try {
     console.log(JSON.stringify({ phase: label, ownedPid: child.pid, session, preload: false }))
     let stdout = '', stderr = '', expired = false
     child.stdout.on('data', bytes => stdout += bytes); child.stderr.on('data', bytes => stderr += bytes)
-    const timer = setTimeout(() => { expired = true; terminate() }, 30000)
+    const diagnostics = { label, startedAt, output: () => ({ stdout, stderr }) }
+    activeRun = diagnostics
+    const timer = setTimeout(() => { expired = true; terminate(diagnostics) }, 30000)
     const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve) }); clearTimeout(timer)
+    if (expired) reportDeadline(label, startedAt, stdout, stderr)
+    if (activeRun === diagnostics) activeRun = undefined
     assert.equal(expired, false, label + ' deadline')
     assert.equal(code, 0, label + ': ' + (stdout + stderr).slice(-2000))
     if (script) {
@@ -205,12 +218,19 @@ try {
   assert.ok(wires.filter(row => row.summary).length >= 2)
   assert.ok(wires.every(row => row.target === 'codex/owned-public'), 'no native or other provider fallback')
   console.log(JSON.stringify({ publicCompaction: true, manualSavedAndResumed: true, automaticSaved: true, providerOwnedRequests: wires.length, summaryRequests: wires.filter(row => row.summary).length }))
+  succeeded = true
 } finally {
-  terminate()
-  rmSync(fixture, { recursive: true, force: true })
+  terminate(activeRun)
+  if (succeeded) rmSync(fixture, { recursive: true, force: true })
+  else process.stderr.write(`Failure artifact retained at ${fixture}\n`)
 }
-function terminate() {
+function terminate(diagnostics) {
   if (!child || child.exitCode !== null || child.signalCode !== null) return
-  if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', timeout: 10000 })
-  else try { process.kill(-child.pid, 'SIGTERM') } catch (error) { if (error.code !== 'ESRCH') throw error }
+  if (process.platform === 'win32') {
+    const killed = spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { encoding: 'utf8', timeout: 10000 })
+    if (killed.error?.code === 'ETIMEDOUT') {
+      const output = diagnostics?.output() ?? { stdout: '', stderr: '' }
+      reportDeadline(`${diagnostics?.label ?? 'claude -p'} taskkill`, diagnostics?.startedAt ?? performance.now(), output.stdout, output.stderr)
+    }
+  } else try { process.kill(-child.pid, 'SIGTERM') } catch (error) { if (error.code !== 'ESRCH') throw error }
 }

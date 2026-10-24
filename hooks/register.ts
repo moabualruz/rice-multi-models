@@ -1734,7 +1734,7 @@ export const register: Register = on => {
     const chosen = e.fork ? undefined : call ?? declared ?? workflowModel ?? ((await $.env.get('CLAUDE_CODE_SUBAGENT_MODEL'))?.trim() || undefined)
     const resolved = chosen === undefined || chosen === 'inherit' ? parentModel : chosen
     const effort = e.fork ? parentEffort : resolved && isRouted(resolved) ? (routedEffort(resolved, pending?.effort ?? definition?.effort, (await read($, prefsAtom)).effort) ?? parentEffort) : pending?.effort ?? definition?.effort ?? parentEffort
-    const restored = { ...e, description: resolved === undefined ? description.text : agentLabel(description.text, resolved, effort) }
+    const restored = { ...e, description: resolved === undefined || e.workflow?.runId !== undefined ? description.text : agentLabel(description.text, resolved, effort) }
     const result = await next(decision.model !== undefined && decision.model !== e.model ? { ...restored, model: decision.model } : restored)
     if (picked.exact !== undefined && result.model !== picked.exact) $.ui.log(`${PLUGIN}: Agent model ${picked.exact} was requested but the subagent started on ${result.model}`, { to: 'transcript' })
     if (result.agentId) {
