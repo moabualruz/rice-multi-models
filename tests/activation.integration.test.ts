@@ -1088,6 +1088,24 @@ test('native context refresh and model switch use current metadata and preserve 
   expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('64000')
 })
 
+test('a live workflow child, which no agent list names, holds the window until its turn completes', async () => {
+  const f = contextFixture()
+  f.discovery.catalogue.models.push({ model: 'codex/tight-child', label: 'Owned child', execution: 'native provider', source: 'fixture', observedAt: 1_800_000_000_000, metadata: { ...unknownMetadata(), contextWindow: 32768, maxContextWindow: 32768, outputTokenLimit: 4096 } })
+  await startContext(f)
+  expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('500000')
+  const spawn = (agentId: string, workflow?: { runId: string; agentIndex: number }) => callbacks.get('agent.spawn')!(f.host, { tool_use_id: `toolu_${agentId}`, prompt: 'owned', description: 'owned child', subagentType: 'general-purpose', provider: { plugin: 'engine', tier: 'core' }, parentModel: 'codex/fresh', model: 'codex/tight-child', background: false, fork: false, ...(workflow ? { workflow } : {}) }, async (input: any) => ({ model: input.model, agentId }))
+  const complete = (agentId: string) => callbacks.get('turn.complete')!(f.host, { turnId: `turn-${agentId}`, agentId, answer: 'owned answer', durationMs: 1, isAborted: false, reason: 'completed' }, async (input: any) => ({ text: input.answer }))
+  expect(await spawn('owned-ended-subagent')).toEqual({ model: 'codex/tight-child', agentId: 'owned-ended-subagent' })
+  expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('500000')
+  expect(await spawn('owned-workflow-child', { runId: 'wf_owned', agentIndex: 1 })).toEqual({ model: 'codex/tight-child', agentId: 'owned-workflow-child' })
+  expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('32768')
+  expect(await complete('owned-ended-subagent')).toEqual({ text: 'owned answer' })
+  expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('32768')
+  expect(await complete('owned-workflow-child')).toEqual({ text: 'owned answer' })
+  expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('500000')
+  expect(f.contextWrites.map(write => write.value)).toEqual(['500000', '32768', '500000'])
+})
+
 test('native context resolves configured aliases to their exact fresh model', async () => {
   const f = contextFixture()
   f.files.set('/empty-home/.claude/rice-multi-models.json', JSON.stringify({ providers: { fixture: { kind: 'openai', baseUrl: 'https://fixture.invalid/v1', auth: 'none', models: { fresh: { contextWindow: 128000, maxOutputTokens: 4096 } } } }, aliases: { preferred: 'fixture/fresh' } }))

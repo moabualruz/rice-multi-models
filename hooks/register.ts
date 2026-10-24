@@ -140,6 +140,8 @@ const reportedToolFallbacks = new Set<string>()
 let interactiveSession: boolean | undefined
 /** Whether each spawned agent runs in the background, by its agent id. */
 const spawnBackground = new Map<string, boolean>()
+/** Workflow agents, which `$.agent.list()` never names: live from their spawn until their `turn.complete`. */
+const liveWorkflowAgents = new Map<string, true>()
 let seenTranscriptPath: string | undefined
 
 /** Immutable last dispatched routed main request prefix, never reconstructed from current context. */
@@ -160,6 +162,10 @@ async function windowInUse($: EngineInterface): Promise<number | undefined> {
   const models = [await $.session.model()]
   for (const agent of await $.agent.list().catch(() => [])) {
     const model = ['pending', 'running', 'waiting', 'idle'].includes(agent.status) ? agentModels.get(agent.id) : undefined
+    if (model) models.push(model)
+  }
+  for (const id of liveWorkflowAgents.keys()) {
+    const model = agentModels.get(id)
     if (model) models.push(model)
   }
   const windows = models.map(model => activeContext(model)?.contextWindow)
@@ -1518,7 +1524,7 @@ export const register: Register = on => {
     runtime = await detectRuntime($)
     codexDefaults = await readCodexDefaults($)
     await loadProviders($)
-    agentModels.clear(); spawnDecisions.clear(); spawnBackground.clear()
+    agentModels.clear(); spawnDecisions.clear(); spawnBackground.clear(); liveWorkflowAgents.clear()
     for (const owner of (await read($, ownersAtom)).entries) cacheOwner(owner)
     await refreshCatalogue($)
     // A nested claude process can migrate settings; run it before any judgment
@@ -1782,6 +1788,7 @@ export const register: Register = on => {
       }
       setCapped(spawnDecisions, result.agentId, observed ? { ...decision, model: observed, family: familyOf(observed, familyPorts) } : decision)
       if (observed) setCapped(agentModels, result.agentId, observed)
+      if (e.workflow) setCapped(liveWorkflowAgents, result.agentId, true, 256)
       if (observed) await syncNativeContext($)
       setCapped(spawnBackground, result.agentId, e.background)
     }
@@ -1805,6 +1812,15 @@ export const register: Register = on => {
       if (owner) return next({ ...e, props: { ...e.props, text: agentLabel(e.props.text, owner.model, owner.effort) } })
     }
     return next(e)
+  })
+
+  // A workflow agent leaves the window data when its turn completes: no list row ends it.
+  on('turn.complete', async ($, e, next) => {
+    try {
+      return await next(e)
+    } finally {
+      if (e.agentId !== undefined && liveWorkflowAgents.delete(e.agentId)) await syncNativeContext($)
+    }
   })
 
   on('tool.describe', async ($, e, next) => {
