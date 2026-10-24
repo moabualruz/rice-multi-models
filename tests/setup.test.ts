@@ -63,14 +63,15 @@ test('native model settings fill only their own keys, keep the person\'s values 
 
 test('the env block and per-model settings are written for Claude\'s next launch and keep the person\'s own values', async () => temporary(async configDir => {
   const file = path.join(configDir, 'settings.json')
-  await writeFile(file, JSON.stringify({ env: { FOO: '1', CLAUDE_CODE_MODEL_CAPABILITIES: 'mine=effort' }, modelSettings: { 'Codex/Fresh': { autoCompactWindow: 128000 }, 'local/route-20261024': { autoCompactWindow: 200000 }, 'local/wide[1m]': { autoCompactWindow: 180000 } } }))
+  await writeFile(file, JSON.stringify({ env: { FOO: '1', CLAUDE_CODE_MODEL_CAPABILITIES: 'mine=effort' }, modelSettings: { 'Codex/Fresh': { autoCompactWindow: 128000 }, 'local/route-20261024': { autoCompactWindow: 200000 }, 'local/wide[1m]': { autoCompactWindow: 180000 }, 'Local/Tuned-20261024': { effortLevel: 'xhigh' } } }))
   const env = { CLAUDE_CODE_MAX_CONTEXT_TOKENS: '500000', CLAUDE_CODE_MODEL_CAPABILITIES: 'codex/fresh=effort' }
-  const modelSettings = { 'codex/fresh': { autoCompactWindow: 500000 }, 'local/route': { autoCompactWindow: 400000 }, 'local/wide': { autoCompactWindow: 600000 }, 'local/other': { autoCompactWindow: 300000 } }
+  const modelSettings = { 'codex/fresh': { autoCompactWindow: 500000 }, 'local/route': { autoCompactWindow: 400000 }, 'local/wide': { autoCompactWindow: 600000 }, 'local/tuned': { maxEffortLevel: 'high' }, 'local/other': { autoCompactWindow: 300000 } }
   expect(await syncPicker({ configDir, rows, modelSettings, env })).toMatchObject({ ok: true, changed: true })
   let written = JSON.parse(await readFile(file, 'utf8'))
   // The person's own value and their entry under another spelling of the same model stay theirs.
   expect(written.env).toEqual({ FOO: '1', CLAUDE_CODE_MODEL_CAPABILITIES: 'mine=effort', CLAUDE_CODE_MAX_CONTEXT_TOKENS: '500000' })
-  expect(written.modelSettings).toEqual({ 'Codex/Fresh': { autoCompactWindow: 128000 }, 'local/route-20261024': { autoCompactWindow: 200000 }, 'local/wide[1m]': { autoCompactWindow: 180000 }, 'local/other': { autoCompactWindow: 300000 } })
+  // The person's entry holds a key the mod does not fill, and still no key is added beside it for that model.
+  expect(written.modelSettings).toEqual({ 'Codex/Fresh': { autoCompactWindow: 128000 }, 'local/route-20261024': { autoCompactWindow: 200000 }, 'local/wide[1m]': { autoCompactWindow: 180000 }, 'Local/Tuned-20261024': { effortLevel: 'xhigh' }, 'local/other': { autoCompactWindow: 300000 } })
   // A later sync updates only what the mod wrote, and removes it when the data is gone.
   await syncPicker({ configDir, rows, modelSettings: { 'local/other': { autoCompactWindow: 250000 } }, env: { CLAUDE_CODE_MAX_CONTEXT_TOKENS: '250000' } })
   written = JSON.parse(await readFile(file, 'utf8'))
@@ -79,7 +80,7 @@ test('the env block and per-model settings are written for Claude\'s next launch
   await syncPicker({ configDir, rows: [] })
   written = JSON.parse(await readFile(file, 'utf8'))
   expect(written.env).toEqual({ FOO: '1', CLAUDE_CODE_MODEL_CAPABILITIES: 'mine=effort' })
-  expect(written.modelSettings).toEqual({ 'Codex/Fresh': { autoCompactWindow: 128000 }, 'local/route-20261024': { autoCompactWindow: 200000 }, 'local/wide[1m]': { autoCompactWindow: 180000 } })
+  expect(written.modelSettings).toEqual({ 'Codex/Fresh': { autoCompactWindow: 128000 }, 'local/route-20261024': { autoCompactWindow: 200000 }, 'local/wide[1m]': { autoCompactWindow: 180000 }, 'Local/Tuned-20261024': { effortLevel: 'xhigh' } })
 }))
 
 test('provider data never raises a cap the settings file sets itself', async () => temporary(async configDir => {

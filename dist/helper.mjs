@@ -8839,7 +8839,7 @@ async function syncPicker(input) {
       return typeof own3 === "number" && typeof value === "number" && own3 <= value ? void 0 : value;
     };
     const sameModel = (id2) => id2.toLowerCase().replace(/-\d{8}$/, "").replace(/\[1m\]$/, "");
-    const theirs = (id2, key) => Object.entries(modelSettings).some(([other, entry]) => other !== id2 && sameModel(other) === sameModel(id2) && object2(entry) && entry[key] !== void 0 && !(object2(ownedSettings[other]) && ownedSettings[other][key] === entry[key]));
+    const theirs = (id2) => Object.entries(modelSettings).some(([other, entry]) => other !== id2 && sameModel(other) === sameModel(id2) && object2(entry) && Object.keys(entry).some((key) => !(object2(ownedSettings[other]) && ownedSettings[other][key] === entry[key])));
     for (const id2 of /* @__PURE__ */ new Set([...Object.keys(ownedSettings), ...Object.keys(wanted)])) {
       const existing = modelSettings[id2] === void 0 ? {} : object2(modelSettings[id2]) ? { ...modelSettings[id2] } : void 0;
       if (existing === void 0) continue;
@@ -8848,7 +8848,7 @@ async function syncPicker(input) {
       const mine = {};
       for (const key of NATIVE_SETTING_KEYS) {
         if (existing[key] !== ours[key]) continue;
-        const value = theirs(id2, key) ? void 0 : belowOwn(key, want[key]);
+        const value = theirs(id2) ? void 0 : belowOwn(key, want[key]);
         if (value === void 0) delete existing[key];
         else {
           existing[key] = value;
