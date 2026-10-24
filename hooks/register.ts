@@ -32,7 +32,7 @@ import type { NativeCapture } from './native-tools'
 import { createMemory } from './memory'
 import { CATALOG_URL, kindCounts, liveIds, opencodeProvider, TIERS } from './opencode'
 import type { Tier } from './opencode'
-import { catalogueRows } from './picker'
+import { catalogueRows, nativeModelEnv, nativeModelSettings } from './picker'
 import { NATIVE_MODEL_LIMITATIONS, unknownMetadata } from './catalogue'
 import type { ModelCatalogue } from './catalogue'
 import { runtimeConfig } from './catalogue-runtime'
@@ -114,6 +114,8 @@ let limits: Limits | undefined
 let lastStep: { model: string; who: string; ms: number; transport: string } | undefined
 /** The main model last recorded for this session, so a resume on another model can say so once. */
 let recordedMainModel: string | undefined
+/** The main conversation's last request effort, so a subagent that inherits it can show it. */
+let mainEffort: string | number | undefined
 const LAST_MODELS = 'last-main-models'
 /** How each spawned agent's model was decided, by its agent id. */
 const spawnDecisions = new Map<string, SpawnDecision>()
@@ -238,8 +240,41 @@ async function discoverCapacity(port: EvaluatorCapacityPort): Promise<void> {
   loaded = runtimeConfig(declared, catalogue)
 }
 
+const NATIVE_ENV_NAMES = ['CLAUDE_CODE_MAX_CONTEXT_TOKENS', 'CLAUDE_CODE_MODEL_CAPABILITIES'] as const
+type NativeEnvName = typeof NATIVE_ENV_NAMES[number]
+let nativeEnvSync = Promise.resolve()
+
+/**
+ * The model data Claude reads from its own environment for non-Claude ids (see nativeModelEnv). An owner's
+ * own value stays authoritative: the mod sets a variable only while it holds what the mod last set, and
+ * `restore` puts back the original value it found.
+ */
+async function syncNativeEnv($: EngineInterface, restore = false): Promise<void> {
+  const desired: Record<string, string> = restore || !runtime.executable || runtime.error ? {} : nativeModelEnv(catalogue)
+  const sync = nativeEnvSync.then(async () => {
+    const ref = { plugin: 'rice-multi-models', key: 'nativeEnv' } as const
+    const held = { ...((await $.state.get(ref)).value ?? {}) }
+    // Claude lists the variables a module touches, so each is named literally.
+    const readEnv = (name: NativeEnvName) => name === 'CLAUDE_CODE_MAX_CONTEXT_TOKENS' ? $.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS') : $.env.get('CLAUDE_CODE_MODEL_CAPABILITIES')
+    const writeEnv = (name: NativeEnvName, value: string | undefined) => name === 'CLAUDE_CODE_MAX_CONTEXT_TOKENS' ? $.env.set('CLAUDE_CODE_MAX_CONTEXT_TOKENS', value) : $.env.set('CLAUDE_CODE_MODEL_CAPABILITIES', value)
+    for (const name of NATIVE_ENV_NAMES) {
+      const current = await readEnv(name) ?? null
+      const entry = held[name] ?? { original: current, applied: null, relinquished: false }
+      if (entry.relinquished || entry.original !== null) { held[name] = entry; continue }
+      if (current !== (entry.applied ?? entry.original)) { held[name] = { ...entry, applied: null, relinquished: true }; continue }
+      const want = desired[name] ?? entry.original
+      if (want !== current) await writeEnv(name, want ?? undefined)
+      held[name] = { ...entry, applied: want }
+    }
+    await $.state.set(ref, held)
+  })
+  nativeEnvSync = sync.catch(() => { $.ui.log(`${PLUGIN}: native model environment unavailable`, { to: 'debug' }) })
+  await nativeEnvSync
+}
+
 async function refreshCatalogue($: EngineInterface): Promise<void> {
   await discoverCapacity({ now: await $.clock.now(), helper: helperFile($.plugin.root), approved: [...await approvedSet($)], run: (argv, options) => $.process.run(argv, options) })
+  await syncNativeEnv($)
 }
 
 async function refreshCapacity(port: EvaluatorCapacityPort): Promise<void> {
@@ -250,6 +285,7 @@ async function refreshCapacity(port: EvaluatorCapacityPort): Promise<void> {
 
 async function ensureFreshCapacity($: EngineInterface): Promise<void> {
   await refreshCapacity({ now: await $.clock.now(), helper: helperFile($.plugin.root), approved: [...await approvedSet($)], run: (argv, options) => $.process.run(argv, options) })
+  await syncNativeEnv($)
 }
 
 /** Engine calls stay in this module; imported setup logic receives plain values and callable ports. */
@@ -263,7 +299,7 @@ async function detectRuntime($: EngineInterface): Promise<Runtime> {
 }
 
 async function syncPicker($: EngineInterface, current: Runtime, rows: PickerRow[]): Promise<PickerResult> {
-  return synchronizePicker({ helper: helperFile($.plugin.root), run: (argv, options) => $.process.run(argv, options) }, current, rows)
+  return synchronizePicker({ helper: helperFile($.plugin.root), run: (argv, options) => $.process.run(argv, options) }, current, rows, nativeModelSettings(catalogue))
 }
 
 async function startupNotice($: EngineInterface, interactive: boolean, current: Runtime, picker: PickerResult | undefined, rows: PickerRow[], defaultModel: string | undefined, catalogueSummary?: string, capabilities?: string): Promise<void> {
@@ -1033,6 +1069,7 @@ async function nativeContextStatus($: EngineInterface) {
   const metadata = activeContext(model)
   const usage = await $.session.usage({ breakdown: 'summary' })
   const current = await $.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS') ?? null
+  const held = (await $.state.get({ plugin: 'rice-multi-models', key: 'nativeEnv' })).value?.CLAUDE_CODE_MAX_CONTEXT_TOKENS
   return {
     model,
     activeContextWindow: metadata?.contextWindow ?? null,
@@ -1043,8 +1080,8 @@ async function nativeContextStatus($: EngineInterface) {
     reasoningEfforts: metadata?.reasoningEfforts ?? null,
     capabilities: { inputModalities: metadata?.inputModalities ?? null, tools: metadata?.tools ?? null, parallelToolCalls: metadata?.parallelToolCalls ?? null },
     nativeWindow: usage.context.window,
-    override: current !== null ? 'owner/external' : 'unset',
-    scope: 'the mod reports model data and sets no context override; window resolution, accounting and automatic compaction are Claude\'s own',
+    override: held?.applied !== null && held?.applied !== undefined && held.applied === current ? 'plugin-owned, largest provider window' : current !== null ? 'owner/external' : 'unset',
+    scope: 'the mod fills Claude\'s native model fields; window resolution, accounting and automatic compaction are Claude\'s own',
     limitations: NATIVE_MODEL_LIMITATIONS,
   }
 }
@@ -1191,6 +1228,7 @@ async function setupCommand($: EngineInterface, action: string | undefined): Pro
   if (action && !['repair', 'codex'].includes(action)) return 'Usage: /rice-models setup [repair|codex]. No global install is performed.'
   runtime = await detectRuntime($)
   if (runtime.error) {
+    await syncNativeEnv($, true)
     return setupSummary(runtime, undefined, 0, undefined, undefined, await capabilitySummary($))
   }
   if (action === 'codex') {
@@ -1495,6 +1533,7 @@ export const register: Register = on => {
       }
     }
     if (e.reason === 'clear') for (const row of (await read($, receiptsAtom)).entries) if (['preparing', 'prepared'].includes(row.status)) await saveReceipt($, { ...row, status: 'aborted', reason: 'clear' }, row)
+    await syncNativeEnv($, true)
     return next(e)
   })
 
@@ -1692,9 +1731,11 @@ export const register: Register = on => {
     $.ui.log(`${PLUGIN}: spawn ${e.subagentType} from ${parentModel}: ${decision.model ?? 'native resolution'} (${decision.reason})`, { to: 'debug' })
     if (picked.exact !== undefined && decision.model !== picked.exact) return { deny: `${PLUGIN}: Agent model ${picked.exact} cannot be run by this session (${decision.reason}); no subagent was started` }
     const pending = (await read($, agentDisplayAtom)).entries.find(entry => entry.toolUseId === e.tool_use_id)
-    const parentEffort = e.parentAgentId === undefined ? undefined : (await read($, ownersAtom)).entries.find(owner => owner.id === e.parentAgentId)?.effort
-    const resolved = decision.model ?? e.model
-    const effort = e.fork ? parentEffort : resolved && isRouted(resolved) ? routedEffort(resolved, pending?.effort ?? definition?.effort, (await read($, prefsAtom)).effort) : pending?.effort ?? definition?.effort
+    const parentEffort = e.parentAgentId === undefined ? mainEffort : (await read($, ownersAtom)).entries.find(owner => owner.id === e.parentAgentId)?.effort
+    // Label every subagent row, an inherited native model included.
+    const declared = definition?.model !== undefined && definition.model !== 'inherit' ? definition.model : undefined
+    const resolved = decision.model ?? e.model ?? declared ?? e.parentModel
+    const effort = e.fork ? parentEffort : resolved && isRouted(resolved) ? (routedEffort(resolved, pending?.effort ?? definition?.effort, (await read($, prefsAtom)).effort) ?? parentEffort) : pending?.effort ?? definition?.effort ?? parentEffort
     const restored = { ...e, description: resolved === undefined ? description.text : agentLabel(description.text, resolved, effort) }
     const result = await next(decision.model !== undefined && decision.model !== e.model ? { ...restored, model: decision.model } : restored)
     if (picked.exact !== undefined && result.model !== picked.exact) $.ui.log(`${PLUGIN}: Agent model ${picked.exact} was requested but the subagent started on ${result.model}`, { to: 'transcript' })
@@ -1720,9 +1761,6 @@ export const register: Register = on => {
         const input = e.props.input as Record<string, unknown>
         return next({ ...e, props: { ...e.props, input: { ...input, description: agentLabel(typeof input['description'] === 'string' ? input['description'] : 'Agent', entry.model, entry.effort) } } })
       }
-    } else if (e.component === 'ToolProgress') {
-      const entry = (await read($, agentDisplayAtom)).entries.find(row => row.toolUseId === e.props.tool_use_id)
-      if (entry?.model) return next({ ...e, props: { ...e.props, hint: agentLabel(e.props.hint, entry.model, entry.effort) } })
     } else if (e.component === 'UserMessage' && e.props.task?.id) {
       const owner = (await read($, ownersAtom)).entries.find(row => row.id === e.props.task!.id)
       if (owner) return next({ ...e, props: { ...e.props, text: agentLabel(e.props.text, owner.model, owner.effort) } })
@@ -1747,6 +1785,7 @@ export const register: Register = on => {
       return yield* refusedStep($, e, `${PLUGIN}: the model family of this conversation could not be resolved (${error instanceof Error ? error.message : String(error)}); nothing was sent`)
     }
     if (e.agentId !== undefined) await rememberOwner($, e.agentId, e.model, spawnBackground.get(e.agentId), isRouted(e.model) ? routedEffort(e.model, e.effort, (await read($, prefsAtom)).effort) : e.effort)
+    else mainEffort = isRouted(e.model) ? routedEffort(e.model, e.effort, (await read($, prefsAtom)).effort) : e.effort
     await reconcileCompaction($, e.agentId, e.model)
     const claimed = claimedRefusal(e.model)
     if (claimed) return yield* refusedStep($, e, claimed)

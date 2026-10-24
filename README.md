@@ -24,8 +24,11 @@ compaction and recovery run. Claude receives the smallest context window among t
 main model and live routed subagents, so subagents compact natively. Subagent rows show
 the resolved model and effort, a failed child reports its error, and project agent files
 run as Claude applies them whatever model they name.
-Release 0.17.1 removes the context window override and the subagent result rewrite: the mod
-reports each model's data and Claude resolves windows and compacts every agent natively.
+Release 0.17.1 fills Claude's own model fields instead: every model is a picker row, its
+real window is its per-model `modelSettings.<id>.autoCompactWindow`, its effort levels go to
+`CLAUDE_CODE_MODEL_CAPABILITIES`, and `CLAUDE_CODE_MAX_CONTEXT_TOKENS` holds the largest window,
+so Claude compacts each agent at its own model's size. Every subagent row shows its model and
+effort, and a failed subagent's error stays in its own answer.
 Earlier owner/model, capacity, streaming, failure and fork repairs remain.
 The mod registers no MCP tools and needs no launcher, proxy or gateway.
 

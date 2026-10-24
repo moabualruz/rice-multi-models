@@ -48,11 +48,13 @@ test('native window explanations distinguish primary integration from per-model 
   expect(Object.keys(report)).toEqual(['models', 'discovery', 'providerApprovals', 'codexLimits', 'compaction', 'nativeContextRegistration', 'nativeModelLimitations'])
   expect(report.compaction).toMatchObject({ routed: 'session.compact', customSummarization: false, providerFallback: false, nativeClaude: 'unchanged', modelSwitchGuard: false, inputBudgetGuard: false })
   for (const explanation of [report.nativeContextRegistration]) {
-    expect(explanation).toContain('reported context window, input and output limits, effort levels and capabilities')
+    expect(explanation).toContain('native /model picker row')
+    expect(explanation).toContain('modelSettings.<id>.autoCompactWindow')
+    expect(explanation).toContain('modelSettings.<id>.maxEffortLevel')
+    expect(explanation).toContain('CLAUDE_CODE_MODEL_CAPABILITIES')
+    expect(explanation).toContain('CLAUDE_CODE_MAX_CONTEXT_TOKENS holds the largest reported window')
+    expect(explanation).toContain('An owner\'s own value stays authoritative')
     expect(explanation).toContain('compaction stay Claude\'s own, per agent')
-    expect(explanation).toContain('the mod sets no context override')
-    expect(explanation).toContain('CLAUDE_CODE_MAX_CONTEXT_TOKENS when the owner sets it')
-    expect(explanation).toContain('no numeric per-model registration')
     expect(explanation).not.toContain('200k fallback')
   }
 })

@@ -1021,46 +1021,50 @@ const switchContext = (f: ReturnType<typeof fixture>, model: string) => {
   return callbacks.get('classic.PostModelSwitch')!(f.host, { from_model, to_model: model, source: 'sdk' }, async () => ({ switched: true }))
 }
 
-test('complete model metadata is reported without substituting a process-global native window', async () => {
+test('complete model metadata fills Claude\'s native model fields', async () => {
   const f = contextFixture()
   f.discovery.catalogue.models[0]!.metadata = { ...f.discovery.catalogue.models[0]!.metadata, outputTokenLimit: 4096, autoCompactTokenLimit: 450000, reasoningEfforts: ['low', 'high'], inputModalities: ['text', 'image'], tools: true, parallelToolCalls: true }
   expect(await startContext(f)).toEqual({ started: true })
-  expect(f.env.has('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(false)
-  expect(f.contextWrites).toEqual([])
+  expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('500000')
+  expect(f.env.get('CLAUDE_CODE_MODEL_CAPABILITIES')).toBe('codex/fresh=effort,-xhigh_effort,-max_effort')
   const report = await callbacks.get('command.run')!(f.host, { args: 'status' })
   expect(report.text).toContain('active context 500000')
   expect(report.text).toContain('maximum context 872000')
   expect(report.text).toContain('reported input 470000')
   expect(report.text).toContain('reported output 4096')
-  expect(report.text).toContain('native window 200000')
-  expect(report.text).toContain('No public model.register/model definition operation')
-  expect(report.text).toContain('sets no context override')
-  const row = f.syncs.at(-1).rows[0]
+  expect(report.text).toContain('native window 500000')
+  expect(report.text).toContain('override plugin-owned, largest provider window')
+  expect(report.text).toContain('fills Claude\'s native model fields')
+  const sync = f.syncs.at(-1)
+  expect(sync.modelSettings).toEqual({ 'codex/fresh': { autoCompactWindow: 500000, maxEffortLevel: 'high' } })
+  const row = sync.rows[0]
   expect(row.model).toBe('codex/fresh')
   for (const data of ['450000', 'low|high', 'text|image', 'tools true', 'parallel true']) expect(row.description).toContain(data)
   expect(row.behavesAs).toBeUndefined()
 })
 
-test('refresh, switches, repeated startup and session end never change the owner context configuration', async () => {
+test('refresh, switches, repeated startup and session end keep an owner value and restore only what the mod set', async () => {
   for (const override of [undefined, '123456']) {
     const f = contextFixture()
     if (override) f.env.set('CLAUDE_CODE_MAX_CONTEXT_TOKENS', override)
     await startContext(f)
     await startContext(f)
+    expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(override ?? '500000')
     f.discovery.catalogue.models[0]!.metadata.contextWindow = 32768
     await callbacks.get('command.run')!(f.host, { args: 'refresh' })
+    expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(override ?? '32768')
     expect(await switchContext(f, 'sonnet')).toEqual({ switched: true })
     await switchContext(f, 'codex/fresh')
     f.env.set('DISABLE_COMPACT', '1')
     await switchContext(f, 'codex/fresh')
     expect(await callbacks.get('session.end')!(f.host, {}, async () => ({ ended: true }))).toEqual({ ended: true })
     expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(override)
-    expect(f.contextWrites).toEqual([])
+    expect(f.contextWrites.map((write: any) => write.value)).toEqual(override ? [] : ['500000', '32768', undefined])
     expect(f.env.get('DISABLE_COMPACT')).toBe('1')
   }
 })
 
-test('exact alias metadata is descriptive and never becomes a global child accounting substitute', async () => {
+test('an alias resolves to its exact model for status, and every catalogued window feeds the native fields', async () => {
   const f = contextFixture()
   f.files.set('/empty-home/.claude/rice-multi-models.json', JSON.stringify({ providers: { fixture: { kind: 'openai', baseUrl: 'https://fixture.invalid/v1', auth: 'none', models: { fresh: { contextWindow: 128000, maxOutputTokens: 4096 } } } }, aliases: { preferred: 'fixture/fresh' } }))
   f.selection.model = 'preferred'
@@ -1069,7 +1073,8 @@ test('exact alias metadata is descriptive and never becomes a global child accou
   await startContext(f)
   const report = await callbacks.get('command.run')!(f.host, { args: 'status' })
   expect(report.text).toContain('Primary context (preferred): active context 500000')
-  expect(f.contextWrites).toEqual([])
+  expect(f.contextWrites.map((write: any) => write.value)).toEqual(['500000'])
+  expect(f.syncs.at(-1).modelSettings).toEqual({ 'fixture/fresh': { autoCompactWindow: 500000 } })
 })
 
 test('unknown bounds, unavailable discovery and runtime failure never mutate native context', async () => {

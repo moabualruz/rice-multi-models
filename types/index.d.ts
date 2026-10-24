@@ -28,6 +28,8 @@ declare module 'claude-code' {
       'agent-model-owners': { entries: readonly AgentModelOwner[] }
       'compaction-receipts': { entries: readonly CompactionReceipt[] }
       'agent-display': { entries: readonly AgentDisplay[] }
+      /** Native environment variables the mod sets from model data, with the values it found and last set. */
+      nativeEnv: Record<string, { original: string | null; applied: string | null; relinquished: boolean }>
       /** The main transcript's file, as the engine's classic hooks name it (a compaction summary cites it). */
       transcript: { path: string | null }
       /** Exact Agent model ids awaiting their agent.spawn, by tool_use_id (see hooks/agent-model.ts). */
