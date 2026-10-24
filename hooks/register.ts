@@ -89,6 +89,7 @@ const carrierAtom = atom({ plugin: 'rice-multi-models', key: 'agent-model-carrie
 const ownersAtom = atom({ plugin: 'rice-multi-models', key: 'agent-model-owners' } as const, { entries: [] as readonly AgentModelOwner[] })
 const childFailuresAtom = atom({ plugin: 'rice-multi-models', key: 'child-failures' } as const, { entries: [] as readonly { agentId: string; turnId: string; report: string }[] })
 const agentDisplayAtom = atom({ plugin: 'rice-multi-models', key: 'agent-display' } as const, { entries: [] as readonly AgentDisplay[] })
+const workflowAgentsAtom = atom({ plugin: 'rice-multi-models', key: 'workflow-agents' } as const, { entries: [] as readonly string[] })
 const receiptsAtom = atom({ plugin: 'rice-multi-models', key: 'compaction-receipts' } as const, { entries: [] as readonly CompactionReceipt[] })
 /** The main transcript's file, as the engine's classic hooks name it; a compaction cites it in its summary message. */
 const transcriptAtom = atom({ plugin: 'rice-multi-models', key: 'transcript' } as const, { path: null })
@@ -140,8 +141,6 @@ const reportedToolFallbacks = new Set<string>()
 let interactiveSession: boolean | undefined
 /** Whether each spawned agent runs in the background, by its agent id. */
 const spawnBackground = new Map<string, boolean>()
-/** Workflow agents, which `$.agent.list()` never names: live from their spawn until their `turn.complete`. */
-const liveWorkflowAgents = new Map<string, true>()
 let seenTranscriptPath: string | undefined
 
 /** Immutable last dispatched routed main request prefix, never reconstructed from current context. */
@@ -164,7 +163,7 @@ async function windowInUse($: EngineInterface): Promise<number | undefined> {
     const model = ['pending', 'running', 'waiting', 'idle'].includes(agent.status) ? agentModels.get(agent.id) : undefined
     if (model) models.push(model)
   }
-  for (const id of liveWorkflowAgents.keys()) {
+  for (const id of (await read($, workflowAgentsAtom)).entries) {
     const model = agentModels.get(id)
     if (model) models.push(model)
   }
@@ -1524,7 +1523,7 @@ export const register: Register = on => {
     runtime = await detectRuntime($)
     codexDefaults = await readCodexDefaults($)
     await loadProviders($)
-    agentModels.clear(); spawnDecisions.clear(); spawnBackground.clear(); liveWorkflowAgents.clear()
+    agentModels.clear(); spawnDecisions.clear(); spawnBackground.clear()
     for (const owner of (await read($, ownersAtom)).entries) cacheOwner(owner)
     await refreshCatalogue($)
     // A nested claude process can migrate settings; run it before any judgment
@@ -1788,7 +1787,10 @@ export const register: Register = on => {
       }
       setCapped(spawnDecisions, result.agentId, observed ? { ...decision, model: observed, family: familyOf(observed, familyPorts) } : decision)
       if (observed) setCapped(agentModels, result.agentId, observed)
-      if (e.workflow) setCapped(liveWorkflowAgents, result.agentId, true, 256)
+      if (e.workflow) {
+        const id = result.agentId
+        await update($, workflowAgentsAtom, state => ({ entries: [...state.entries.filter(entry => entry !== id), id].slice(-256) }))
+      }
       if (observed) await syncNativeContext($)
       setCapped(spawnBackground, result.agentId, e.background)
     }
@@ -1819,7 +1821,11 @@ export const register: Register = on => {
     try {
       return await next(e)
     } finally {
-      if (e.agentId !== undefined && liveWorkflowAgents.delete(e.agentId)) await syncNativeContext($)
+      const id = e.agentId
+      if (id !== undefined && (await read($, workflowAgentsAtom)).entries.includes(id)) {
+        await update($, workflowAgentsAtom, state => ({ entries: state.entries.filter(entry => entry !== id) }))
+        await syncNativeContext($)
+      }
     }
   })
 
