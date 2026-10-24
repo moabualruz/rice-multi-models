@@ -954,6 +954,7 @@ test('an unknown id is denied visibly with the valid ids and starts nothing', as
 test('an inherited child is labelled with the model Claude resolves for it, in Claude\'s own order', async () => {
   await reload({ local: provider('qwen') })
   const sessionModel = host.session.model
+  const oldCwd = host.session.cwd
   // A native Claude session: the child inherits through Claude's own resolution, not the mod's.
   host.session.model = async () => 'opus'
   try {
@@ -965,7 +966,22 @@ test('an inherited child is labelled with the model Claude resolves for it, in C
     const configured = await spawn('opus', 'general-purpose')
     expect(configured.received.description).toBe('owned spawn (haiku)')
     expect(configured.received.model).toBeUndefined()
-  } finally { host.session.model = sessionModel; environment.delete('CLAUDE_CODE_SUBAGENT_MODEL') }
+    // A definition's own "inherit" decides before the variable, as the parent's model.
+    const name = 'inheriting-review'
+    const directory = `${root}/fixture-${name}/.claude/agents`
+    host.session.cwd = async () => `${root}/fixture-${name}`
+    fixtureDirs.set(directory, [{ name: `${name}.md`, kind: 'file' }])
+    fixtureFiles.set(`${directory}/${name}.md`, `---\nname: ${name}\ndescription: Review source\nmodel: inherit\n---\nReview source only.\n`)
+    const declared = await spawn('opus', name)
+    expect(declared.received.description).toBe('owned spawn (opus)')
+    expect(declared.received.model).toBeUndefined()
+    host.session.cwd = oldCwd
+    // Claude reads an empty or "inherit" variable as the parent's model, not as a model name.
+    for (const value of ['', 'inherit']) {
+      environment.set('CLAUDE_CODE_SUBAGENT_MODEL', value)
+      expect((await spawn('opus', 'general-purpose')).received.description).toBe('owned spawn (opus)')
+    }
+  } finally { host.session.model = sessionModel; host.session.cwd = oldCwd; environment.delete('CLAUDE_CODE_SUBAGENT_MODEL') }
 })
 
 test('Claude aliases and an absent model behave as without the carrier, and an engine haiku is not a lost carrier', async () => {

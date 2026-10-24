@@ -1717,8 +1717,9 @@ export const register: Register = on => {
     const parentEffort = e.parentAgentId === undefined ? mainEffort : (await read($, ownersAtom)).entries.find(owner => owner.id === e.parentAgentId)?.effort
     // Every subagent row is labelled with the model Claude will run it on, in Claude's own order: the Agent
     // call's model, the agent definition's, CLAUDE_CODE_SUBAGENT_MODEL, then the parent's (a fork's always).
-    const declared = definition?.model !== undefined && definition.model !== 'inherit' ? definition.model : undefined
-    const resolved = e.fork ? parentModel : decision.model ?? e.model ?? declared ?? await $.env.get('CLAUDE_CODE_SUBAGENT_MODEL') ?? parentModel
+    // As in Claude, the first one present decides, and "inherit" there (or an empty variable) is the parent's.
+    const chosen = e.fork ? undefined : decision.model ?? e.model ?? definition?.model ?? (await $.env.get('CLAUDE_CODE_SUBAGENT_MODEL') || undefined)
+    const resolved = chosen === undefined || chosen === 'inherit' ? parentModel : chosen
     const effort = e.fork ? parentEffort : resolved && isRouted(resolved) ? (routedEffort(resolved, pending?.effort ?? definition?.effort, (await read($, prefsAtom)).effort) ?? parentEffort) : pending?.effort ?? definition?.effort ?? parentEffort
     const restored = { ...e, description: resolved === undefined ? description.text : agentLabel(description.text, resolved, effort) }
     const result = await next(decision.model !== undefined && decision.model !== e.model ? { ...restored, model: decision.model } : restored)
