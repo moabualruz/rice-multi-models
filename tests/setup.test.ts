@@ -116,8 +116,8 @@ test('catalogue data maps to Claude\'s native per-model fields and leaves unknow
     CLAUDE_CODE_MODEL_CAPABILITIES: 'codex/gpt-6.1-sol=effort,xhigh_effort,-max_effort;local/qwen=effort,-xhigh_effort,-max_effort;local/plain=-effort;opencode/claude-sonnet-4-6=effort,-xhigh_effort,-max_effort;preferred=effort,-xhigh_effort,-max_effort;steady=effort,-xhigh_effort,-max_effort;my-claude-route=effort,xhigh_effort,-max_effort',
   })
   // Once Claude launched with each one's window, the largest is free; a loaded window above a model's own does not count.
-  expect(nativeModelEnv(catalogue, aliases, { 'codex/gpt-6.1-sol': 500000, steady: 900000, 'my-claude-route': 500000 }).CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe('900000')
-  expect(nativeModelEnv(catalogue, aliases, { 'codex/gpt-6.1-sol': 600000, steady: 900000, 'my-claude-route': 500000 }).CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe('500000')
+  expect(nativeModelEnv(catalogue, aliases, { byModel: { 'codex/gpt-6.1-sol': 500000, steady: 900000, 'my-claude-route': 500000 } }).CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe('900000')
+  expect(nativeModelEnv(catalogue, aliases, { byModel: { 'codex/gpt-6.1-sol': 600000, steady: 900000, 'my-claude-route': 500000 } }).CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe('500000')
 })
 
 test('picker sync never adds an empty picker block to settings that had none', async () => temporary(async configDir => {
