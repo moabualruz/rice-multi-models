@@ -6,6 +6,7 @@ import { ProviderFailure } from './core/provider-failure.ts'
 import WebSocket from 'ws'
 
 const OPEN_MS = 15_000
+const MAX_SOCKET_AGE_MS = 55 * 60_000
 const ENDS = new Set(['response.completed', 'response.done', 'response.failed', 'response.incomplete', 'error'])
 const encoder = new TextEncoder()
 
@@ -24,11 +25,12 @@ export type LimitsReader = (event: Parsed) => Limits | null
 export class CodexSocket {
   busy = false
   closed = false
-  lastUsed = Date.now()
+  lastUsed: number
   private route: ((parsed: Parsed, text: string) => void) | undefined
   private drop: ((error: Error) => void) | undefined
 
-  private constructor(private readonly socket: WebSocket) {
+  private constructor(private readonly socket: WebSocket, readonly openedAt: number, private readonly now: () => number) {
+    this.lastUsed = openedAt
     socket.addEventListener('message', event => {
       const text = typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data as ArrayBuffer)
       let parsed: Parsed
@@ -48,7 +50,7 @@ export class CodexSocket {
   }
 
   /** A connection once the handshake is done; headers carry the login, which the backend checks here. */
-  static open(url: string, headers: Record<string, string>, signal?: AbortSignal): Promise<CodexSocket> {
+  static open(url: string, headers: Record<string, string>, signal?: AbortSignal, now: () => number = Date.now): Promise<CodexSocket> {
     signal?.throwIfAborted()
     const socket = new WebSocket(url, { headers, followRedirects: false })
     // ws emits an error when a connecting socket is closed; keep it handled after handshake cleanup.
@@ -70,7 +72,7 @@ export class CodexSocket {
       const abort = () => fail(signal?.reason)
       const opened = () => {
         cleanup()
-        resolve(new CodexSocket(socket))
+        resolve(new CodexSocket(socket, now(), now))
       }
       const refused = (event: WebSocket.ErrorEvent) => {
         const message = 'message' in event && typeof event.message === 'string' ? event.message : ''
@@ -165,7 +167,7 @@ export class CodexSocket {
             self.close(true)
           }
           self.busy = false
-          self.lastUsed = Date.now()
+          self.lastUsed = self.now()
         }
       },
     }
@@ -176,14 +178,19 @@ export class CodexSocket {
 export class SocketPool {
   private readonly sockets = new Map<string, CodexSocket>()
 
-  constructor(private readonly idleMs = 5 * 60_000) {}
+  constructor(private readonly idleMs = 5 * 60_000, private readonly now: () => number = Date.now) {}
 
   /** The conversation's open, idle connection, or a new one (kept for next time unless the old one is busy). */
   async take(key: string, url: string, headers: Record<string, string>, signal?: AbortSignal): Promise<{ socket: CodexSocket; reused: boolean }> {
     const kept = this.sockets.get(key)
-    if (kept?.isUsable) return { socket: kept, reused: true }
-    const socket = await CodexSocket.open(url, headers, signal)
-    if (!kept || kept.closed) this.sockets.set(key, socket)
+    const ageExpired = kept !== undefined && this.now() - kept.openedAt >= MAX_SOCKET_AGE_MS
+    if (kept?.isUsable && !ageExpired) return { socket: kept, reused: true }
+    if (kept && ageExpired) {
+      kept.close(true)
+      this.sockets.delete(key)
+    }
+    const socket = await CodexSocket.open(url, headers, signal, this.now)
+    if (!kept || kept.closed || !this.sockets.has(key)) this.sockets.set(key, socket)
 
     return { socket, reused: false }
   }
@@ -193,9 +200,9 @@ export class SocketPool {
     return [...this.sockets.values()].includes(socket)
   }
 
-  sweep(now = Date.now()): void {
+  sweep(now = this.now()): void {
     for (const [key, socket] of this.sockets) {
-      if (socket.closed || (!socket.busy && now - socket.lastUsed > this.idleMs)) {
+      if (socket.closed || (!socket.busy && (now - socket.lastUsed > this.idleMs || now - socket.openedAt >= MAX_SOCKET_AGE_MS))) {
         socket.close()
         this.sockets.delete(key)
       }

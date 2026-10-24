@@ -43,6 +43,8 @@ Release 0.17.4 skips description rewrites for first-party workflow `agent()` spa
 Claude ignores, while nested agents remain labelled. It documents the native Explore label
 limit: credential-dependent gateway routing can run Explore on opus for fable or mythos parents
 while the label shows the parent's model.
+It retires Codex Responses WebSockets before the 60-minute provider limit and retries a rejected uncommitted step once without replaying tool calls.
+The manual-seed fixture records wire observations per request and merges them only after each child exits.
 Earlier owner/model, capacity, streaming, failure and fork repairs remain.
 The mod registers no MCP tools and needs no launcher, proxy or gateway.
 

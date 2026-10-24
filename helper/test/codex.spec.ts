@@ -176,3 +176,21 @@ test('a pooled connection answers the next step of the same conversation without
   pool.closeAll()
   expect(pool.size).toBe(0)
 })
+
+test('a pooled socket is retired at 55 minutes rather than reused', async () => {
+  seen = []
+  replay = fixture('text')
+  let now = Date.now()
+  const pool = new SocketPool(5 * 60_000, () => now)
+  const first = await run('ws', undefined, pool)
+  now += 55 * 60_000
+  const second = await run('ws', undefined, pool)
+  expect(first.at(-1)).toMatchObject({ type: 'stats', transport: 'ws' })
+  expect(second.at(-1)).toMatchObject({ type: 'stats', transport: 'ws' })
+  expect(seen).toHaveLength(2)
+  expect(pool.size).toBe(1)
+  now += 55 * 60_000
+  pool.sweep()
+  expect(pool.size).toBe(0)
+  pool.closeAll()
+})
