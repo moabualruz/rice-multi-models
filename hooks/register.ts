@@ -1523,6 +1523,8 @@ export const register: Register = on => {
     await loadProviders($)
     agentModels.clear(); spawnDecisions.clear(); spawnBackground.clear()
     for (const owner of (await read($, ownersAtom)).entries) cacheOwner(owner)
+    // A session's environment comes only from its own settings sync below.
+    settledEnv = {}
     await refreshCatalogue($)
     // A nested claude process can migrate settings; run it before any judgment
     // is pending so its settings change cannot invalidate one.
