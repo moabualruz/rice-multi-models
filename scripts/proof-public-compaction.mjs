@@ -9,8 +9,18 @@ import { randomUUID } from 'node:crypto'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const fixture = mkdtempSync(join(tmpdir(), 'rice-public-compact-'))
-const plugin = join(fixture, 'plugin'), config = join(fixture, '.claude'), evidence = join(fixture, 'wires.json'), lifecycle = join(fixture, 'lifecycle.json'), agentProjection = join(fixture, 'agent-projection.json')
+const plugin = join(fixture, 'plugin'), config = join(fixture, '.claude'), evidence = join(fixture, 'wires.json'), wireDirectory = join(fixture, 'wire-records'), lifecycle = join(fixture, 'lifecycle.json'), agentProjection = join(fixture, 'agent-projection.json')
 const native = process.env.RICE_CLAUDE_EXECUTABLE || 'claude'
+const wireRows = []
+const mergedWireFiles = new Set()
+function mergeWireRecords() {
+  for (const name of readdirSync(wireDirectory).filter(name => name.endsWith('.json')).sort()) {
+    if (mergedWireFiles.has(name)) continue
+    wireRows.push(JSON.parse(readFileSync(join(wireDirectory, name), 'utf8')))
+    mergedWireFiles.add(name)
+  }
+  writeFileSync(evidence, JSON.stringify(wireRows))
+}
 let child
 let succeeded = false
 let activeRun
@@ -19,7 +29,7 @@ const reportDeadline = (phase, startedAt, stdout, stderr) => {
   process.stderr.write(`${JSON.stringify({ deadline: phase, elapsedMs: Math.round(performance.now() - startedAt), loadAverage1m: loadavg()[0], stdoutTail: tail(stdout), stderrTail: tail(stderr) })}\n`)
 }
 try {
-  mkdirSync(plugin); mkdirSync(config)
+  mkdirSync(plugin); mkdirSync(config); mkdirSync(wireDirectory)
   const readFixture = join(fixture, 'owned.txt')
   writeFileSync(readFixture, 'OWNED_CAPPED_READ_RESULT: approval remains pending.')
   for (const directory of ['.claude-plugin', 'hooks', 'types', 'dist', 'scripts', 'README.md']) cpSync(join(root, directory), join(plugin, directory), { recursive: true })
@@ -47,12 +57,11 @@ try {
   on('process.spawn', async function* ($, e, next) {
     if (!e.argv.includes('once')) return yield* next(e)
     const wire=JSON.parse(e.input || '{}')
-    const rows=await $.fs.exists(${JSON.stringify(evidence)})?JSON.parse(await $.fs.read(${JSON.stringify(evidence)})):[]
-    // The engine's own summary prompt asks for the two blocks its answer is read by.
+    // Main and background child sessions can report concurrently, so each owns its wire file.
     const last=JSON.stringify(wire.req.transcript.at(-1))
     const summary=last.includes('<analysis>')&&last.includes('<summary>')
-    rows.push({target:wire.req.target,who:wire.req.who,summary,prompt:JSON.stringify(wire.req.transcript),messages:wire.req.transcript.length,last,system:wire.req.system.slice(0,200),maxTokens:wire.req.native?.maxTokens})
-    await $.fs.write(${JSON.stringify(evidence)},JSON.stringify(rows))
+    const row={target:wire.req.target,who:wire.req.who,summary,prompt:JSON.stringify(wire.req.transcript),messages:wire.req.transcript.length,last,system:wire.req.system.slice(0,200),maxTokens:wire.req.native?.maxTokens}
+    await $.fs.write(${JSON.stringify(wireDirectory)} + '/' + crypto.randomUUID() + '.json',JSON.stringify(row))
     const text=summary?'<analysis>owned analysis</analysis>\\n<summary>\\nOWNED_PRODUCT_SUMMARY: Preserve /repo/task.ts; approval remains pending.\\n</summary>':'OWNED_PRODUCT_ANSWER'
     const transcript=JSON.stringify(wire.req.transcript)
     const launch=wire.req.who==='main'&&!summary&&transcript.includes('OWNED_TRACKED_AGENT')&&!transcript.includes('toolu_owned_projection')
@@ -125,6 +134,7 @@ try {
     activeRun = diagnostics
     const timer = setTimeout(() => { expired = true; terminate(diagnostics) }, 30000)
     const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve) }); clearTimeout(timer)
+    mergeWireRecords()
     if (expired) reportDeadline(label, startedAt, stdout, stderr)
     if (activeRun === diagnostics) activeRun = undefined
     assert.equal(expired, false, label + ' deadline')
