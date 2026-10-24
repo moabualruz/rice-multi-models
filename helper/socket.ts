@@ -26,6 +26,7 @@ export class CodexSocket {
   busy = false
   closed = false
   lastUsed: number
+  private retireOnIdle = false
   private route: ((parsed: Parsed, text: string) => void) | undefined
   private drop: ((error: Error) => void) | undefined
 
@@ -100,6 +101,11 @@ export class CodexSocket {
     else if (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING) this.socket.close(1000)
   }
 
+  retire(): void {
+    if (this.busy) this.retireOnIdle = true
+    else this.close(true)
+  }
+
   /**
    * Sends one `response.create` and yields its events as server-sent-event frames for the decoder, the
    * rate-limit report going to `onLimits` instead. An aborted or abandoned response closes the connection,
@@ -168,6 +174,7 @@ export class CodexSocket {
           }
           self.busy = false
           self.lastUsed = self.now()
+          if (self.retireOnIdle) self.close()
         }
       },
     }
@@ -186,7 +193,7 @@ export class SocketPool {
     const ageExpired = kept !== undefined && this.now() - kept.openedAt >= MAX_SOCKET_AGE_MS
     if (kept?.isUsable && !ageExpired) return { socket: kept, reused: true }
     if (kept && ageExpired) {
-      kept.close(true)
+      kept.retire()
       this.sockets.delete(key)
     }
     const socket = await CodexSocket.open(url, headers, signal, this.now)

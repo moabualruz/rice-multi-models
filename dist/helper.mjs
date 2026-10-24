@@ -6220,6 +6220,7 @@ var CodexSocket = class _CodexSocket {
   busy = false;
   closed = false;
   lastUsed;
+  retireOnIdle = false;
   route;
   drop;
   /** A connection once the handshake is done; headers carry the login, which the backend checks here. */
@@ -6267,6 +6268,10 @@ var CodexSocket = class _CodexSocket {
     this.closed = true;
     if (immediate) this.socket.terminate();
     else if (this.socket.readyState === wrapper_default.OPEN || this.socket.readyState === wrapper_default.CONNECTING) this.socket.close(1e3);
+  }
+  retire() {
+    if (this.busy) this.retireOnIdle = true;
+    else this.close(true);
   }
   /**
    * Sends one `response.create` and yields its events as server-sent-event frames for the decoder, the
@@ -6336,6 +6341,7 @@ var CodexSocket = class _CodexSocket {
           }
           self.busy = false;
           self.lastUsed = self.now();
+          if (self.retireOnIdle) self.close();
         }
       }
     };
@@ -6353,7 +6359,7 @@ var SocketPool = class {
     const ageExpired = kept !== void 0 && this.now() - kept.openedAt >= MAX_SOCKET_AGE_MS;
     if (kept?.isUsable && !ageExpired) return { socket: kept, reused: true };
     if (kept && ageExpired) {
-      kept.close(true);
+      kept.retire();
       this.sockets.delete(key);
     }
     const socket = await CodexSocket.open(url, headers2, signal, this.now);
