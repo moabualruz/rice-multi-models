@@ -14,7 +14,11 @@ Agent tool's `model` argument name any discovered `<provider>/<model>` id exactl
 Release 0.16.0 fixes a false stale-context refusal on successive compactions by comparing
 like-for-like public history snapshots. Genuine context changes still discard the result.
 It also avoids starting the persistent inference helper in native-only sessions with no
-routed providers. Earlier owner/model, capacity, streaming, failure and fork repairs remain.
+routed providers. Release 0.16.1 excludes runtime Agent lookup enrichment from compaction
+history identity and adds bounded, read-only recovery of persisted main-session text and
+completed ordinary native tools when public history is capped. Unsupported or ambiguous
+context still refuses compaction; see the [compaction limits](docs/host-limits.md#compaction-lifecycle-and-collapsed-row).
+Earlier owner/model, capacity, streaming, failure and fork repairs remain.
 The mod registers no MCP tools and needs no launcher, proxy or gateway.
 
 **Routed conversation inference follows its observed owner.** Exact provider/model ids are primary; family aliases are optional compatibility. Native agent dispatch, tool execution and permission ceilings remain authoritative. Compaction stays on the same exact active model with no alternate-provider fallback. Web tools alone have an explicit final native Claude fallback.
