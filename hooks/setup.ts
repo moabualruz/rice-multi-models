@@ -40,10 +40,10 @@ export async function detectRuntime(io: RuntimePort): Promise<Runtime> {
   return { error: `${outdated ? `Node.js ${outdated} is too old.` : 'Node.js is not available to this session.'} Install Node.js 22+ from https://nodejs.org, or set RICE_MULTI_MODELS_NODE to its absolute executable path, then /rice-models setup repair.` }
 }
 
-export async function syncPicker(io: PickerPort, runtime: Runtime, rows: PickerRow[], modelSettings: Record<string, NativeModelSettings> = {}): Promise<PickerResult> {
+export async function syncPicker(io: PickerPort, runtime: Runtime, rows: PickerRow[], modelSettings: Record<string, NativeModelSettings> = {}, env: Record<string, string> = {}): Promise<PickerResult> {
   if (!runtime.executable || !runtime.info || runtime.error) return { ok: false, changed: false, count: 0, path: '', error: runtime.error || 'Node.js 22+ helper is unavailable; /rice-models setup repair.' }
   try {
-    const result = await io.run([runtime.executable, io.helper, 'sync-picker'], { stdin: JSON.stringify({ configDir: runtime.info.configDir, rows, modelSettings }), timeoutMs: 10_000 })
+    const result = await io.run([runtime.executable, io.helper, 'sync-picker'], { stdin: JSON.stringify({ configDir: runtime.info.configDir, rows, modelSettings, env }), timeoutMs: 10_000 })
     const parsed = JSON.parse(result.stdout.trim()) as PickerResult
     if (typeof parsed.ok === 'boolean') return parsed
   } catch { /* Do not fall back to an unsafe direct settings write. */ }

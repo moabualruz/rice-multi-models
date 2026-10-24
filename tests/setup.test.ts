@@ -8,7 +8,7 @@ import { opencodeEntries, opencodeKey } from '../helper/opencode-auth'
 import { absoluteExecutable, commandText, detectRuntime, setupSummary, startupNotice } from '../hooks/setup'
 import { parseConfig } from '../hooks/config'
 import { unknownMetadata, type ModelCatalogue } from '../hooks/catalogue'
-import { loadedWindowsOf, nativeModelEnv, nativeModelSettings } from '../hooks/picker'
+import { nativeModelEnv, nativeModelSettings } from '../hooks/picker'
 
 test('displayed login commands preserve shell metacharacters and use PowerShell invocation on Windows', () => {
   expect(commandText(['C:\\Program Files\\nodejs\\node.exe', "C:\\User's files\\codex.js", 'login'], 'win32')).toBe("& 'C:\\Program Files\\nodejs\\node.exe' 'C:\\User''s files\\codex.js' 'login'")
@@ -61,6 +61,27 @@ test('native model settings fill only their own keys, keep the person\'s values 
   expect(JSON.parse(await readFile(file, 'utf8')).modelSettings).toEqual({ 'local/qwen': { effortLevel: 'low', autoCompactWindow: 200000 }, 'claude-opus-5-5': { maxEffortLevel: 'medium' } })
 }))
 
+test('the env block and per-model settings are written for Claude\'s next launch and keep the person\'s own values', async () => temporary(async configDir => {
+  const file = path.join(configDir, 'settings.json')
+  await writeFile(file, JSON.stringify({ env: { FOO: '1', CLAUDE_CODE_MODEL_CAPABILITIES: 'mine=effort' }, modelSettings: { 'Codex/Fresh': { autoCompactWindow: 128000 }, 'local/route-20261024': { autoCompactWindow: 200000 } } }))
+  const env = { CLAUDE_CODE_MAX_CONTEXT_TOKENS: '500000', CLAUDE_CODE_MODEL_CAPABILITIES: 'codex/fresh=effort' }
+  const modelSettings = { 'codex/fresh': { autoCompactWindow: 500000 }, 'local/route': { autoCompactWindow: 400000 }, 'local/other': { autoCompactWindow: 300000 } }
+  expect(await syncPicker({ configDir, rows, modelSettings, env })).toMatchObject({ ok: true, changed: true })
+  let written = JSON.parse(await readFile(file, 'utf8'))
+  // The person's own value and their entry under another spelling of the same model stay theirs.
+  expect(written.env).toEqual({ FOO: '1', CLAUDE_CODE_MODEL_CAPABILITIES: 'mine=effort', CLAUDE_CODE_MAX_CONTEXT_TOKENS: '500000' })
+  expect(written.modelSettings).toEqual({ 'Codex/Fresh': { autoCompactWindow: 128000 }, 'local/route-20261024': { autoCompactWindow: 200000 }, 'local/other': { autoCompactWindow: 300000 } })
+  // A later sync updates only what the mod wrote, and removes it when the data is gone.
+  await syncPicker({ configDir, rows, modelSettings: { 'local/other': { autoCompactWindow: 250000 } }, env: { CLAUDE_CODE_MAX_CONTEXT_TOKENS: '250000' } })
+  written = JSON.parse(await readFile(file, 'utf8'))
+  expect(written.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe('250000')
+  expect(written.modelSettings['local/other']).toEqual({ autoCompactWindow: 250000 })
+  await syncPicker({ configDir, rows: [] })
+  written = JSON.parse(await readFile(file, 'utf8'))
+  expect(written.env).toEqual({ FOO: '1', CLAUDE_CODE_MODEL_CAPABILITIES: 'mine=effort' })
+  expect(written.modelSettings).toEqual({ 'Codex/Fresh': { autoCompactWindow: 128000 }, 'local/route-20261024': { autoCompactWindow: 200000 } })
+}))
+
 test('provider data never raises a cap the settings file sets itself', async () => temporary(async configDir => {
   const file = path.join(configDir, 'settings.json')
   await writeFile(file, JSON.stringify({ maxEffortLevel: 'medium', autoCompactWindow: 200000 }))
@@ -71,21 +92,6 @@ test('provider data never raises a cap the settings file sets itself', async () 
   expect([written.maxEffortLevel, written.autoCompactWindow]).toEqual(['medium', 200000])
   expect(written.modelSettings).toEqual({ 'local/small': { autoCompactWindow: 128000, maxEffortLevel: 'low' } })
 }))
-
-test('the windows Claude loaded fold its settings sources the way Claude does', () => {
-  const user = { modelSettings: { 'Local/A': { autoCompactWindow: 128000 }, 'local/b': { autoCompactWindow: 500000 }, 'local/c': { effortLevel: 'low' } } }
-  expect(loadedWindowsOf([user, {}, {}, {}, {}])).toEqual({ byModel: { 'local/a': 128000, 'local/b': 500000 } })
-  // A higher source's own top-level window replaces every per-model window below it.
-  expect(loadedWindowsOf([user, { autoCompactWindow: 'auto' }, { modelSettings: { 'local/b': { autoCompactWindow: 400000 } } }])).toEqual({ byModel: { 'local/b': 400000 }, default: 'auto' })
-  const model = (id: string, contextWindow: number) => ({ model: id, label: id, execution: 'native provider', source: 'fixture', observedAt: 1, metadata: { ...unknownMetadata(), contextWindow } })
-  const catalogue = { models: [model('local/a', 128000), model('local/b', 500000)], providers: [] } as ModelCatalogue
-  const largest = (sources: unknown[]) => nativeModelEnv(catalogue, {}, loadedWindowsOf(sources)).CLAUDE_CODE_MAX_CONTEXT_TOKENS
-  expect(largest([user])).toBe('500000')
-  expect(largest([user, { autoCompactWindow: 'auto' }])).toBe('128000')
-  // A loaded default covers each model it does not exceed.
-  expect(largest([{ autoCompactWindow: 300000 }])).toBe('128000')
-  expect(largest([{ autoCompactWindow: 100000 }])).toBe('500000')
-})
 
 test('catalogue data maps to Claude\'s native per-model fields and leaves unknown data to Claude', () => {
   const metadata = (contextWindow: number | null, reasoningEfforts: string[] | null) => ({ ...unknownMetadata(), contextWindow, reasoningEfforts })
@@ -110,14 +116,10 @@ test('catalogue data maps to Claude\'s native per-model fields and leaves unknow
   // An alias that only contains "claude-" names no Claude model, so it is an id of its own too.
   const aliases = { preferred: 'local/qwen', quiet: 'local/unknown', steady: 'opencode/claude-sonnet-4-6', 'my-claude-route': 'codex/gpt-6.1-sol' }
   expect(nativeModelSettings(catalogue, aliases)).toEqual({ 'codex/gpt-6.1-sol': { autoCompactWindow: 500000 }, 'local/qwen': { maxEffortLevel: 'high' }, preferred: { maxEffortLevel: 'high' }, steady: { autoCompactWindow: 900000, maxEffortLevel: 'high' }, 'my-claude-route': { autoCompactWindow: 500000 } })
-  // Before Claude has loaded their windows, the models that need one bound the largest window.
   expect(nativeModelEnv(catalogue, aliases)).toEqual({
-    CLAUDE_CODE_MAX_CONTEXT_TOKENS: '500000',
+    CLAUDE_CODE_MAX_CONTEXT_TOKENS: '900000',
     CLAUDE_CODE_MODEL_CAPABILITIES: 'codex/gpt-6.1-sol=effort,xhigh_effort,-max_effort;local/qwen=effort,-xhigh_effort,-max_effort;local/plain=-effort;opencode/claude-sonnet-4-6=effort,-xhigh_effort,-max_effort;preferred=effort,-xhigh_effort,-max_effort;steady=effort,-xhigh_effort,-max_effort;my-claude-route=effort,xhigh_effort,-max_effort',
   })
-  // Once Claude launched with each one's window, the largest is free; a loaded window above a model's own does not count.
-  expect(nativeModelEnv(catalogue, aliases, { byModel: { 'codex/gpt-6.1-sol': 500000, steady: 900000, 'my-claude-route': 500000 } }).CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe('900000')
-  expect(nativeModelEnv(catalogue, aliases, { byModel: { 'codex/gpt-6.1-sol': 600000, steady: 900000, 'my-claude-route': 500000 } }).CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe('500000')
 })
 
 test('picker sync never adds an empty picker block to settings that had none', async () => temporary(async configDir => {

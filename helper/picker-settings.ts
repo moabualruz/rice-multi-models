@@ -2,12 +2,14 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 
-export type PickerSyncInput = { configDir: string; rows: { model: string; label: string; description?: string }[]; modelSettings?: Record<string, Record<string, unknown>> }
+export type PickerSyncInput = { configDir: string; rows: { model: string; label: string; description?: string }[]; modelSettings?: Record<string, Record<string, unknown>>; env?: Record<string, string> }
 export type PickerSyncResult = { ok: boolean; changed: boolean; count: number; path: string; preserved?: number; error?: string }
 type Json = Record<string, unknown>
-type Ownership = { version: 1; rows: Json[]; edited: string[]; modelSettings?: Record<string, Json> }
+type Ownership = { version: 1; rows: Json[]; edited: string[]; modelSettings?: Record<string, Json>; env?: Record<string, string> }
 /** The keys of Claude's native `modelSettings.<id>` this mod fills from provider data. */
 const NATIVE_SETTING_KEYS = ['autoCompactWindow', 'maxEffortLevel'] as const
+/** Claude's environment keys for non-Claude models this mod fills from provider data. */
+const NATIVE_ENV_KEYS = ['CLAUDE_CODE_MAX_CONTEXT_TOKENS', 'CLAUDE_CODE_MODEL_CAPABILITIES'] as const
 const object = (v: unknown): v is Json => typeof v === 'object' && v !== null && !Array.isArray(v)
 const canonical = (v: unknown): string => JSON.stringify(v, (_key, value) => object(value) ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])) : value)
 
@@ -116,6 +118,11 @@ export async function syncPicker(input: PickerSyncInput): Promise<PickerSyncResu
       if (key === 'maxEffortLevel') return levels.includes(own as string) && levels.indexOf(own as string) <= levels.indexOf(value as string) ? undefined : value
       return typeof own === 'number' && typeof value === 'number' && own <= value ? undefined : value
     }
+    // Claude keys a model's settings case-insensitively and without a trailing date, so the person's own
+    // entry under another spelling of the same model is theirs and the mod adds none beside it.
+    const sameModel = (id: string) => id.toLowerCase().replace(/-\d{8}$/, '')
+    const theirs = (id: string, key: string) => Object.entries(modelSettings).some(([other, entry]) =>
+      other !== id && sameModel(other) === sameModel(id) && object(entry) && entry[key] !== undefined && !(object(ownedSettings[other]) && ownedSettings[other][key] === entry[key]))
     for (const id of new Set([...Object.keys(ownedSettings), ...Object.keys(wanted)])) {
       const existing = modelSettings[id] === undefined ? {} : object(modelSettings[id]) ? { ...(modelSettings[id] as Json) } : undefined
       if (existing === undefined) continue
@@ -124,7 +131,7 @@ export async function syncPicker(input: PickerSyncInput): Promise<PickerSyncResu
       const mine: Json = {}
       for (const key of NATIVE_SETTING_KEYS) {
         if (existing[key] !== ours[key]) continue
-        const value = belowOwn(key, want[key])
+        const value = theirs(id, key) ? undefined : belowOwn(key, want[key])
         if (value === undefined) delete existing[key]
         else { existing[key] = value; mine[key] = value }
       }
@@ -132,8 +139,21 @@ export async function syncPicker(input: PickerSyncInput): Promise<PickerSyncResu
       else delete modelSettings[id]
       if (Object.keys(mine).length) nextOwnedSettings[id] = mine
     }
-    const settingsChanged = canonical(modelSettings) !== canonical(settings.modelSettings ?? {})
-    const ownedOf = (rows: Json[]): Ownership => ({ version: 1, rows, edited: [...edited].sort(), ...(Object.keys(nextOwnedSettings).length ? { modelSettings: nextOwnedSettings } : {}) })
+    // Claude's environment for non-Claude models, loaded at launch from the same file: a key is filled only
+    // while it holds what this mod last wrote, so the person's own value always stays.
+    if (settings.env !== undefined && !object(settings.env)) throw new Error('settings.json env is malformed; nothing was overwritten')
+    const wantedEnv = object(input.env) ? input.env : {}
+    const ownedEnv = object(ownership.env) ? ownership.env : {}
+    const env: Json = { ...((settings.env ?? {}) as Json) }
+    const nextOwnedEnv: Record<string, string> = {}
+    for (const key of NATIVE_ENV_KEYS) {
+      if (env[key] !== ownedEnv[key]) continue
+      const value = wantedEnv[key]
+      if (typeof value === 'string') { env[key] = value; nextOwnedEnv[key] = value }
+      else delete env[key]
+    }
+    const settingsChanged = canonical(modelSettings) !== canonical(settings.modelSettings ?? {}) || canonical(env) !== canonical(settings.env ?? {})
+    const ownedOf = (rows: Json[]): Ownership => ({ version: 1, rows, edited: [...edited].sort(), ...(Object.keys(nextOwnedSettings).length ? { modelSettings: nextOwnedSettings } : {}), ...(Object.keys(nextOwnedEnv).length ? { env: nextOwnedEnv } : {}) })
     // Never create a picker block just to hold nothing.
     if (settings.modelPicker === undefined && retained.length === 0 && added.length === 0 && !settingsChanged) {
       if (canonical(ownership) !== canonical(ownedOf([]))) await atomicWrite(record, ownedOf([]))
@@ -143,6 +163,7 @@ export async function syncPicker(input: PickerSyncInput): Promise<PickerSyncResu
       ...settings,
       ...(settings.modelPicker !== undefined || retained.length || added.length ? { modelPicker: { ...picker, options: [...retained, ...added] } } : {}),
       ...(settings.modelSettings !== undefined || Object.keys(modelSettings).length ? { modelSettings } : {}),
+      ...(settings.env !== undefined || Object.keys(env).length ? { env } : {}),
     }
     const nextOwned = ownedOf(added)
     const changed = canonical(settings) !== canonical(next)

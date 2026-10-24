@@ -86,19 +86,19 @@ test('native startup refreshes catalogue and exposes factual metadata without a 
   const report = await $.command.run({ command: 'rice-models', args: 'models' })
   expect(String(report.text)).toContain('872000')
   expect(discoveries).toBe(1)
-  expect(environment.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('500000')
+  expect(environment.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBeUndefined()
   await $.session.start({ cwd: '/fixture', surface: 'terminal', isInteractive: true })
-  expect(contextWrites).toEqual(['500000'])
+  expect(contextWrites).toEqual([])
   const switchRequest = { from_model: 'sonnet', to_model: 'codex/fresh-native', requested_model: 'codex/fresh-native', source: 'sdk', context_tokens: 500001, prompt_cache_warm: false, cache_ttl: '1h', estimated_cache_write_usd: 0, pricing: 'default' } as const
   // Model switches are the host's decision; the mod adds no budget denial.
   const passed = await $.classic.PreModelSwitch(switchRequest)
   expect(passed.permissionDecision).toBe('allow')
-  expect(contextWrites).toEqual(['500000'])
+  expect(contextWrites).toEqual([])
   selectedModel = 'sonnet'
   await $.classic.PostModelSwitch({ from_model: 'codex/fresh-native', to_model: 'sonnet', requested_model: 'sonnet', source: 'sdk', context_tokens: 0, prompt_cache_warm: false, cache_ttl: '1h', estimated_cache_write_usd: 0, pricing: 'default' })
-  // The largest provider window stays: a model switch changes no model data.
-  expect(environment.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('500000')
-  expect(contextWrites).toEqual(['500000'])
+  // Model data goes to the settings Claude loads at launch; the running session is never changed.
+  expect(environment.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBeUndefined()
+  expect(contextWrites).toEqual([])
   const native = await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'native fixture history', toolUses: [] }] })
   expect(native.messages).toEqual([{ role: 'user', text: 'native fixture summary', toolUses: [] }])
   expect(nativeCompactions).toBe(1)

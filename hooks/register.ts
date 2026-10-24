@@ -3,7 +3,7 @@
 // transcript, system prompt and tools, the shipped Node helper (dist/helper.mjs) calls
 // the provider, and its stream comes back as the engine's own chunks. Claude models pass through untouched.
 import { atom, read, update } from 'claude-code'
-import type { AgentDisplay, AgentModelOwner, CompactionReceipt, LoadedWindows } from '../types'
+import type { AgentDisplay, AgentModelOwner, CompactionReceipt } from '../types'
 import type { EngineInterface, ModelCompleteResult, ModelUsage, Origin, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
 import { AGENT_TOOL, CARRIER_VALUE, agentLabel, classifyCall, emptyCarrier, entryOf, exactModelIds, forgetEntry, markDescription, pickRequested, recordEntry, unmarkDescription, withDescriptionSuffix } from './agent-model'
@@ -32,7 +32,7 @@ import type { NativeCapture } from './native-tools'
 import { createMemory } from './memory'
 import { CATALOG_URL, kindCounts, liveIds, opencodeProvider, TIERS } from './opencode'
 import type { Tier } from './opencode'
-import { catalogueRows, loadedWindowsOf, nativeModelEnv, nativeModelSettings } from './picker'
+import { catalogueRows, nativeModelEnv, nativeModelSettings } from './picker'
 import { NATIVE_MODEL_LIMITATIONS, unknownMetadata } from './catalogue'
 import type { ModelCatalogue } from './catalogue'
 import { runtimeConfig } from './catalogue-runtime'
@@ -240,79 +240,6 @@ async function discoverCapacity(port: EvaluatorCapacityPort): Promise<void> {
   loaded = runtimeConfig(declared, catalogue)
 }
 
-const NATIVE_ENV_NAMES = ['CLAUDE_CODE_MAX_CONTEXT_TOKENS', 'CLAUDE_CODE_MODEL_CAPABILITIES'] as const
-type NativeEnvName = typeof NATIVE_ENV_NAMES[number]
-let nativeEnvSync = Promise.resolve()
-/**
- * The per-model compaction windows Claude loaded when this process launched (see readLoadedWindows): the
- * settings the mod writes apply from Claude's next launch, so the environment is sized against these.
- */
-let loadedWindows: LoadedWindows = { byModel: {} }
-
-/**
- * Claude's per-model windows as it loaded them, read once per process at the first `session.start` (before
- * the mod writes any) from each settings source as Claude folds them, and kept in reload-surviving state.
- */
-async function readLoadedWindows($: EngineInterface): Promise<LoadedWindows> {
-  const ref = { plugin: 'rice-multi-models', key: 'loadedWindows' } as const
-  const held = (await $.state.get(ref)).value
-  if (held) return held
-  let windows: LoadedWindows = { byModel: {} }
-  try {
-    const sources: unknown[] = []
-    for (const source of ['user', 'project', 'local', 'flag', 'policy'] as const) sources.push(await $.settings.read({ source }))
-    windows = loadedWindowsOf(sources)
-  } catch { /* Unread settings load nothing: every model then bounds the largest window. */ }
-  await $.state.set(ref, windows)
-  return windows
-}
-
-/**
- * The model data Claude reads from its own environment for non-Claude ids (see nativeModelEnv). An owner's
- * own value stays authoritative: the mod sets a variable only while it holds what the mod last set, and
- * `restore` puts back the original value it found.
- */
-async function syncNativeEnv($: EngineInterface, restore = false): Promise<void> {
-  const desired: Record<string, string> = restore || !runtime.executable || runtime.error ? {} : nativeModelEnv(catalogue, aliasTargets(), loadedWindows)
-  const sync = nativeEnvSync.then(async () => {
-    const ref = { plugin: 'rice-multi-models', key: 'nativeEnv' } as const
-    const stored = (await $.state.get(ref)).value ?? {}
-    const held = { ...stored }
-    // Claude lists the variables a module touches, so each is named literally.
-    const readEnv = (name: NativeEnvName) => name === 'CLAUDE_CODE_MAX_CONTEXT_TOKENS' ? $.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS') : $.env.get('CLAUDE_CODE_MODEL_CAPABILITIES')
-    const writeEnv = async (name: NativeEnvName, value: string | undefined) => {
-      const result = name === 'CLAUDE_CODE_MAX_CONTEXT_TOKENS' ? await $.env.set('CLAUDE_CODE_MAX_CONTEXT_TOKENS', value) : await $.env.set('CLAUDE_CODE_MODEL_CAPABILITIES', value)
-      // The engine can hold a write and say why instead of throwing: that write did not happen.
-      if (result?.deny !== undefined) throw new Error(`${name} was not set: ${result.deny}`)
-    }
-    // The value found is recorded before any change, so a value the mod sets always has its owner record.
-    for (const name of NATIVE_ENV_NAMES) held[name] ??= { original: await readEnv(name) ?? null, applied: null, relinquished: false }
-    if (NATIVE_ENV_NAMES.some(name => stored[name] === undefined)) await $.state.set(ref, { ...held })
-    const written: { name: NativeEnvName; previous: string | null; value: string | null }[] = []
-    try {
-      for (const name of NATIVE_ENV_NAMES) {
-        const current = await readEnv(name) ?? null
-        const entry = held[name]!
-        if (entry.relinquished || entry.original !== null) continue
-        if (current !== (entry.applied ?? entry.original)) { held[name] = { ...entry, applied: null, relinquished: true }; continue }
-        const want = desired[name] ?? entry.original
-        if (want !== current) {
-          await writeEnv(name, want ?? undefined)
-          written.push({ name, previous: current, value: want })
-        }
-        held[name] = { ...entry, applied: want }
-      }
-      await $.state.set(ref, held)
-    } catch (error) {
-      // A sync that cannot finish puts back what it changed, so the recorded state stays true.
-      for (const { name, previous, value } of written.reverse()) if ((await readEnv(name) ?? null) === value) await writeEnv(name, previous ?? undefined).catch(() => {})
-      throw error
-    }
-  })
-  nativeEnvSync = sync.catch(() => { $.ui.log(`${PLUGIN}: native model environment unavailable`, { to: 'debug' }) })
-  await nativeEnvSync
-}
-
 /** A new catalogue; its native data reaches Claude through the picker sync that follows (see syncPicker). */
 async function refreshCatalogue($: EngineInterface): Promise<void> {
   await discoverCapacity({ now: await $.clock.now(), helper: helperFile($.plugin.root), approved: [...await approvedSet($)], run: (argv, options) => $.process.run(argv, options) })
@@ -327,9 +254,8 @@ async function refreshCapacity(port: EvaluatorCapacityPort): Promise<void> {
 async function ensureFreshCapacity($: EngineInterface): Promise<void> {
   const before = catalogue
   await refreshCapacity({ now: await $.clock.now(), helper: helperFile($.plugin.root), approved: [...await approvedSet($)], run: (argv, options) => $.process.run(argv, options) })
-  // A refresh that ran discovery writes its per-model settings for Claude's next launch, then the environment.
+  // A refresh that ran discovery writes its model data for Claude's next launch.
   if (catalogue !== before) await syncPicker($, runtime, routedRows())
-  await syncNativeEnv($)
 }
 
 /** Each configured alias and the `provider/model` it names, so the alias id carries its target's native data. */
@@ -347,11 +273,9 @@ async function detectRuntime($: EngineInterface): Promise<Runtime> {
   })
 }
 
-/** The picker rows and per-model settings (for Claude's next launch), then the environment. */
+/** Picker rows, per-model settings and the env block, all in ~/.claude/settings.json, which Claude loads at launch. */
 async function syncPicker($: EngineInterface, current: Runtime, rows: PickerRow[]): Promise<PickerResult> {
-  const result = await synchronizePicker({ helper: helperFile($.plugin.root), run: (argv, options) => $.process.run(argv, options) }, current, rows, nativeModelSettings(catalogue, aliasTargets()))
-  await syncNativeEnv($)
-  return result
+  return synchronizePicker({ helper: helperFile($.plugin.root), run: (argv, options) => $.process.run(argv, options) }, current, rows, nativeModelSettings(catalogue, aliasTargets()), nativeModelEnv(catalogue, aliasTargets()))
 }
 
 async function startupNotice($: EngineInterface, interactive: boolean, current: Runtime, picker: PickerResult | undefined, rows: PickerRow[], defaultModel: string | undefined, catalogueSummary?: string, capabilities?: string): Promise<void> {
@@ -1121,7 +1045,6 @@ async function nativeContextStatus($: EngineInterface) {
   const metadata = activeContext(model)
   const usage = await $.session.usage({ breakdown: 'summary' })
   const current = await $.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS') ?? null
-  const held = (await $.state.get({ plugin: 'rice-multi-models', key: 'nativeEnv' })).value?.CLAUDE_CODE_MAX_CONTEXT_TOKENS
   return {
     model,
     activeContextWindow: metadata?.contextWindow ?? null,
@@ -1132,8 +1055,8 @@ async function nativeContextStatus($: EngineInterface) {
     reasoningEfforts: metadata?.reasoningEfforts ?? null,
     capabilities: { inputModalities: metadata?.inputModalities ?? null, tools: metadata?.tools ?? null, parallelToolCalls: metadata?.parallelToolCalls ?? null },
     nativeWindow: usage.context.window,
-    override: held?.applied !== null && held?.applied !== undefined && held.applied === current ? 'plugin-owned, largest provider window' : current !== null ? 'owner/external' : 'unset',
-    scope: 'the mod fills Claude\'s native model fields; window resolution, accounting and automatic compaction are Claude\'s own',
+    override: current ?? 'unset',
+    scope: 'the mod writes Claude\'s native model fields to ~/.claude/settings.json, loaded at launch; window resolution, accounting and automatic compaction are Claude\'s own',
     limitations: NATIVE_MODEL_LIMITATIONS,
   }
 }
@@ -1280,7 +1203,6 @@ async function setupCommand($: EngineInterface, action: string | undefined): Pro
   if (action && !['repair', 'codex'].includes(action)) return 'Usage: /rice-models setup [repair|codex]. No global install is performed.'
   runtime = await detectRuntime($)
   if (runtime.error) {
-    await syncNativeEnv($, true)
     return setupSummary(runtime, undefined, 0, undefined, undefined, await capabilitySummary($))
   }
   if (action === 'codex') {
@@ -1537,7 +1459,6 @@ export const register: Register = on => {
     await loadProviders($)
     agentModels.clear(); spawnDecisions.clear(); spawnBackground.clear()
     for (const owner of (await read($, ownersAtom)).entries) cacheOwner(owner)
-    loadedWindows = await readLoadedWindows($)
     await refreshCatalogue($)
     // A nested claude process can migrate settings; run it before any judgment
     // is pending so its settings change cannot invalidate one.
@@ -1555,7 +1476,6 @@ export const register: Register = on => {
     if (needsRouting) await ensureHelper($)
     const rows = routedRows()
     const picker = runtime.error ? undefined : await syncPicker($, runtime, rows)
-    if (!picker) await syncNativeEnv($)
     await startupNotice($, e.isInteractive, runtime, picker, rows, defaultModel('codex'), undefined, await capabilitySummary($))
 
     return started
@@ -1587,7 +1507,6 @@ export const register: Register = on => {
       }
     }
     if (e.reason === 'clear') for (const row of (await read($, receiptsAtom)).entries) if (['preparing', 'prepared'].includes(row.status)) await saveReceipt($, { ...row, status: 'aborted', reason: 'clear' }, row)
-    await syncNativeEnv($, true)
     return next(e)
   })
 

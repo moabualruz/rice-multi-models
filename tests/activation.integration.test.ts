@@ -1021,45 +1021,46 @@ const switchContext = (f: ReturnType<typeof fixture>, model: string) => {
   return callbacks.get('classic.PostModelSwitch')!(f.host, { from_model, to_model: model, source: 'sdk' }, async () => ({ switched: true }))
 }
 
-test('complete model metadata fills Claude\'s native model fields', async () => {
+test('complete model metadata fills Claude\'s native model fields in the settings it loads at launch', async () => {
   const f = contextFixture()
   f.discovery.catalogue.models[0]!.metadata = { ...f.discovery.catalogue.models[0]!.metadata, outputTokenLimit: 4096, autoCompactTokenLimit: 450000, reasoningEfforts: ['low', 'high'], inputModalities: ['text', 'image'], tools: true, parallelToolCalls: true }
   expect(await startContext(f)).toEqual({ started: true })
-  expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('500000')
-  expect(f.env.get('CLAUDE_CODE_MODEL_CAPABILITIES')).toBe('codex/fresh=effort,-xhigh_effort,-max_effort')
+  // Nothing changes in the running session: the data is written for Claude's next launch.
+  expect(f.env.has('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(false)
+  expect(f.env.has('CLAUDE_CODE_MODEL_CAPABILITIES')).toBe(false)
+  expect(f.contextWrites).toEqual([])
+  const sync = f.syncs.at(-1)
+  expect(sync.modelSettings).toEqual({ 'codex/fresh': { autoCompactWindow: 500000, maxEffortLevel: 'high' } })
+  expect(sync.env).toEqual({ CLAUDE_CODE_MAX_CONTEXT_TOKENS: '500000', CLAUDE_CODE_MODEL_CAPABILITIES: 'codex/fresh=effort,-xhigh_effort,-max_effort' })
   const report = await callbacks.get('command.run')!(f.host, { args: 'status' })
   expect(report.text).toContain('active context 500000')
   expect(report.text).toContain('maximum context 872000')
   expect(report.text).toContain('reported input 470000')
   expect(report.text).toContain('reported output 4096')
-  expect(report.text).toContain('native window 500000')
-  expect(report.text).toContain('override plugin-owned, largest provider window')
-  expect(report.text).toContain('fills Claude\'s native model fields')
-  const sync = f.syncs.at(-1)
-  expect(sync.modelSettings).toEqual({ 'codex/fresh': { autoCompactWindow: 500000, maxEffortLevel: 'high' } })
+  expect(report.text).toContain('loaded at launch')
   const row = sync.rows[0]
   expect(row.model).toBe('codex/fresh')
   for (const data of ['450000', 'low|high', 'text|image', 'tools true', 'parallel true']) expect(row.description).toContain(data)
   expect(row.behavesAs).toBeUndefined()
 })
 
-test('refresh, switches, repeated startup and session end keep an owner value and restore only what the mod set', async () => {
+test('refresh, switches, repeated startup and session end change nothing in the running session', async () => {
   for (const override of [undefined, '123456']) {
     const f = contextFixture()
     if (override) f.env.set('CLAUDE_CODE_MAX_CONTEXT_TOKENS', override)
     await startContext(f)
     await startContext(f)
-    expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(override ?? '500000')
     f.discovery.catalogue.models[0]!.metadata.contextWindow = 32768
     await callbacks.get('command.run')!(f.host, { args: 'refresh' })
-    expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(override ?? '32768')
+    // A refresh writes the new data for the next launch.
+    expect(f.syncs.at(-1).env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe('32768')
     expect(await switchContext(f, 'sonnet')).toEqual({ switched: true })
     await switchContext(f, 'codex/fresh')
     f.env.set('DISABLE_COMPACT', '1')
     await switchContext(f, 'codex/fresh')
     expect(await callbacks.get('session.end')!(f.host, {}, async () => ({ ended: true }))).toEqual({ ended: true })
     expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(override)
-    expect(f.contextWrites.map((write: any) => write.value)).toEqual(override ? [] : ['500000', '32768', undefined])
+    expect(f.contextWrites).toEqual([])
     expect(f.env.get('DISABLE_COMPACT')).toBe('1')
   }
 })
@@ -1074,21 +1075,22 @@ test('an alias resolves to its exact model for status and carries its target\'s 
   await startContext(f)
   const report = await callbacks.get('command.run')!(f.host, { args: 'status' })
   expect(report.text).toContain('Primary context (preferred): active context 500000')
-  expect(f.contextWrites.map((write: any) => write.value)).toEqual(['500000'])
+  expect(f.contextWrites).toEqual([])
   // Claude sees the alias as its own model id, so it gets the target's window and efforts too.
   const fields = { autoCompactWindow: 500000, maxEffortLevel: 'high' }
-  expect(f.syncs.at(-1).modelSettings).toEqual({ 'fixture/fresh': fields, preferred: fields })
-  expect(f.env.get('CLAUDE_CODE_MODEL_CAPABILITIES')).toBe('fixture/fresh=effort,-xhigh_effort,-max_effort;preferred=effort,-xhigh_effort,-max_effort')
+  const sync = f.syncs.at(-1)
+  expect(sync.modelSettings).toEqual({ 'fixture/fresh': fields, preferred: fields })
+  expect(sync.env).toEqual({ CLAUDE_CODE_MAX_CONTEXT_TOKENS: '500000', CLAUDE_CODE_MODEL_CAPABILITIES: 'fixture/fresh=effort,-xhigh_effort,-max_effort;preferred=effort,-xhigh_effort,-max_effort' })
 })
 
-test('an automatic catalogue refresh gives Claude the new per-model settings with the new environment', async () => {
+test('an automatic catalogue refresh writes the new model data for the next launch', async () => {
   const f = contextFixture()
   let now = 1_800_000_000_000
   f.host.clock.now = async () => now
   f.discovery.unavailable = true
   await startContext(f)
-  expect(f.env.has('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(false)
   expect(f.syncs.at(-1).modelSettings).toEqual({})
+  expect(f.syncs.at(-1).env).toEqual({})
   now += 6 * 60_000
   f.discovery.unavailable = false
   f.discovery.catalogue.models[0]!.observedAt = now
@@ -1099,54 +1101,9 @@ test('an automatic catalogue refresh gives Claude the new per-model settings wit
   const native = async () => { throw new Error('no native fallback') }
   expect((await callbacks.get('model.complete')!(f.host, { model: 'codex/fresh', prompt: 'after the refresh' }, native)).value.isAnswered).toBe(true)
   expect(f.discoveries).toHaveLength(2)
-  expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('500000')
   expect(f.syncs.at(-1).modelSettings).toEqual({ 'codex/fresh': { autoCompactWindow: 500000 } })
-})
-
-test('the environment\'s largest window waits for the per-model windows Claude loaded at launch', async () => {
-  for (const launch of ['none', 'loaded', 'reset'] as const) {
-    const f = contextFixture()
-    const fresh = f.discovery.catalogue.models[0]!
-    f.discovery.catalogue.models.push({ ...fresh, model: 'codex/small', label: 'Small model', metadata: { ...fresh.metadata, contextWindow: 128000 } })
-    // What Claude read from each settings source when it launched: nothing yet, the windows an earlier
-    // launch's sync wrote, or those windows under a project file whose own window replaces them.
-    const user = launch === 'none' ? {} : { modelSettings: { 'codex/fresh': { autoCompactWindow: 500000 }, 'Codex/Small': { autoCompactWindow: 128000 } } }
-    const project = launch === 'reset' ? { autoCompactWindow: 'auto' } : {}
-    f.host.settings = { read: async (args: any) => args?.source === 'user' ? user : args?.source === 'project' ? project : args?.key === undefined ? {} : undefined }
-    await startContext(f)
-    expect(f.syncs.at(-1).modelSettings).toEqual({ 'codex/fresh': { autoCompactWindow: 500000 }, 'codex/small': { autoCompactWindow: 128000 } })
-    // Settings written now apply from Claude's next launch, so a model without its loaded window bounds the largest.
-    expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(launch === 'loaded' ? '500000' : '128000')
-  }
-})
-
-test('a native environment sync that cannot finish puts back what it changed and keeps the original for session end', async () => {
-  for (const failure of ['persist', 'write', 'held'] as const) {
-    const f = contextFixture()
-    f.discovery.catalogue.models[0]!.metadata.reasoningEfforts = ['low', 'high']
-    if (failure === 'persist') {
-      const set = f.host.state.set
-      f.host.state.set = async (ref: { key: string }, value: any) => {
-        if (ref.key === 'nativeEnv' && value.CLAUDE_CODE_MAX_CONTEXT_TOKENS?.applied) throw new Error('fixture ownership persistence failure')
-        return set(ref, value)
-      }
-    } else {
-      const set = f.host.env.set
-      f.host.env.set = async (key: string, value: string | undefined) => {
-        if (key !== 'CLAUDE_CODE_MODEL_CAPABILITIES') return set(key, value)
-        // The engine can also resolve a write it holds, without making it.
-        if (failure === 'held') return { deny: 'fixture organization settings hold this variable' }
-        throw new Error('fixture environment write denied')
-      }
-    }
-    expect(await startContext(f)).toEqual({ started: true })
-    expect(f.env.has('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(false)
-    expect(f.env.has('CLAUDE_CODE_MODEL_CAPABILITIES')).toBe(false)
-    expect(f.state.get('nativeEnv')).toMatchObject({ CLAUDE_CODE_MAX_CONTEXT_TOKENS: { original: null, applied: null, relinquished: false } })
-    await callbacks.get('session.end')!(f.host, {}, async () => ({}))
-    expect(f.env.has('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(false)
-    expect(f.env.has('CLAUDE_CODE_MODEL_CAPABILITIES')).toBe(false)
-  }
+  expect(f.syncs.at(-1).env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe('500000')
+  expect(f.contextWrites).toEqual([])
 })
 
 test('unknown bounds, unavailable discovery and runtime failure never mutate native context', async () => {
