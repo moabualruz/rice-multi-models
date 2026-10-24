@@ -32,6 +32,9 @@ each agent at its own model's size. A model reporting under 100000, which Claude
 as a per-model window, compacts against the largest window instead. A model first discovered during
 a session gets its data from the next launch; the running session is not changed. Every subagent row shows its model and
 effort, and a failed subagent's error stays in its own answer.
+Release 0.17.2 labels every subagent row with the model Claude runs it on, inherited ones
+included, in Claude's own order: the Agent call's model, the agent definition's,
+`CLAUDE_CODE_SUBAGENT_MODEL`, then the parent's.
 Earlier owner/model, capacity, streaming, failure and fork repairs remain.
 The mod registers no MCP tools and needs no launcher, proxy or gateway.
 

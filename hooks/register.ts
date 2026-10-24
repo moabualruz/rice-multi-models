@@ -80,7 +80,7 @@ import { createEvaluatorSources, registerEvaluatorSources } from './evaluator-so
 
 const PLUGIN = 'rice-multi-models'
 /** Who the requests to declared providers say they come from (OpenCode Go asks each client to name itself). */
-const USER_AGENT = 'rice-multi-models/0.17.1 (claude-code)'
+const USER_AGENT = 'rice-multi-models/0.17.2 (claude-code)'
 const PROVIDERS: Readonly<Record<string, string>> = { codex: 'OpenAI Codex (ChatGPT subscription)' }
 const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 const prefsAtom = atom({ plugin: 'rice-multi-models', key: 'prefs' } as const, { effort: null, transport: 'auto', helper: 'session' })
@@ -1715,10 +1715,10 @@ export const register: Register = on => {
     if (picked.exact !== undefined && decision.model !== picked.exact) return { deny: `${PLUGIN}: Agent model ${picked.exact} cannot be run by this session (${decision.reason}); no subagent was started` }
     const pending = (await read($, agentDisplayAtom)).entries.find(entry => entry.toolUseId === e.tool_use_id)
     const parentEffort = e.parentAgentId === undefined ? mainEffort : (await read($, ownersAtom)).entries.find(owner => owner.id === e.parentAgentId)?.effort
-    // Only a model known before Claude resolves the spawn labels its stored description: Claude may still
-    // resolve an inherited one otherwise (CLAUDE_CODE_SUBAGENT_MODEL), so that row is labelled by the
-    // ToolUse overlay from the model the spawn reports.
-    const resolved = decision.model ?? e.model
+    // Every subagent row is labelled with the model Claude will run it on, in Claude's own order: the Agent
+    // call's model, the agent definition's, CLAUDE_CODE_SUBAGENT_MODEL, then the parent's (a fork's always).
+    const declared = definition?.model !== undefined && definition.model !== 'inherit' ? definition.model : undefined
+    const resolved = e.fork ? parentModel : decision.model ?? e.model ?? declared ?? await $.env.get('CLAUDE_CODE_SUBAGENT_MODEL') ?? parentModel
     const effort = e.fork ? parentEffort : resolved && isRouted(resolved) ? (routedEffort(resolved, pending?.effort ?? definition?.effort, (await read($, prefsAtom)).effort) ?? parentEffort) : pending?.effort ?? definition?.effort ?? parentEffort
     const restored = { ...e, description: resolved === undefined ? description.text : agentLabel(description.text, resolved, effort) }
     const result = await next(decision.model !== undefined && decision.model !== e.model ? { ...restored, model: decision.model } : restored)
