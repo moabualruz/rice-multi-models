@@ -4,7 +4,7 @@ import { cpSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writ
 import { loadavg, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { spawn, spawnSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { waitForNativeProofCapacity } from './native-proof-load.mjs'
 
@@ -103,10 +103,27 @@ try {
   const env = Object.fromEntries(['PATH', 'PATHEXT', 'SystemRoot', 'SystemDrive', 'WINDIR', 'ComSpec', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'ProgramFiles', 'ProgramFiles(x86)', 'CLAUDE_CODE_GIT_BASH_PATH'].filter(name => process.env[name] !== undefined).map(name => [name, process.env[name]]))
   Object.assign(env, { HOME: fixture, USERPROFILE: fixture, CLAUDE_CONFIG_DIR: config, CODEX_HOME: join(fixture, '.codex'), ANTHROPIC_API_KEY: 'owned-no-network', ANTHROPIC_BASE_URL: 'http://127.0.0.1:1', DISABLE_AUTOUPDATER: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' })
   const validationStarted = performance.now()
-  const checked = spawnSync(native, ['plugin', 'validate', '--strict', plugin], { cwd: fixture, env, encoding: 'utf8', timeout: 10000 })
-  if (checked.error?.code === 'ETIMEDOUT') reportDeadline('plugin validate', validationStarted, checked.stdout, checked.stderr)
-  if (checked.status !== 0) process.stderr.write(checked.stdout + checked.stderr)
-  assert.equal(checked.status, 0, (checked.stdout + checked.stderr).slice(-2000))
+  const validationChild = spawn(native, ['plugin', 'validate', '--strict', plugin], { cwd: fixture, env, stdio: ['ignore', 'pipe', 'pipe'] })
+  let validationStdout = '', validationStderr = '', validationExpired = false
+  validationChild.stdout.on('data', bytes => validationStdout += bytes)
+  validationChild.stderr.on('data', bytes => validationStderr += bytes)
+  const validationTimer = setTimeout(() => {
+    validationExpired = true
+    reportDeadline('plugin validate', validationStarted, validationStdout, validationStderr)
+    validationChild.kill('SIGTERM')
+  }, 10000)
+  let validationCode
+  try {
+    validationCode = await new Promise((resolve, reject) => {
+      validationChild.once('error', reject)
+      validationChild.once('close', resolve)
+    })
+  } finally {
+    clearTimeout(validationTimer)
+  }
+  if (validationCode !== 0) process.stderr.write(validationStdout + validationStderr)
+  assert.equal(validationExpired, false, 'plugin validate deadline')
+  assert.equal(validationCode, 0, (validationStdout + validationStderr).slice(-2000))
   async function run(label, session, args, prompt, tools = '') {
     // Native Windows limits a command line to 32767 characters; claude -p reads a long prompt from stdin.
     const script = Array.isArray(prompt) ? prompt : undefined
@@ -241,12 +258,20 @@ try {
   else process.stderr.write(`Failure artifact retained at ${fixture}\n`)
 }
 function terminate(diagnostics) {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return
+  const target = child
+  if (!target || target.exitCode !== null || target.signalCode !== null) return
   if (process.platform === 'win32') {
-    const killed = spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { encoding: 'utf8', timeout: 10000 })
-    if (killed.error?.code === 'ETIMEDOUT') {
+    const killStarted = performance.now()
+    const killer = spawn('taskkill', ['/PID', String(target.pid), '/T', '/F'], { stdio: 'ignore' })
+    let finished = false
+    const timer = setTimeout(() => {
+      if (finished) return
       const output = diagnostics?.output() ?? { stdout: '', stderr: '' }
-      reportDeadline(`${diagnostics?.label ?? 'claude -p'} taskkill`, diagnostics?.startedAt ?? performance.now(), output.stdout, output.stderr)
-    }
-  } else try { process.kill(-child.pid, 'SIGTERM') } catch (error) { if (error.code !== 'ESRCH') throw error }
+      reportDeadline(`${diagnostics?.label ?? 'claude -p'} taskkill`, killStarted, output.stdout, output.stderr)
+      killer.kill()
+    }, 10000)
+    const settle = () => { finished = true; clearTimeout(timer) }
+    killer.once('close', settle)
+    killer.once('error', settle)
+  } else try { process.kill(-target.pid, 'SIGTERM') } catch (error) { if (error.code !== 'ESRCH') throw error }
 }
