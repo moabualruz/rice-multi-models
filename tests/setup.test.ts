@@ -7,6 +7,8 @@ import { setupInfo, setupCodex } from '../helper/setup-info'
 import { opencodeEntries, opencodeKey } from '../helper/opencode-auth'
 import { absoluteExecutable, commandText, detectRuntime, setupSummary, startupNotice } from '../hooks/setup'
 import { parseConfig } from '../hooks/config'
+import { unknownMetadata, type ModelCatalogue } from '../hooks/catalogue'
+import { nativeModelEnv, nativeModelSettings } from '../hooks/picker'
 
 test('displayed login commands preserve shell metacharacters and use PowerShell invocation on Windows', () => {
   expect(commandText(['C:\\Program Files\\nodejs\\node.exe', "C:\\User's files\\codex.js", 'login'], 'win32')).toBe("& 'C:\\Program Files\\nodejs\\node.exe' 'C:\\User''s files\\codex.js' 'login'")
@@ -37,6 +39,89 @@ test('picker sync owns exact generated rows, preserves custom prefixed rows and 
   expect(await syncPicker({ configDir, rows: [] })).toMatchObject({ ok: true, count: 0 })
   expect(JSON.parse(await readFile(path.join(configDir, 'settings.json'), 'utf8')).modelPicker.options).toEqual(custom)
 }))
+
+test('native model settings fill only their own keys, keep the person\'s values and leave with the model', async () => temporary(async configDir => {
+  const file = path.join(configDir, 'settings.json')
+  await writeFile(file, JSON.stringify({ modelSettings: { 'local/qwen': { effortLevel: 'low' }, 'claude-opus-5-5': { maxEffortLevel: 'medium' } } }))
+  const modelSettings = { 'codex/gpt-6.1-sol': { autoCompactWindow: 500000 }, 'local/qwen': { autoCompactWindow: 128000, maxEffortLevel: 'high' } }
+  expect(await syncPicker({ configDir, rows, modelSettings })).toMatchObject({ ok: true, changed: true })
+  expect(JSON.parse(await readFile(file, 'utf8')).modelSettings).toEqual({
+    'local/qwen': { effortLevel: 'low', autoCompactWindow: 128000, maxEffortLevel: 'high' },
+    'claude-opus-5-5': { maxEffortLevel: 'medium' },
+    'codex/gpt-6.1-sol': { autoCompactWindow: 500000 },
+  })
+  // The person's own change to a filled key is kept from then on.
+  const edited = JSON.parse(await readFile(file, 'utf8'))
+  edited.modelSettings['local/qwen'].autoCompactWindow = 200000
+  await writeFile(file, JSON.stringify(edited))
+  await syncPicker({ configDir, rows, modelSettings: { ...modelSettings, 'local/qwen': { autoCompactWindow: 131072, maxEffortLevel: 'medium' } } })
+  expect(JSON.parse(await readFile(file, 'utf8')).modelSettings['local/qwen']).toEqual({ effortLevel: 'low', autoCompactWindow: 200000, maxEffortLevel: 'medium' })
+  // A model no longer discovered loses only what the mod wrote.
+  await syncPicker({ configDir, rows: [], modelSettings: {} })
+  expect(JSON.parse(await readFile(file, 'utf8')).modelSettings).toEqual({ 'local/qwen': { effortLevel: 'low', autoCompactWindow: 200000 }, 'claude-opus-5-5': { maxEffortLevel: 'medium' } })
+}))
+
+test('the env block and per-model settings are written for Claude\'s next launch and keep the person\'s own values', async () => temporary(async configDir => {
+  const file = path.join(configDir, 'settings.json')
+  await writeFile(file, JSON.stringify({ env: { FOO: '1', CLAUDE_CODE_MODEL_CAPABILITIES: 'mine=effort' }, modelSettings: { 'Codex/Fresh': { autoCompactWindow: 128000 }, 'local/route-20261024': { autoCompactWindow: 200000 }, 'local/wide[1m]': { autoCompactWindow: 180000 }, 'Local/Tuned-20261024': { effortLevel: 'xhigh' }, 'Local/Bare': {} } }))
+  const env = { CLAUDE_CODE_MAX_CONTEXT_TOKENS: '500000', CLAUDE_CODE_MODEL_CAPABILITIES: 'codex/fresh=effort' }
+  const modelSettings = { 'codex/fresh': { autoCompactWindow: 500000 }, 'local/route': { autoCompactWindow: 400000 }, 'local/wide': { autoCompactWindow: 600000 }, 'local/tuned': { maxEffortLevel: 'high' }, 'local/bare': { autoCompactWindow: 700000 }, 'local/other': { autoCompactWindow: 300000 } }
+  expect(await syncPicker({ configDir, rows, modelSettings, env })).toMatchObject({ ok: true, changed: true })
+  let written = JSON.parse(await readFile(file, 'utf8'))
+  // The person's own value and their entry under another spelling of the same model stay theirs.
+  expect(written.env).toEqual({ FOO: '1', CLAUDE_CODE_MODEL_CAPABILITIES: 'mine=effort', CLAUDE_CODE_MAX_CONTEXT_TOKENS: '500000' })
+  // The person's entry holds a key the mod does not fill, or none, and still no key is added beside it for that model.
+  expect(written.modelSettings).toEqual({ 'Codex/Fresh': { autoCompactWindow: 128000 }, 'local/route-20261024': { autoCompactWindow: 200000 }, 'local/wide[1m]': { autoCompactWindow: 180000 }, 'Local/Tuned-20261024': { effortLevel: 'xhigh' }, 'Local/Bare': {}, 'local/other': { autoCompactWindow: 300000 } })
+  // A later sync updates only what the mod wrote, and removes it when the data is gone.
+  await syncPicker({ configDir, rows, modelSettings: { 'local/other': { autoCompactWindow: 250000 } }, env: { CLAUDE_CODE_MAX_CONTEXT_TOKENS: '250000' } })
+  written = JSON.parse(await readFile(file, 'utf8'))
+  expect(written.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe('250000')
+  expect(written.modelSettings['local/other']).toEqual({ autoCompactWindow: 250000 })
+  await syncPicker({ configDir, rows: [] })
+  written = JSON.parse(await readFile(file, 'utf8'))
+  expect(written.env).toEqual({ FOO: '1', CLAUDE_CODE_MODEL_CAPABILITIES: 'mine=effort' })
+  expect(written.modelSettings).toEqual({ 'Codex/Fresh': { autoCompactWindow: 128000 }, 'local/route-20261024': { autoCompactWindow: 200000 }, 'local/wide[1m]': { autoCompactWindow: 180000 }, 'Local/Tuned-20261024': { effortLevel: 'xhigh' }, 'Local/Bare': {} })
+}))
+
+test('provider data never raises a cap the settings file sets itself', async () => temporary(async configDir => {
+  const file = path.join(configDir, 'settings.json')
+  await writeFile(file, JSON.stringify({ maxEffortLevel: 'medium', autoCompactWindow: 200000 }))
+  // Claude lets a per-model value replace the file's own top-level one, so only a lower value is written.
+  const modelSettings = { 'local/big': { autoCompactWindow: 500000, maxEffortLevel: 'high' }, 'local/small': { autoCompactWindow: 128000, maxEffortLevel: 'low' } }
+  expect(await syncPicker({ configDir, rows, modelSettings })).toMatchObject({ ok: true })
+  const written = JSON.parse(await readFile(file, 'utf8'))
+  expect([written.maxEffortLevel, written.autoCompactWindow]).toEqual(['medium', 200000])
+  expect(written.modelSettings).toEqual({ 'local/small': { autoCompactWindow: 128000, maxEffortLevel: 'low' } })
+}))
+
+test('catalogue data maps to Claude\'s native per-model fields and leaves unknown data to Claude', () => {
+  const metadata = (contextWindow: number | null, reasoningEfforts: string[] | null) => ({ ...unknownMetadata(), contextWindow, reasoningEfforts })
+  const catalogue = {
+    models: [
+      { model: 'codex/gpt-6.1-sol', label: 'Sol', execution: 'native provider', source: 'fixture', observedAt: 1, metadata: metadata(500000, ['low', 'medium', 'high', 'xhigh']) },
+      { model: 'local/qwen', label: 'Qwen', execution: 'native provider', source: 'fixture', observedAt: 1, metadata: metadata(64000, ['low', 'high']) },
+      { model: 'local/plain', label: 'Plain', execution: 'native provider', source: 'fixture', observedAt: 1, metadata: metadata(null, []) },
+      { model: 'local/unknown', label: 'Unknown', execution: 'native provider', source: 'fixture', observedAt: 1, metadata: metadata(null, null) },
+      // Claude reads this id as its own claude-sonnet-4-6: its settings would change that model's, and Claude's own window data applies to it.
+      { model: 'opencode/claude-sonnet-4-6', label: 'Routed Sonnet', execution: 'native provider', source: 'fixture', observedAt: 1, metadata: metadata(900000, ['low', 'high']) },
+    ],
+    providers: [],
+  } as ModelCatalogue
+  expect(nativeModelSettings(catalogue)).toEqual({ 'codex/gpt-6.1-sol': { autoCompactWindow: 500000 }, 'local/qwen': { maxEffortLevel: 'high' } })
+  expect(nativeModelEnv(catalogue)).toEqual({
+    CLAUDE_CODE_MAX_CONTEXT_TOKENS: '500000',
+    CLAUDE_CODE_MODEL_CAPABILITIES: 'codex/gpt-6.1-sol=effort,xhigh_effort,-max_effort;local/qwen=effort,-xhigh_effort,-max_effort;local/plain=-effort;opencode/claude-sonnet-4-6=effort,-xhigh_effort,-max_effort',
+  })
+  expect(nativeModelEnv({ models: [], providers: [] })).toEqual({})
+  // An alias is a model id of its own to Claude: it carries its target's fields, and nothing when its target has none.
+  // An alias that only contains "claude-" names no Claude model, so it is an id of its own too.
+  const aliases = { preferred: 'local/qwen', quiet: 'local/unknown', steady: 'opencode/claude-sonnet-4-6', 'my-claude-route': 'codex/gpt-6.1-sol' }
+  expect(nativeModelSettings(catalogue, aliases)).toEqual({ 'codex/gpt-6.1-sol': { autoCompactWindow: 500000 }, 'local/qwen': { maxEffortLevel: 'high' }, preferred: { maxEffortLevel: 'high' }, steady: { autoCompactWindow: 900000, maxEffortLevel: 'high' }, 'my-claude-route': { autoCompactWindow: 500000 } })
+  expect(nativeModelEnv(catalogue, aliases)).toEqual({
+    CLAUDE_CODE_MAX_CONTEXT_TOKENS: '900000',
+    CLAUDE_CODE_MODEL_CAPABILITIES: 'codex/gpt-6.1-sol=effort,xhigh_effort,-max_effort;local/qwen=effort,-xhigh_effort,-max_effort;local/plain=-effort;opencode/claude-sonnet-4-6=effort,-xhigh_effort,-max_effort;preferred=effort,-xhigh_effort,-max_effort;steady=effort,-xhigh_effort,-max_effort;my-claude-route=effort,xhigh_effort,-max_effort',
+  })
+})
 
 test('picker sync never adds an empty picker block to settings that had none', async () => temporary(async configDir => {
   const settings = { permissions: { allow: ['Read'] }, autoMode: { classifyAllShell: true } }
@@ -164,16 +249,13 @@ test('startup notice has no invented default and includes fresh source status an
   expect(summary).toContain('No Codex model was discovered')
   expect(summary).not.toContain('/model codex/')
   expect(summary).not.toContain('/model undefined')
-  expect(summary).toContain('native context meter and automatic compaction threshold')
-  expect(summary).toContain('main routed native-provider model and every live routed subagent')
-  expect(summary).toContain('supported process-local CLAUDE_CODE_MAX_CONTEXT_TOKENS')
-  expect(summary).toContain('fresh exact active contextWindow')
-  expect(summary).toContain('existing explicit owner override remains authoritative')
-  expect(summary).toContain('discovery failure and session.end restore the value owned by the mod')
-  expect(summary).toContain('ownership state survives hot reload')
-  expect(summary).toContain('Numeric per-model registration is unsupported')
-  expect(summary).toContain('one process-wide window covers mixed models')
-  expect(summary).toContain('restoration on plugin unload remains a limitation')
+  expect(summary).toContain('native /model picker row')
+  expect(summary).toContain('modelSettings.<id>.autoCompactWindow')
+  expect(summary).toContain('modelSettings.<id>.maxEffortLevel')
+  expect(summary).toContain('CLAUDE_CODE_MODEL_CAPABILITIES')
+  expect(summary).toContain('CLAUDE_CODE_MAX_CONTEXT_TOKENS holds the largest reported window')
+  expect(summary).toContain('An owner\'s own value stays authoritative')
+  expect(summary).toContain('compaction stay Claude\'s own, per agent')
   expect(summary).toContain('applies no model-switch denial or request-input guard')
   expect(summary).not.toContain('200k fallback')
   expect(summary).toContain('Start the normal claude command')

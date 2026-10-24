@@ -951,6 +951,19 @@ test('an unknown id is denied visibly with the valid ids and starts nothing', as
   for (const valid of ['haiku', 'sonnet', 'opus', 'fable', 'codex/gpt-6.1-sol', 'local/qwen']) expect(run.result.deny).toContain(valid)
 })
 
+test('an inherited child is not labelled with a guess before Claude resolves its model', async () => {
+  await reload({ local: provider('qwen') })
+  const sessionModel = host.session.model
+  // A native Claude session: the child inherits through Claude's own resolution, not the mod's.
+  host.session.model = async () => 'opus'
+  try {
+    // Claude may still resolve it otherwise (CLAUDE_CODE_SUBAGENT_MODEL), so the stored description stays as written.
+    const run = await spawn('opus', 'general-purpose')
+    expect(run.received.description).toBe('owned spawn')
+    expect(run.received.model).toBeUndefined()
+  } finally { host.session.model = sessionModel }
+})
+
 test('Claude aliases and an absent model behave as without the carrier, and an engine haiku is not a lost carrier', async () => {
   await reload({ local: provider('qwen') })
   for (const model of ['sonnet', 'opus', 'fable', 'haiku', undefined]) {

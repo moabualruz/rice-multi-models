@@ -1,4 +1,4 @@
-import type { PickerRow } from './picker'
+import type { NativeModelSettings, PickerRow } from './picker'
 import { NATIVE_MODEL_LIMITATIONS, NATIVE_WINDOW_EXPLANATION } from './catalogue'
 
 export type SetupInfo = {
@@ -40,10 +40,10 @@ export async function detectRuntime(io: RuntimePort): Promise<Runtime> {
   return { error: `${outdated ? `Node.js ${outdated} is too old.` : 'Node.js is not available to this session.'} Install Node.js 22+ from https://nodejs.org, or set RICE_MULTI_MODELS_NODE to its absolute executable path, then /rice-models setup repair.` }
 }
 
-export async function syncPicker(io: PickerPort, runtime: Runtime, rows: PickerRow[]): Promise<PickerResult> {
+export async function syncPicker(io: PickerPort, runtime: Runtime, rows: PickerRow[], modelSettings: Record<string, NativeModelSettings> = {}, env: Record<string, string> = {}): Promise<PickerResult> {
   if (!runtime.executable || !runtime.info || runtime.error) return { ok: false, changed: false, count: 0, path: '', error: runtime.error || 'Node.js 22+ helper is unavailable; /rice-models setup repair.' }
   try {
-    const result = await io.run([runtime.executable, io.helper, 'sync-picker'], { stdin: JSON.stringify({ configDir: runtime.info.configDir, rows }), timeoutMs: 10_000 })
+    const result = await io.run([runtime.executable, io.helper, 'sync-picker'], { stdin: JSON.stringify({ configDir: runtime.info.configDir, rows, modelSettings, env }), timeoutMs: 10_000 })
     const parsed = JSON.parse(result.stdout.trim()) as PickerResult
     if (typeof parsed.ok === 'boolean') return parsed
   } catch { /* Do not fall back to an unsafe direct settings write. */ }
@@ -68,7 +68,7 @@ export function setupSummary(runtime: Runtime, picker?: PickerResult, count = 0,
     info.auth.codex ? 'Codex login file is present; entitlement is checked on your first request.' : `Codex login is needed: run ${loginCommand(runtime)} in your terminal.`,
   ]
   if (!info.clis.codex && !info.auth.codex) lines.push('Codex CLI is missing: /rice-models setup codex explicitly installs the pinned official CLI into plugin-owned state (not globally), then shows the login command.')
-  lines.push(defaultModel ? `Use /model ${defaultModel} or /rice-models models.` : 'No Codex model was discovered; /rice-models models reports source failures and /rice-models refresh retries discovery.', `Unknown metadata stays unknown. Exact model names and versions remain the route identity. This mod ships no agent files; project agent files work as Claude applies them, whichever model they name. ${NATIVE_MODEL_LIMITATIONS.registration} Native accounting remains host-owned and the mod applies no model-switch denial or request-input guard. ${NATIVE_WINDOW_EXPLANATION}`, `Start the normal claude command. The supported session.compact hook compacts routed history with the selected provider, using Claude Code's own summary prompt and format (read from the installed claude), and retains the original transcript on failure. Subagents compact natively against that window data. ${NATIVE_MODEL_LIMITATIONS.recovery}`, 'Declared providers still require your approval; optional agy/grok CLIs are never installed automatically.', '/rice-models setup repair refreshes discovery and repairs the picker; /rice-models doctor is read-only.')
+  lines.push(defaultModel ? `Use /model ${defaultModel} or /rice-models models.` : 'No Codex model was discovered; /rice-models models reports source failures and /rice-models refresh retries discovery.', `Unknown metadata stays unknown. Exact model names and versions remain the route identity. This mod ships no agent files; project agent files work as Claude applies them, whichever model they name. ${NATIVE_MODEL_LIMITATIONS.registration} Native accounting remains host-owned and the mod applies no model-switch denial or request-input guard. ${NATIVE_WINDOW_EXPLANATION}`, `Start the normal claude command. The supported session.compact hook compacts routed history with the selected provider, using Claude Code's own summary prompt and format (read from the installed claude), and retains the original transcript on failure. Each agent compacts natively against its own window. ${NATIVE_MODEL_LIMITATIONS.recovery}`, 'Declared providers still require your approval; optional agy/grok CLIs are never installed automatically.', '/rice-models setup repair refreshes discovery and repairs the picker; /rice-models doctor is read-only.')
   if (capabilities) lines.push(capabilities)
   return lines.join('\n')
 }

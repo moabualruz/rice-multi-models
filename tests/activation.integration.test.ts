@@ -813,15 +813,14 @@ test('a small child dispatches after Read without an input guard; provider overf
     expect(JSON.stringify(transcript)).toBe(before)
     return { ref: 9, result: { status: 'completed', agentId: input.agentId, content: [] }, text: 'Subagent completed but returned no output.' }
   })
-  const deny = String(toolResult.deny)
-  expect(deny).toContain('context_overflow')
-  expect(deny).toContain('codex/tight-child')
+  // The native result passes through unchanged; the failure is in the child's own answer.
+  expect(toolResult).toMatchObject({ result: { status: 'completed', agentId: input.agentId } })
   expect(requests).toBe(2)
   expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('500000')
   expect(f.contextWrites).toEqual([])
 })
 
-test('provider overflow reports stay child-owned, bounded and redacted; a later successful turn clears the failure', async () => {
+test('provider overflow reports stay child-owned and bounded in the child answer; completed native results pass through', async () => {
   const f = contextFixture()
   await startContext(f)
   f.host.session.messages = async () => [{ role: 'user', content: 'Owned child task' }]
@@ -850,14 +849,9 @@ test('provider overflow reports stay child-owned, bounded and redacted; a later 
     expect(chunks.filter(chunk => chunk.kind === 'text').map(chunk => chunk.text).join('')).toBe(item.value.answer)
   }
   expect(requests).toBe(3)
-  const other = { result: { status: 'completed', agentId: 'unrelated-child', content: [] } }
-  expect(await callbacks.get('tool.call')!(f.host, { tool: 'Agent', tool_use_id: 'toolu_other' }, async () => other)).toBe(other)
-  const failed = await callbacks.get('tool.call')!(f.host, { tool: 'Agent', tool_use_id: 'toolu_resumed' }, async () => ({ result: { status: 'completed', agentId: 'owned-resumed', content: [] } }))
-  expect(failed.deny).toContain('context_overflow')
-  failing = false
-  for await (const _chunk of callbacks.get('turn.step')!(f.host, { agentId: 'owned-resumed', model: 'codex/fresh', turnId: 'later-turn', index: 0, messageCount: 1 }, noNative)) {}
-  const success = { result: { status: 'completed', agentId: 'owned-resumed', content: [{ type: 'text', text: 'Owned continuation' }] } }
-  expect(await callbacks.get('tool.call')!(f.host, { tool: 'Agent', tool_use_id: 'toolu_later' }, async () => success)).toBe(success)
+  // Native results pass through: no plugin rewrite of a completed child.
+  const done = { result: { status: 'completed', agentId: 'owned-resumed', content: [] } }
+  expect(await callbacks.get('tool.call')!(f.host, { tool: 'Agent', tool_use_id: 'toolu_resumed' }, async () => done)).toBe(done)
 })
 
 test('a failed routed stream preserves text after an incomplete tool without committing the tool', async () => {
@@ -1027,203 +1021,108 @@ const switchContext = (f: ReturnType<typeof fixture>, model: string) => {
   return callbacks.get('classic.PostModelSwitch')!(f.host, { from_model, to_model: model, source: 'sdk' }, async () => ({ switched: true }))
 }
 
-test('complete model metadata is reported without substituting a process-global native window', async () => {
+test('complete model metadata fills Claude\'s native model fields in the settings it loads at launch', async () => {
   const f = contextFixture()
   f.discovery.catalogue.models[0]!.metadata = { ...f.discovery.catalogue.models[0]!.metadata, outputTokenLimit: 4096, autoCompactTokenLimit: 450000, reasoningEfforts: ['low', 'high'], inputModalities: ['text', 'image'], tools: true, parallelToolCalls: true }
   expect(await startContext(f)).toEqual({ started: true })
-  expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('500000')
+  // Nothing changes in the running session: the data is written for Claude's next launch.
+  expect(f.env.has('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(false)
+  expect(f.env.has('CLAUDE_CODE_MODEL_CAPABILITIES')).toBe(false)
+  expect(f.contextWrites).toEqual([])
+  const sync = f.syncs.at(-1)
+  expect(sync.modelSettings).toEqual({ 'codex/fresh': { autoCompactWindow: 500000, maxEffortLevel: 'high' } })
+  expect(sync.env).toEqual({ CLAUDE_CODE_MAX_CONTEXT_TOKENS: '500000', CLAUDE_CODE_MODEL_CAPABILITIES: 'codex/fresh=effort,-xhigh_effort,-max_effort' })
   const report = await callbacks.get('command.run')!(f.host, { args: 'status' })
   expect(report.text).toContain('active context 500000')
   expect(report.text).toContain('maximum context 872000')
   expect(report.text).toContain('reported input 470000')
   expect(report.text).toContain('reported output 4096')
-  expect(report.text).toContain('native window 500000')
-  expect(report.text).toContain('No public model.register/model definition operation')
-  expect(report.text).toContain('smallest reported window')
-  const row = f.syncs.at(-1).rows[0]
+  expect(report.text).toContain('loaded at launch')
+  const row = sync.rows[0]
   expect(row.model).toBe('codex/fresh')
   for (const data of ['450000', 'low|high', 'text|image', 'tools true', 'parallel true']) expect(row.description).toContain(data)
   expect(row.behavesAs).toBeUndefined()
 })
 
-test('native primary context uses the fresh active window, not maximum ceiling or input bound', async () => {
-  const f = contextFixture()
-  expect(await startContext(f)).toEqual({ started: true })
-  expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('500000')
-  expect(f.contextWrites).toEqual([{ key: 'CLAUDE_CODE_MAX_CONTEXT_TOKENS', value: '500000' }])
-  const report = await callbacks.get('command.run')!(f.host, { args: 'status' })
-  expect(report.text).toContain('active context 500000')
-  expect(report.text).toContain('maximum context 872000')
-  expect(report.text).toContain('reported input 470000')
-  expect(report.text).toContain('native window 500000')
-})
-
-test('native window never treats maximum-only or invalid metadata as active context', async () => {
-  for (const [context, maximum, expected] of [[null, 64000, undefined], [null, null, undefined], [0, 64000, undefined], [1.5, null, undefined], [-1, null, undefined]] as const) {
-    const f = contextFixture(context, maximum)
-    await startContext(f)
-    expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(expected)
-  }
-})
-
-test('native context requires fresh native-provider metadata for the exact selected model', async () => {
-  for (const kind of ['unavailable', 'unknown']) {
+test('refresh, switches, repeated startup and session end change nothing in the running session', async () => {
+  for (const override of [undefined, '123456']) {
     const f = contextFixture()
-    if (kind === 'unavailable') f.discovery.catalogue.providers[0]!.status = 'unavailable'
-    if (kind === 'unknown') f.selection.model = 'codex/undiscovered'
+    if (override) f.env.set('CLAUDE_CODE_MAX_CONTEXT_TOKENS', override)
     await startContext(f)
+    await startContext(f)
+    f.discovery.catalogue.models[0]!.metadata.contextWindow = 32768
+    await callbacks.get('command.run')!(f.host, { args: 'refresh' })
+    // A refresh writes the new data for the next launch.
+    expect(f.syncs.at(-1).env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe('32768')
+    expect(await switchContext(f, 'sonnet')).toEqual({ switched: true })
+    await switchContext(f, 'codex/fresh')
+    f.env.set('DISABLE_COMPACT', '1')
+    await switchContext(f, 'codex/fresh')
+    expect(await callbacks.get('session.end')!(f.host, {}, async () => ({ ended: true }))).toEqual({ ended: true })
+    expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(override)
     expect(f.contextWrites).toEqual([])
+    expect(f.env.get('DISABLE_COMPACT')).toBe('1')
   }
 })
 
-test('native context refresh and model switch use current metadata and preserve hook results', async () => {
-  const f = contextFixture()
-  await startContext(f)
-  f.discovery.catalogue.models[0]!.metadata.contextWindow = 64000
-  await callbacks.get('command.run')!(f.host, { args: 'refresh' })
-  expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('64000')
-  expect(await switchContext(f, 'sonnet')).toEqual({ switched: true })
-  expect(f.env.has('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(false)
-  await switchContext(f, 'codex/fresh')
-  expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('64000')
-})
-
-test('a live workflow child, which no agent list names, holds the window across a reload until its turn completes', async () => {
-  const f = contextFixture()
-  f.discovery.catalogue.models.push({ model: 'codex/tight-child', label: 'Owned child', execution: 'native provider', source: 'fixture', observedAt: 1_800_000_000_000, metadata: { ...unknownMetadata(), contextWindow: 32768, maxContextWindow: 32768, outputTokenLimit: 4096 } })
-  await startContext(f)
-  expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('500000')
-  const spawn = (agentId: string, workflow?: { runId: string; agentIndex: number }) => callbacks.get('agent.spawn')!(f.host, { tool_use_id: `toolu_${agentId}`, prompt: 'owned', description: 'owned child', subagentType: 'general-purpose', provider: { plugin: 'engine', tier: 'core' }, parentModel: 'codex/fresh', model: 'codex/tight-child', background: false, fork: false, ...(workflow ? { workflow } : {}) }, async (input: any) => ({ model: input.model, agentId }))
-  const complete = (hooks: Map<string, (...args: any[]) => any>, agentId: string) => hooks.get('turn.complete')!(f.host, { turnId: `turn-${agentId}`, agentId, answer: 'owned answer', durationMs: 1, isAborted: false, reason: 'completed' }, async (input: any) => ({ text: input.answer }))
-  expect(await spawn('owned-ended-subagent')).toEqual({ model: 'codex/tight-child', agentId: 'owned-ended-subagent' })
-  expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('500000')
-  expect(await spawn('owned-workflow-child', { runId: 'wf_owned', agentIndex: 1 })).toEqual({ model: 'codex/tight-child', agentId: 'owned-workflow-child' })
-  expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('32768')
-  const fresh = await import('../hooks/register.ts?owned-workflow-reload')
-  const reloaded = new Map<string, (...args: any[]) => any>()
-  fresh.register(((event: string, match: any, callback: any) => { reloaded.set(event, callback ?? match); return { catch: () => undefined } }) as any)
-  // A hot reload need not replay session.start before the next synchronization.
-  await reloaded.get('command.run')!(f.host, { args: 'setup repair' })
-  expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('32768')
-  expect(await complete(reloaded, 'owned-ended-subagent')).toEqual({ text: 'owned answer' })
-  expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('32768')
-  expect(await complete(reloaded, 'owned-workflow-child')).toEqual({ text: 'owned answer' })
-  expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('500000')
-  expect(f.contextWrites.map(write => write.value)).toEqual(['500000', '32768', '500000'])
-})
-
-test('native context resolves configured aliases to their exact fresh model', async () => {
+test('an alias resolves to its exact model for status and carries its target\'s native fields under its own id', async () => {
   const f = contextFixture()
   f.files.set('/empty-home/.claude/rice-multi-models.json', JSON.stringify({ providers: { fixture: { kind: 'openai', baseUrl: 'https://fixture.invalid/v1', auth: 'none', models: { fresh: { contextWindow: 128000, maxOutputTokens: 4096 } } } }, aliases: { preferred: 'fixture/fresh' } }))
   f.selection.model = 'preferred'
   f.discovery.catalogue.models[0]!.model = 'fixture/fresh'
+  f.discovery.catalogue.models[0]!.metadata.reasoningEfforts = ['low', 'high']
   f.discovery.catalogue.providers[0]!.provider = 'fixture'
   await startContext(f)
-  expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('500000')
+  const report = await callbacks.get('command.run')!(f.host, { args: 'status' })
+  expect(report.text).toContain('Primary context (preferred): active context 500000')
+  expect(f.contextWrites).toEqual([])
+  // Claude sees the alias as its own model id, so it gets the target's window and efforts too.
+  const fields = { autoCompactWindow: 500000, maxEffortLevel: 'high' }
+  const sync = f.syncs.at(-1)
+  expect(sync.modelSettings).toEqual({ 'fixture/fresh': fields, preferred: fields })
+  expect(sync.env).toEqual({ CLAUDE_CODE_MAX_CONTEXT_TOKENS: '500000', CLAUDE_CODE_MODEL_CAPABILITIES: 'fixture/fresh=effort,-xhigh_effort,-max_effort;preferred=effort,-xhigh_effort,-max_effort' })
 })
 
-test('failed discovery and missing runtime restore the plugin-owned override', async () => {
-  for (const failure of ['discovery', 'runtime']) {
-    const f = contextFixture()
+test('an automatic catalogue refresh writes the new model data for the next launch', async () => {
+  const f = contextFixture()
+  let now = 1_800_000_000_000
+  f.host.clock.now = async () => now
+  f.discovery.unavailable = true
+  await startContext(f)
+  expect(f.syncs.at(-1).modelSettings).toEqual({})
+  expect(f.syncs.at(-1).env).toEqual({})
+  now += 6 * 60_000
+  f.discovery.unavailable = false
+  f.discovery.catalogue.models[0]!.observedAt = now
+  f.host.process.spawn = async function* () {
+    yield { stream: 'stdout', text: JSON.stringify({ type: 'text', text: 'owned reply' }) + '\n' + JSON.stringify({ type: 'stop', reason: 'end_turn' }) + '\n' }
+    return { code: 0 }
+  }
+  const native = async () => { throw new Error('no native fallback') }
+  expect((await callbacks.get('model.complete')!(f.host, { model: 'codex/fresh', prompt: 'after the refresh' }, native)).value.isAnswered).toBe(true)
+  expect(f.discoveries).toHaveLength(2)
+  expect(f.syncs.at(-1).modelSettings).toEqual({ 'codex/fresh': { autoCompactWindow: 500000 } })
+  expect(f.syncs.at(-1).env.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe('500000')
+  expect(f.contextWrites).toEqual([])
+  // The discovery itself published its data (prompt evaluators share it), so a later request writes nothing again.
+  const synced = f.syncs.length
+  expect((await callbacks.get('model.complete')!(f.host, { model: 'codex/fresh', prompt: 'still fresh' }, native)).value.isAnswered).toBe(true)
+  expect(f.syncs).toHaveLength(synced)
+})
+
+test('unknown bounds, unavailable discovery and runtime failure never mutate native context', async () => {
+  for (const failure of ['unknown', 'discovery', 'runtime']) {
+    const f = contextFixture(null, 64000)
+    f.env.set('CLAUDE_CODE_MAX_CONTEXT_TOKENS', '654321')
     await startContext(f)
-    if (failure === 'discovery') {
-      f.discovery.unavailable = true
-      await callbacks.get('command.run')!(f.host, { args: 'refresh' })
-    } else {
-      f.host.process.run = async () => ({ exitCode: 127, stdout: '', stderr: 'fixture missing runtime' })
-      await callbacks.get('command.run')!(f.host, { args: 'setup repair' })
-    }
-    expect(f.env.has('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(false)
-  }
-})
-
-test('repeated startup preserves ownership state rather than capturing its applied override', async () => {
-  const f = contextFixture()
-  await startContext(f)
-  await startContext(f)
-  expect(f.contextWrites).toHaveLength(1)
-  expect(f.state.get('nativeContext')).toMatchObject({ original: null, applied: '500000' })
-  await switchContext(f, 'sonnet')
-  expect(f.env.has('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(false)
-})
-
-test('original owner override and subsequent external changes remain authoritative', async () => {
-  const f = contextFixture()
-  f.env.set('CLAUDE_CODE_MAX_CONTEXT_TOKENS', '123456')
-  await startContext(f)
-  await switchContext(f, 'sonnet')
-  expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('123456')
-  expect(f.contextWrites).toEqual([])
-  const g = contextFixture()
-  await startContext(g)
-  g.env.set('CLAUDE_CODE_MAX_CONTEXT_TOKENS', '654321')
-  await switchContext(g, 'sonnet')
-  await switchContext(g, 'codex/fresh')
-  expect(g.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('654321')
-  expect(g.contextWrites).toHaveLength(1)
-})
-
-test('an external override installed during model lookup is not overwritten', async () => {
-  const f = contextFixture()
-  f.host.session.model = async () => {
-    f.env.set('CLAUDE_CODE_MAX_CONTEXT_TOKENS', '123456')
-    return f.selection.model
-  }
-  await startContext(f)
-  expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('123456')
-  expect(f.contextWrites).toEqual([])
-  expect(f.state.get('nativeContext')).toMatchObject({ relinquished: true })
-})
-
-test('ownership persistence failure rolls back a context environment mutation', async () => {
-  const f = contextFixture()
-  const set = f.host.state.set
-  let writes = 0
-  f.host.state.set = async (...args: any[]) => {
-    if (++writes === 2) throw new Error('fixture ownership persistence failure')
-    return set(...args)
-  }
-  expect(await startContext(f)).toEqual({ started: true })
-  expect(f.env.has('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(false)
-  expect(f.state.get('nativeContext')).toMatchObject({ original: null, applied: null })
-  await callbacks.get('session.end')!(f.host, {}, async () => ({}))
-  expect(f.env.has('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(false)
-})
-
-test('disabled compaction prevents automatic native context management', async () => {
-  const f = contextFixture()
-  f.env.set('DISABLE_COMPACT', '1')
-  await startContext(f)
-  expect(f.contextWrites).toEqual([])
-  f.env.delete('DISABLE_COMPACT')
-  await switchContext(f, 'codex/fresh')
-  expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('500000')
-  f.env.set('DISABLE_COMPACT', '1')
-  await switchContext(f, 'codex/fresh')
-  expect(f.env.has('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(false)
-  expect(f.env.get('DISABLE_COMPACT')).toBe('1')
-})
-
-test('rejected context environment writes do not prevent startup or command registration', async () => {
-  const f = contextFixture()
-  const set = f.host.env.set
-  f.host.env.set = async (key: string, value: string | undefined) => {
-    if (key === 'CLAUDE_CODE_MAX_CONTEXT_TOKENS') throw new Error('fixture environment write denied')
-    return set(key, value)
-  }
-  expect(await startContext(f)).toEqual({ started: true })
-  expect(f.commands.map(spec => spec.name)).toContain('rice-models')
-  expect(f.env.has('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(false)
-  expect((f.state.get('nativeContext') as { applied?: string } | undefined)?.applied).not.toBe('500000')
-})
-
-test('session end restores only the override still owned by the plugin', async () => {
-  for (const external of [false, true]) {
-    const f = contextFixture()
-    await startContext(f)
-    if (external) f.env.set('CLAUDE_CODE_MAX_CONTEXT_TOKENS', '654321')
-    expect(await callbacks.get('session.end')!(f.host, {}, async () => ({ ended: true }))).toEqual({ ended: true })
-    expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(external ? '654321' : undefined)
+    if (failure === 'unknown') f.selection.model = 'codex/undiscovered'
+    if (failure === 'discovery') f.discovery.unavailable = true
+    if (failure === 'runtime') f.host.process.run = async () => ({ exitCode: 127, stdout: '', stderr: 'fixture missing runtime' })
+    await callbacks.get('command.run')!(f.host, { args: failure === 'runtime' ? 'setup repair' : 'refresh' })
+    await switchContext(f, 'sonnet')
+    expect(f.commands.map(spec => spec.name)).toContain('rice-models')
+    expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('654321')
+    expect(f.contextWrites).toEqual([])
   }
 })
 

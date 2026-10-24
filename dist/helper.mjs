@@ -8728,6 +8728,8 @@ async function setupCodex(env = process.env) {
 import { mkdir as mkdir3, readFile as readFile3, rename, rm, writeFile } from "node:fs/promises";
 import path4 from "node:path";
 import { randomUUID } from "node:crypto";
+var NATIVE_SETTING_KEYS = ["autoCompactWindow", "maxEffortLevel"];
+var NATIVE_ENV_KEYS = ["CLAUDE_CODE_MAX_CONTEXT_TOKENS", "CLAUDE_CODE_MODEL_CAPABILITIES"];
 var object2 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 var canonical2 = (v) => JSON.stringify(v, (_key, value) => object2(value) ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, value[key]])) : value);
 function legacyGenerated(row) {
@@ -8824,12 +8826,65 @@ async function syncPicker(input) {
       added.push({ ...row });
       occupied.add(row.model);
     }
-    if (settings.modelPicker === void 0 && retained.length === 0 && added.length === 0) {
-      if (canonical2(ownership) !== canonical2({ version: 1, rows: [], edited: [...edited].sort() })) await atomicWrite(record4, { version: 1, rows: [], edited: [...edited].sort() });
+    if (settings.modelSettings !== void 0 && !object2(settings.modelSettings)) throw new Error("settings.json modelSettings is malformed; nothing was overwritten");
+    const wanted = object2(input.modelSettings) ? input.modelSettings : {};
+    const ownedSettings = object2(ownership.modelSettings) ? ownership.modelSettings : {};
+    const modelSettings = { ...settings.modelSettings ?? {} };
+    const nextOwnedSettings = {};
+    const levels = ["low", "medium", "high", "xhigh", "max"];
+    const belowOwn = (key, value) => {
+      const own3 = settings[key];
+      if (value === void 0 || own3 === void 0) return value;
+      if (key === "maxEffortLevel") return levels.includes(own3) && levels.indexOf(own3) <= levels.indexOf(value) ? void 0 : value;
+      return typeof own3 === "number" && typeof value === "number" && own3 <= value ? void 0 : value;
+    };
+    const sameModel = (id2) => id2.toLowerCase().replace(/-\d{8}$/, "").replace(/\[1m\]$/, "");
+    const theirs = (id2) => Object.entries(modelSettings).some(([other, entry]) => other !== id2 && sameModel(other) === sameModel(id2) && object2(entry) && (Object.keys(entry).length === 0 || Object.keys(entry).some((key) => !(object2(ownedSettings[other]) && ownedSettings[other][key] === entry[key]))));
+    for (const id2 of /* @__PURE__ */ new Set([...Object.keys(ownedSettings), ...Object.keys(wanted)])) {
+      const existing = modelSettings[id2] === void 0 ? {} : object2(modelSettings[id2]) ? { ...modelSettings[id2] } : void 0;
+      if (existing === void 0) continue;
+      const ours = object2(ownedSettings[id2]) ? ownedSettings[id2] : {};
+      const want = object2(wanted[id2]) ? wanted[id2] : {};
+      const mine = {};
+      for (const key of NATIVE_SETTING_KEYS) {
+        if (existing[key] !== ours[key]) continue;
+        const value = theirs(id2) ? void 0 : belowOwn(key, want[key]);
+        if (value === void 0) delete existing[key];
+        else {
+          existing[key] = value;
+          mine[key] = value;
+        }
+      }
+      if (Object.keys(existing).length) modelSettings[id2] = existing;
+      else delete modelSettings[id2];
+      if (Object.keys(mine).length) nextOwnedSettings[id2] = mine;
+    }
+    if (settings.env !== void 0 && !object2(settings.env)) throw new Error("settings.json env is malformed; nothing was overwritten");
+    const wantedEnv = object2(input.env) ? input.env : {};
+    const ownedEnv = object2(ownership.env) ? ownership.env : {};
+    const env = { ...settings.env ?? {} };
+    const nextOwnedEnv = {};
+    for (const key of NATIVE_ENV_KEYS) {
+      if (env[key] !== ownedEnv[key]) continue;
+      const value = wantedEnv[key];
+      if (typeof value === "string") {
+        env[key] = value;
+        nextOwnedEnv[key] = value;
+      } else delete env[key];
+    }
+    const settingsChanged = canonical2(modelSettings) !== canonical2(settings.modelSettings ?? {}) || canonical2(env) !== canonical2(settings.env ?? {});
+    const ownedOf = (rows) => ({ version: 1, rows, edited: [...edited].sort(), ...Object.keys(nextOwnedSettings).length ? { modelSettings: nextOwnedSettings } : {}, ...Object.keys(nextOwnedEnv).length ? { env: nextOwnedEnv } : {} });
+    if (settings.modelPicker === void 0 && retained.length === 0 && added.length === 0 && !settingsChanged) {
+      if (canonical2(ownership) !== canonical2(ownedOf([]))) await atomicWrite(record4, ownedOf([]));
       return { ok: true, changed: false, count: 0, path: file, preserved: 0 };
     }
-    const next = { ...settings, modelPicker: { ...picker, options: [...retained, ...added] } };
-    const nextOwned = { version: 1, rows: added, edited: [...edited].sort() };
+    const next = {
+      ...settings,
+      ...settings.modelPicker !== void 0 || retained.length || added.length ? { modelPicker: { ...picker, options: [...retained, ...added] } } : {},
+      ...settings.modelSettings !== void 0 || Object.keys(modelSettings).length ? { modelSettings } : {},
+      ...settings.env !== void 0 || Object.keys(env).length ? { env } : {}
+    };
+    const nextOwned = ownedOf(added);
     const changed = canonical2(settings) !== canonical2(next);
     if (changed) await atomicWrite(file, next);
     if (canonical2(ownership) !== canonical2(nextOwned)) await atomicWrite(record4, nextOwned);
