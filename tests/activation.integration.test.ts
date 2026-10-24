@@ -380,6 +380,69 @@ test('real compaction callback prepares each trigger, retains original tail hand
   }
 })
 
+test.each(['stable', 'appended-during', 'api-meta-during', 'cancelled', 'missing', 'conflicting', 'unsupported', 'changed-source'] as const)('capped compaction uses UUID-anchored persisted context and keeps native lifetime guards: %s', async boundary => {
+  const f = await compactFixture()
+  const path = `/owned/capped-${boundary}.jsonl`
+  const rows = Array.from({ length: 4098 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', text: i === 0 ? 'Publication requires owner approval.' : `owned history ${i}`, toolUses: [], handle: `owned-${i}` }))
+  f.active.rows = rows.map(row => ({ ...row }))
+  const persisted = rows.map(row => ({ type: row.role, uuid: row.handle, sessionId: 'empty-session', isSidechain: false, message: { role: row.role, content: [{ type: 'text', text: row.text }] } }))
+  if (boundary === 'missing') persisted.shift()
+  if (boundary === 'conflicting') persisted.push({ ...persisted[0]!, message: { role: 'user', content: [{ type: 'text', text: 'conflicting approval' }] } })
+  if (boundary === 'unsupported') (persisted[0]!.message.content as any[]).push({ type: 'image', source: {} })
+  if (boundary === 'changed-source') persisted[0]!.message.content[0]!.text = 'Publication is now approved.'
+  // Disk order and unrelated archived rows are not conversation authority.
+  f.files.set(path, [...persisted].reverse().map(row => JSON.stringify(row)).join('\n') + '\n')
+  await callbacks.get('classic.SessionStart')!(f.host, { source: 'startup', transcript_path: path }, async () => ({}))
+  const messages = f.host.session.messages
+  let metaAppended = false
+  f.host.session.messages = async (args: any = {}) => {
+    const history = await messages(args)
+    if (args.as === 'api' && metaAppended) history.push({ role: 'user', content: [{ type: 'text', text: 'New API-only approval constraint' }] })
+    return history.slice(-4096)
+  }
+  f.active.afterProvider = () => {
+    if (boundary === 'api-meta-during') metaAppended = true
+    if (boundary === 'appended-during') f.active.rows.push({ role: 'user', text: 'New approval constraint while summarizing', toolUses: [], handle: 'new' })
+    if (boundary === 'cancelled') f.controller.abort()
+  }
+  const result = await callbacks.get('session.compact')!(f.host, { trigger: 'manual', messages: rows }, f.next)
+  if (boundary === 'stable') {
+    expect(result.skip).toBeUndefined()
+    expect(result.messages?.[0].text).toContain('owned safe summary')
+    expect(result.messages?.at(-1)).toBe(rows.at(-1))
+    expect(JSON.stringify(f.requests[0].transcript)).toContain('Publication requires owner approval.')
+    expect(f.state.get('compaction-receipts')).toMatchObject({ entries: [{ status: 'prepared' }] })
+  } else {
+    expect(result.messages).toBeUndefined()
+    expect(result.skip).toContain('original transcript retained')
+    expect(f.requests).toHaveLength(['appended-during', 'api-meta-during', 'cancelled'].includes(boundary) ? 1 : 0)
+  }
+})
+
+test.each(['isMeta', 'isVirtual'] as const)('real compaction refuses an unprojected %s prefix constraint before requesting a summary', async flag => {
+  const f = await compactFixture()
+  const path = `/owned/hidden-${flag}.jsonl`
+  const rows = Array.from({ length: 4098 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', text: `owned ${i}`, toolUses: [], handle: `visible-${i}` }))
+  const visible = rows.map(row => ({ type: row.role, uuid: row.handle, sessionId: 'empty-session', isSidechain: false, message: { role: row.role, content: row.role === 'user' ? row.text : [{ type: 'text', text: row.text }] } }))
+  const constraint = { type: 'user', uuid: 'hidden-constraint', sessionId: 'empty-session', isSidechain: false, [flag]: true, message: { role: 'user', content: 'HIDDEN_APPROVAL: do not publish without approval.' } }
+  const persisted = [visible[0]!, constraint, ...visible.slice(1)].map((row, i, all) => ({ ...row, parentUuid: i ? all[i - 1]!.uuid : null }))
+  const api = visible.slice(-4096).map(row => ({ role: row.message.role, content: typeof row.message.content === 'string' ? [{ type: 'text', text: row.message.content }] : row.message.content }))
+  f.files.set(path, persisted.map(row => JSON.stringify(row)).join('\n') + '\n')
+  await callbacks.get('classic.SessionStart')!(f.host, { source: 'startup', transcript_path: path }, async () => ({}))
+  f.active.rows = rows
+  f.host.session.messages = async (args: any = {}) => args.as === 'api' ? api : rows.slice(-4096).map(({ handle, ...row }) => row)
+  expect(persisted).toHaveLength(4099)
+  expect(JSON.stringify(persisted)).toContain('HIDDEN_APPROVAL')
+  expect(JSON.stringify(rows)).not.toContain('HIDDEN_APPROVAL')
+  expect(JSON.stringify(api)).not.toContain('HIDDEN_APPROVAL')
+  const snapshot = JSON.stringify(persisted)
+  const result = await callbacks.get('session.compact')!(f.host, { trigger: 'manual', messages: rows }, f.next)
+  expect(result.messages).toBeUndefined()
+  expect(result.skip).toContain('unsupported meta or virtual context; original transcript retained')
+  expect(f.requests).toHaveLength(0)
+  expect(JSON.stringify(persisted)).toBe(snapshot)
+})
+
 test('repeat compaction compares the public history snapshot with the same public scope', async () => {
   for (const changed of [false, true]) {
     const f = await compactFixture()
@@ -395,6 +458,33 @@ test('repeat compaction compares the public history snapshot with the same publi
       expect(result.messages?.slice(1)).toEqual(f.rows.slice(2))
       expect(f.state.get('compaction-receipts')).toMatchObject({ entries: [{ status: 'prepared' }] })
     }
+  }
+})
+
+test.each(['lookup-only', 'changed-before', 'changed-during', 'cancelled', 'model-changed'] as const)('Agent lookup enrichment does not mask compaction invalidation: %s', async boundary => {
+  const f = await compactFixture()
+  const call = { tool_use_id: 'owned-agent-call', tool: 'Agent', input: { description: 'owned task' } }
+  const eventRows = f.rows.map((row, i) => ({ ...row, toolUses: i === 3 ? [call] : [] }))
+  let changed = boundary === 'changed-before'
+  let tracked = true
+  const messages = f.host.session.messages
+  f.host.session.messages = async (args: any = {}) => args.as === 'api' ? messages(args) : eventRows.map(({ handle, ...row }) => ({ ...row, toolUses: row.toolUses.map(tool => ({ ...tool, ...(tracked ? { agentId: 'tracked-child' } : {}), ...(changed ? { input: { description: 'new task' } } : {}) })) }))
+  f.active.afterProvider = () => {
+    tracked = false
+    if (boundary === 'changed-during') changed = true
+    if (boundary === 'cancelled') f.controller.abort()
+    if (boundary === 'model-changed') f.selection.model = 'codex/other'
+  }
+  const result = await callbacks.get('session.compact')!(f.host, { trigger: 'manual', messages: eventRows }, f.next)
+  if (boundary === 'lookup-only') {
+    expect(result.messages?.[0].text).toContain('owned safe summary')
+    expect(result.messages?.at(-1)).toBe(eventRows[3])
+    expect(f.state.get('compaction-receipts')).toMatchObject({ entries: [{ status: 'prepared' }] })
+  } else {
+    expect(result.messages).toBeUndefined()
+    expect(result.skip).toContain('original transcript retained')
+    expect(f.requests).toHaveLength(boundary === 'changed-before' ? 0 : 1)
+    if (boundary !== 'changed-before') expect(f.state.get('compaction-receipts')).toMatchObject({ entries: [{ status: 'aborted', reason: boundary === 'cancelled' ? 'cancelled' : 'stale-context' }] })
   }
 })
 

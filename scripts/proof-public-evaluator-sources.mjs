@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { spawn, spawnSync } from 'node:child_process'
 import { Script } from 'node:vm'
 import { fileURLToPath } from 'node:url'
+import { captureNativeChild } from './proof-native-child.mjs'
 
 const native = process.env.RICE_CLAUDE_EXECUTABLE || 'claude'
 const root = fileURLToPath(new URL('../', import.meta.url))
@@ -19,7 +20,8 @@ const command = 'require("node:fs").writeFileSync(process.argv[1],"OWNED_ENABLED
 new Script(command)
 const skillFrontmatter = { name: 'owned-inventory', description: 'Owned hook inventory fixture', hooks: { Stop: [{ hooks: [{ type: 'prompt', prompt: 'OWNED_SKILL_HOOK', once: true }] }] } }
 const sources = {
- observer: `import{createEvaluatorSources,registerEvaluatorSources}from'./evaluator-sources';const seen={plugins:[],skills:[],agents:[]};export const register=on=>{const inventory=createEvaluatorSources();registerEvaluatorSources(on,inventory);
+ observer: `import{createEvaluatorSources,registerEvaluatorSources}from'./evaluator-sources';const seen={plugins:[],skills:[],agents:[],deniedNetwork:[]};export const register=on=>{const inventory=createEvaluatorSources();registerEvaluatorSources(on,inventory);
+  on('http.fetch',async($,e,next)=>{const url=new URL(e.url);if(url.origin===${JSON.stringify(`http://127.0.0.1:${server.address().port}`)})return next(e);seen.deniedNetwork.push('nonloopback');return{value:{status:503,ok:false,headers:{},text:'Owned nonloopback request denied'}};}).catch(($,e,next)=>{seen.deniedNetwork.push('failed-closed');return{value:{status:503,ok:false,headers:{},text:'Owned network failed closed'}};});
   on('plugin.register',async($,e,next)=>{const result=await next(e);seen.plugins.push({name:e.name,root:e.root,provenance:e.provenance,events:e.uses.events,result});return result;});
   on('skill.prompt',async($,e,next)=>{const result=await next(e);const core=next.trace.find(row=>row.plugin==='engine'&&row.tier==='core'&&['returned','passed'].includes(row.outcome));seen.skills.push({skill:e.skill,path:e.path,source:e.source,frontmatter:e.frontmatter,coreInput:core?.received,origin:next.origin});return result;});
   on('agent.register',async($,e,next)=>{const result=await next(e);seen.agents.push({original:e,result,trace:next.trace.map(row=>({plugin:row.plugin,tier:row.tier,outcome:row.outcome,received:row.received,returned:row.returned}))});return result;});
@@ -30,7 +32,7 @@ const sources = {
  mixed: `export const register=on=>{on('turn.start',($,e,next)=>next(e));};`,
 }
 const env = Object.fromEntries(['PATH', 'LANG', 'TMPDIR', 'TEMP', 'TMP', 'SystemRoot', 'SystemDrive', 'ProgramFiles', 'ProgramFiles(x86)', 'CLAUDE_CODE_GIT_BASH_PATH'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]))
-Object.assign(env, { HOME: fixture, USERPROFILE: fixture, CLAUDE_CONFIG_DIR: config, ANTHROPIC_API_KEY: 'owned-no-account', ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.address().port}`, DISABLE_AUTOUPDATER: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' })
+Object.assign(env, { HOME: fixture, USERPROFILE: fixture, CLAUDE_CONFIG_DIR: config, CODEX_HOME: join(fixture, '.codex'), ANTHROPIC_API_KEY: 'owned-no-account', ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.address().port}`, DISABLE_AUTOUPDATER: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1' })
 let child
 function terminate() {
  if (!child || child.exitCode !== null || child.signalCode !== null) return
@@ -54,15 +56,13 @@ try {
  }
  child = spawn(native, ['-p', '--plugin-dir', observer, '--plugin-dir', rewrite, '--plugin-dir', driver, '--plugin-dir', classic, '--plugin-dir', mixed, '--setting-sources', 'user', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--tools', 'Skill', '--allowedTools', 'Skill', '--no-session-persistence', '--output-format', 'json', '--', 'Inspect owned source inventory.'], { env, cwd: fixture, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] })
  console.log(JSON.stringify({ phase: 'inventory-start', ownedPid: child.pid, preload: false }))
- let stdout = '', stderr = '', timedOut = false
- child.stdout.on('data', part => stdout += part); child.stderr.on('data', part => stderr += part)
- const timer = setTimeout(() => { timedOut = true; terminate() }, 15000)
- const code = await new Promise(resolve => child.once('close', resolve)); clearTimeout(timer)
+ const { code, timedOut, stdout, stderr } = await captureNativeChild(child, 15000, terminate)
  const output = JSON.parse(stdout), observed = existsSync(resultFile) ? JSON.parse(readFileSync(resultFile, 'utf8')) : undefined
  const receipt = { scope: 'Actual native registration and loaded skill metadata; production collector; source queries are data-only, no spawned evaluator or claim of complete hook inventory', code, timedOut, answer: output.result, requests, classicEnabled: existsSync(enabledMarker), observed, stderr }
  console.log(JSON.stringify(receipt))
  assert.equal(code, 0); assert.equal(timedOut, false); assert.equal(output.result, 'OWNED_INVENTORY'); assert.equal(requests.length, 0)
  assert.equal(receipt.classicEnabled, true)
+ assert.deepEqual(observed.deniedNetwork, [], 'the owned inventory attempted no nonloopback HTTP operation')
  assert.equal(observed.skills[0]?.frontmatter.hooks.Stop[0].hooks[0].prompt, 'OWNED_SKILL_HOOK')
  const registration = observed.agents.find(row => row.original.name === 'owned-source')
  assert.equal(registration.original.prompt, 'OWNED_ORIGINAL_PROMPT')

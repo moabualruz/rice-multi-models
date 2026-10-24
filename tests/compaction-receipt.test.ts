@@ -15,6 +15,18 @@ test('only observed exact prepared context confirms installation; handles are no
   expect(await historyDigest(active)).toBe(await historyDigest(active.map(({ handle, ...rest }: any) => rest)))
 })
 
+test('runtime Agent lookup is not transcript identity, but tool payload and stored identity remain protected', async () => {
+  const call = { tool_use_id: 'owned-call', tool: 'Agent', input: { agentId: 'requested-child' }, result: { agentId: 'stored-child' }, text: 'owned result' }
+  const event = [{ role: 'assistant' as const, text: '', toolUses: [call] }]
+  const publicRows = [{ ...event[0]!, toolUses: [{ ...call, agentId: 'tracked-child' }] }]
+  const digest = await historyDigest(event)
+  expect(await historyDigest(publicRows)).toBe(digest)
+  for (const change of [
+    { tool_use_id: 'other-call' }, { tool: 'Read' }, { input: { agentId: 'other-request' } },
+    { result: { agentId: 'other-stored-child' } }, { text: 'new result' }, { isError: true as const },
+  ]) expect(await historyDigest([{ ...event[0]!, toolUses: [{ ...call, ...change }] }])).not.toBe(digest)
+})
+
 test('precompute preparation is not installation; stale, cancelled, expired, session and model changes cannot confirm', async () => {
   const receipt = await prepared('precompute')
   expect(await observedReceipt(receipt, [row('old')], 'owned-session', 'owned/exact', 20)).toBe(receipt)
