@@ -250,23 +250,37 @@ let nativeEnvSync = Promise.resolve()
  * `restore` puts back the original value it found.
  */
 async function syncNativeEnv($: EngineInterface, restore = false): Promise<void> {
-  const desired: Record<string, string> = restore || !runtime.executable || runtime.error ? {} : nativeModelEnv(catalogue)
+  const desired: Record<string, string> = restore || !runtime.executable || runtime.error ? {} : nativeModelEnv(catalogue, aliasTargets())
   const sync = nativeEnvSync.then(async () => {
     const ref = { plugin: 'rice-multi-models', key: 'nativeEnv' } as const
-    const held = { ...((await $.state.get(ref)).value ?? {}) }
+    const stored = (await $.state.get(ref)).value ?? {}
+    const held = { ...stored }
     // Claude lists the variables a module touches, so each is named literally.
     const readEnv = (name: NativeEnvName) => name === 'CLAUDE_CODE_MAX_CONTEXT_TOKENS' ? $.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS') : $.env.get('CLAUDE_CODE_MODEL_CAPABILITIES')
     const writeEnv = (name: NativeEnvName, value: string | undefined) => name === 'CLAUDE_CODE_MAX_CONTEXT_TOKENS' ? $.env.set('CLAUDE_CODE_MAX_CONTEXT_TOKENS', value) : $.env.set('CLAUDE_CODE_MODEL_CAPABILITIES', value)
-    for (const name of NATIVE_ENV_NAMES) {
-      const current = await readEnv(name) ?? null
-      const entry = held[name] ?? { original: current, applied: null, relinquished: false }
-      if (entry.relinquished || entry.original !== null) { held[name] = entry; continue }
-      if (current !== (entry.applied ?? entry.original)) { held[name] = { ...entry, applied: null, relinquished: true }; continue }
-      const want = desired[name] ?? entry.original
-      if (want !== current) await writeEnv(name, want ?? undefined)
-      held[name] = { ...entry, applied: want }
+    // The value found is recorded before any change, so a value the mod sets always has its owner record.
+    for (const name of NATIVE_ENV_NAMES) held[name] ??= { original: await readEnv(name) ?? null, applied: null, relinquished: false }
+    if (NATIVE_ENV_NAMES.some(name => stored[name] === undefined)) await $.state.set(ref, held)
+    const written: { name: NativeEnvName; previous: string | null; value: string | null }[] = []
+    try {
+      for (const name of NATIVE_ENV_NAMES) {
+        const current = await readEnv(name) ?? null
+        const entry = held[name]!
+        if (entry.relinquished || entry.original !== null) continue
+        if (current !== (entry.applied ?? entry.original)) { held[name] = { ...entry, applied: null, relinquished: true }; continue }
+        const want = desired[name] ?? entry.original
+        if (want !== current) {
+          await writeEnv(name, want ?? undefined)
+          written.push({ name, previous: current, value: want })
+        }
+        held[name] = { ...entry, applied: want }
+      }
+      await $.state.set(ref, held)
+    } catch (error) {
+      // A sync that cannot finish puts back what it changed, so the recorded state stays true.
+      for (const { name, previous, value } of written.reverse()) if ((await readEnv(name) ?? null) === value) await writeEnv(name, previous ?? undefined)
+      throw error
     }
-    await $.state.set(ref, held)
   })
   nativeEnvSync = sync.catch(() => { $.ui.log(`${PLUGIN}: native model environment unavailable`, { to: 'debug' }) })
   await nativeEnvSync
@@ -284,8 +298,16 @@ async function refreshCapacity(port: EvaluatorCapacityPort): Promise<void> {
 }
 
 async function ensureFreshCapacity($: EngineInterface): Promise<void> {
+  const before = catalogue
   await refreshCapacity({ now: await $.clock.now(), helper: helperFile($.plugin.root), approved: [...await approvedSet($)], run: (argv, options) => $.process.run(argv, options) })
+  // A refresh that ran discovery gives Claude its per-model settings before the environment's largest window.
+  if (catalogue !== before) await syncPicker($, runtime, routedRows())
   await syncNativeEnv($)
+}
+
+/** Each configured alias and the `provider/model` it names, so the alias id carries its target's native data. */
+function aliasTargets(): Record<string, string> {
+  return Object.fromEntries(Object.entries(loaded.config?.aliases ?? {}).map(([name, alias]) => [name, alias.target]))
 }
 
 /** Engine calls stay in this module; imported setup logic receives plain values and callable ports. */
@@ -299,7 +321,7 @@ async function detectRuntime($: EngineInterface): Promise<Runtime> {
 }
 
 async function syncPicker($: EngineInterface, current: Runtime, rows: PickerRow[]): Promise<PickerResult> {
-  return synchronizePicker({ helper: helperFile($.plugin.root), run: (argv, options) => $.process.run(argv, options) }, current, rows, nativeModelSettings(catalogue))
+  return synchronizePicker({ helper: helperFile($.plugin.root), run: (argv, options) => $.process.run(argv, options) }, current, rows, nativeModelSettings(catalogue, aliasTargets()))
 }
 
 async function startupNotice($: EngineInterface, interactive: boolean, current: Runtime, picker: PickerResult | undefined, rows: PickerRow[], defaultModel: string | undefined, catalogueSummary?: string, capabilities?: string): Promise<void> {

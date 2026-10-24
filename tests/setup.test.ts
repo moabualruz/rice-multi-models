@@ -78,6 +78,10 @@ test('catalogue data maps to Claude\'s native per-model fields and leaves unknow
     CLAUDE_CODE_MODEL_CAPABILITIES: 'codex/gpt-6.1-sol=effort,xhigh_effort,-max_effort;local/qwen=effort,-xhigh_effort,-max_effort;local/plain=-effort',
   })
   expect(nativeModelEnv({ models: [], providers: [] })).toEqual({})
+  // An alias is a model id of its own to Claude: it carries its target's fields, and nothing when its target has none.
+  const aliases = { preferred: 'local/qwen', quiet: 'local/unknown' }
+  expect(nativeModelSettings(catalogue, aliases)).toEqual({ 'codex/gpt-6.1-sol': { autoCompactWindow: 500000 }, 'local/qwen': { maxEffortLevel: 'high' }, preferred: { maxEffortLevel: 'high' } })
+  expect(nativeModelEnv(catalogue, aliases).CLAUDE_CODE_MODEL_CAPABILITIES).toBe('codex/gpt-6.1-sol=effort,xhigh_effort,-max_effort;local/qwen=effort,-xhigh_effort,-max_effort;local/plain=-effort;preferred=effort,-xhigh_effort,-max_effort')
 })
 
 test('picker sync never adds an empty picker block to settings that had none', async () => temporary(async configDir => {

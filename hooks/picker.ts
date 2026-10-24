@@ -16,8 +16,17 @@ export type NativeModelSettings = { autoCompactWindow?: number; maxEffortLevel?:
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 const windowOf = (value: number | null) => value !== null && Number.isSafeInteger(value) && value > 0 ? value : undefined
 
+/** Configured aliases and the `provider/model` each names: Claude sees an alias as its own model id. */
+export type AliasTargets = Readonly<Record<string, string>>
+
+/** Each alias whose target has data, under the alias id too. */
+function withAliases<T>(byModel: Record<string, T>, aliases: AliasTargets): Record<string, T> {
+  for (const [alias, target] of Object.entries(aliases)) if (Object.hasOwn(byModel, target)) byModel[alias] = byModel[target]!
+  return byModel
+}
+
 /** Each model's real window as its compaction window (Claude's range is 100000 to 1000000), and its top effort when it caps below xhigh. */
-export function nativeModelSettings(catalogue: ModelCatalogue): Record<string, NativeModelSettings> {
+export function nativeModelSettings(catalogue: ModelCatalogue, aliases: AliasTargets = {}): Record<string, NativeModelSettings> {
   const settings: Record<string, NativeModelSettings> = {}
   for (const { model, metadata } of catalogue.models) {
     const window = windowOf(metadata.contextWindow)
@@ -28,7 +37,7 @@ export function nativeModelSettings(catalogue: ModelCatalogue): Record<string, N
     }
     if (Object.keys(entry).length) settings[model] = entry
   }
-  return settings
+  return withAliases(settings, aliases)
 }
 
 /**
@@ -36,13 +45,14 @@ export function nativeModelSettings(catalogue: ModelCatalogue): Record<string, N
  * `autoCompactWindow` then lowers to its real size, and each model's effort levels in Claude's capability syntax.
  * Unknown data adds nothing, so Claude's native defaults stay.
  */
-export function nativeModelEnv(catalogue: ModelCatalogue): Record<string, string> {
+export function nativeModelEnv(catalogue: ModelCatalogue, aliases: AliasTargets = {}): Record<string, string> {
   const windows = catalogue.models.flatMap(({ metadata }) => windowOf(metadata.contextWindow) ?? [])
-  const capabilities = catalogue.models.flatMap(({ model, metadata }) => {
+  const byModel: Record<string, string> = {}
+  for (const { model, metadata } of catalogue.models) {
     const efforts = metadata.reasoningEfforts
-    if (efforts === null) return []
-    return [`${model}=${efforts.length === 0 ? '-effort' : ['effort', efforts.includes('xhigh') ? 'xhigh_effort' : '-xhigh_effort', efforts.includes('max') ? 'max_effort' : '-max_effort'].join(',')}`]
-  })
+    if (efforts !== null) byModel[model] = efforts.length === 0 ? '-effort' : ['effort', efforts.includes('xhigh') ? 'xhigh_effort' : '-xhigh_effort', efforts.includes('max') ? 'max_effort' : '-max_effort'].join(',')
+  }
+  const capabilities = Object.entries(withAliases(byModel, aliases)).map(([model, value]) => `${model}=${value}`)
   return {
     ...(windows.length ? { CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(Math.max(...windows)) } : {}),
     ...(capabilities.length ? { CLAUDE_CODE_MODEL_CAPABILITIES: capabilities.join(';') } : {}),

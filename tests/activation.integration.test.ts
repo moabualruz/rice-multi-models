@@ -1064,17 +1064,70 @@ test('refresh, switches, repeated startup and session end keep an owner value an
   }
 })
 
-test('an alias resolves to its exact model for status, and every catalogued window feeds the native fields', async () => {
+test('an alias resolves to its exact model for status and carries its target\'s native fields under its own id', async () => {
   const f = contextFixture()
   f.files.set('/empty-home/.claude/rice-multi-models.json', JSON.stringify({ providers: { fixture: { kind: 'openai', baseUrl: 'https://fixture.invalid/v1', auth: 'none', models: { fresh: { contextWindow: 128000, maxOutputTokens: 4096 } } } }, aliases: { preferred: 'fixture/fresh' } }))
   f.selection.model = 'preferred'
   f.discovery.catalogue.models[0]!.model = 'fixture/fresh'
+  f.discovery.catalogue.models[0]!.metadata.reasoningEfforts = ['low', 'high']
   f.discovery.catalogue.providers[0]!.provider = 'fixture'
   await startContext(f)
   const report = await callbacks.get('command.run')!(f.host, { args: 'status' })
   expect(report.text).toContain('Primary context (preferred): active context 500000')
   expect(f.contextWrites.map((write: any) => write.value)).toEqual(['500000'])
-  expect(f.syncs.at(-1).modelSettings).toEqual({ 'fixture/fresh': { autoCompactWindow: 500000 } })
+  // Claude sees the alias as its own model id, so it gets the target's window and efforts too.
+  const fields = { autoCompactWindow: 500000, maxEffortLevel: 'high' }
+  expect(f.syncs.at(-1).modelSettings).toEqual({ 'fixture/fresh': fields, preferred: fields })
+  expect(f.env.get('CLAUDE_CODE_MODEL_CAPABILITIES')).toBe('fixture/fresh=effort,-xhigh_effort,-max_effort;preferred=effort,-xhigh_effort,-max_effort')
+})
+
+test('an automatic catalogue refresh gives Claude the new per-model settings with the new environment', async () => {
+  const f = contextFixture()
+  let now = 1_800_000_000_000
+  f.host.clock.now = async () => now
+  f.discovery.unavailable = true
+  await startContext(f)
+  expect(f.env.has('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(false)
+  expect(f.syncs.at(-1).modelSettings).toEqual({})
+  now += 6 * 60_000
+  f.discovery.unavailable = false
+  f.discovery.catalogue.models[0]!.observedAt = now
+  f.host.process.spawn = async function* () {
+    yield { stream: 'stdout', text: JSON.stringify({ type: 'text', text: 'owned reply' }) + '\n' + JSON.stringify({ type: 'stop', reason: 'end_turn' }) + '\n' }
+    return { code: 0 }
+  }
+  const native = async () => { throw new Error('no native fallback') }
+  expect((await callbacks.get('model.complete')!(f.host, { model: 'codex/fresh', prompt: 'after the refresh' }, native)).value.isAnswered).toBe(true)
+  expect(f.discoveries).toHaveLength(2)
+  expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('500000')
+  expect(f.syncs.at(-1).modelSettings).toEqual({ 'codex/fresh': { autoCompactWindow: 500000 } })
+})
+
+test('a native environment sync that cannot finish puts back what it changed and keeps the original for session end', async () => {
+  for (const failure of ['persist', 'write'] as const) {
+    const f = contextFixture()
+    f.discovery.catalogue.models[0]!.metadata.reasoningEfforts = ['low', 'high']
+    if (failure === 'persist') {
+      const set = f.host.state.set
+      f.host.state.set = async (ref: { key: string }, value: any) => {
+        if (ref.key === 'nativeEnv' && value.CLAUDE_CODE_MAX_CONTEXT_TOKENS?.applied) throw new Error('fixture ownership persistence failure')
+        return set(ref, value)
+      }
+    } else {
+      const set = f.host.env.set
+      f.host.env.set = async (key: string, value: string | undefined) => {
+        if (key === 'CLAUDE_CODE_MODEL_CAPABILITIES') throw new Error('fixture environment write denied')
+        return set(key, value)
+      }
+    }
+    expect(await startContext(f)).toEqual({ started: true })
+    expect(f.env.has('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(false)
+    expect(f.env.has('CLAUDE_CODE_MODEL_CAPABILITIES')).toBe(false)
+    expect(f.state.get('nativeEnv')).toMatchObject({ CLAUDE_CODE_MAX_CONTEXT_TOKENS: { original: null, applied: null, relinquished: false } })
+    await callbacks.get('session.end')!(f.host, {}, async () => ({}))
+    expect(f.env.has('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(false)
+    expect(f.env.has('CLAUDE_CODE_MODEL_CAPABILITIES')).toBe(false)
+  }
 })
 
 test('unknown bounds, unavailable discovery and runtime failure never mutate native context', async () => {
