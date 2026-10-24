@@ -291,6 +291,11 @@ export async function definitionOf(io: PromptsPort, s: Session, type: string | u
   return 'error' in found ? undefined : found.def
 }
 
+// The model an agent type's own definition names: its readable definition's, else a built-in type's own.
+export function definedModel(type: string, def: AgentDef | undefined): string | undefined {
+  return def?.model ?? (def === undefined && BUILTIN_AGENTS.includes(type) ? own(BUILTIN_MODELS, type) : undefined)
+}
+
 // Whether styx may run an agent type on a styx route, and whether its definition isolates it; else why not. Every
 // route to a subagent on a styx model asks this, the plain Agent call under a routed parent (inherit.ts) and the
 // styx agent tool alike, so the same call is answered the same from any conversation.
@@ -323,7 +328,7 @@ export async function claimable(io: PromptsPort, s: Session, type: string, fate:
     io.debug(`styx inherit: ${type} has no readable definition; ${fate}`)
     return { no: 'has no readable definition' }
   }
-  const model = def?.model ?? (builtin && def === undefined ? own(BUILTIN_MODELS, type) : undefined)
+  const model = definedModel(type, def)
   if (!named && model !== undefined && model.trim().toLowerCase() !== INHERIT) return { no: 'names a model of its own' }
   // A named spawn of a custom type with no definition runs general-purpose whatever files name it.
   if (!(named && !builtin && def === undefined) && (await contested(io, s, type))) {

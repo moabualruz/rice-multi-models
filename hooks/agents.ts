@@ -31,9 +31,17 @@ const AGENT_ALLOWED: Readonly<Record<string, readonly string[]>> = {
   'web-fetch': ['WebFetch'],
 }
 
-// The model a built-in agent type's own definition sets on 2.1.292 (every other built-in type inherits its
-// parent's): a subagent of one runs on it, whatever the parent runs on.
-export const BUILTIN_MODELS: Readonly<Record<string, string>> = { 'statusline-setup': 'sonnet', 'claude-code-guide': 'haiku' }
+// The model a built-in agent type's own definition sets on 2.1.310 (general-purpose and claude set none): a
+// subagent of one runs on it, whatever the parent runs on, and "inherit" runs it on its parent's model before
+// CLAUDE_CODE_SUBAGENT_MODEL is read. web-fetch's is chosen at run time, haiku or else inherit.
+export const BUILTIN_MODELS: Readonly<Record<string, string>> = {
+  'statusline-setup': 'sonnet',
+  'claude-code-guide': 'haiku',
+  Explore: 'inherit',
+  Plan: 'inherit',
+  'web-fetch': 'inherit',
+  'comment-thread-analyst': 'inherit',
+}
 
 // The main conversation's own tools, which no native subagent is given: asking the person, plan mode, the
 // session's task list and schedule, and messages to the person.
