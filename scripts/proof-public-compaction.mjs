@@ -6,6 +6,9 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { waitForNativeProofCapacity } from './native-proof-load.mjs'
+
+if (!(await waitForNativeProofCapacity())) process.exit(1)
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const fixture = mkdtempSync(join(tmpdir(), 'rice-public-compact-'))
@@ -132,10 +135,13 @@ try {
     child.stdout.on('data', bytes => stdout += bytes); child.stderr.on('data', bytes => stderr += bytes)
     const diagnostics = { label, startedAt, output: () => ({ stdout, stderr }) }
     activeRun = diagnostics
-    const timer = setTimeout(() => { expired = true; terminate(diagnostics) }, 30000)
+    const timer = setTimeout(() => {
+      expired = true
+      reportDeadline(label, startedAt, stdout, stderr)
+      terminate(diagnostics)
+    }, 30000)
     const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve) }); clearTimeout(timer)
     mergeWireRecords()
-    if (expired) reportDeadline(label, startedAt, stdout, stderr)
     if (activeRun === diagnostics) activeRun = undefined
     assert.equal(expired, false, label + ' deadline')
     assert.equal(code, 0, label + ': ' + (stdout + stderr).slice(-2000))
