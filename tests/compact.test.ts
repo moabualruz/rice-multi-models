@@ -76,6 +76,36 @@ test('persisted context uses event UUID order and native API normalization, neve
   ] as const) expect(() => persistedCompactSource(source, messages, session, suffix)).toThrow(reason)
 })
 
+test.each(['isMeta', 'isVirtual'] as const)('persisted context refuses an unprojected %s constraint outside the API suffix', flag => {
+  const event = Array.from({ length: 4098 }, (_, i) => row(i % 2 ? 'assistant' : 'user', `owned ${i}`, `visible-${i}`))
+  const visible = event.map(message => ({ type: message.role, uuid: message.handle, sessionId: 'owned', isSidechain: false, message: { role: message.role, content: message.role === 'user' ? message.text : [{ type: 'text', text: message.text }] } }))
+  const constraint = { type: 'user', uuid: 'hidden-constraint', sessionId: 'owned', isSidechain: false, [flag]: true, message: { role: 'user', content: 'HIDDEN_APPROVAL: do not publish without approval.' } }
+  const records = [visible[0]!, constraint, ...visible.slice(1)].map((record, i, all) => ({ ...record, parentUuid: i ? all[i - 1]!.uuid : null }))
+  const api = visible.slice(-4096).map(record => ({ role: record.message.role, content: typeof record.message.content === 'string' ? [{ type: 'text', text: record.message.content }] : record.message.content }))
+  const jsonl = (rows: unknown[]) => rows.map(record => JSON.stringify(record)).join('\n') + '\n'
+  expect(event).toHaveLength(4098)
+  expect(JSON.stringify(event)).not.toContain('HIDDEN_APPROVAL')
+  expect(JSON.stringify(api)).not.toContain('HIDDEN_APPROVAL')
+  expect(JSON.stringify(records)).toContain('HIDDEN_APPROVAL')
+  const control = persistedCompactSource(jsonl(visible), event, 'owned', api)
+  expect(control).toHaveLength(4098)
+  expect(control.at(-1)).toBe(api.at(-1))
+  expect(() => persistedCompactSource(jsonl(records), event, 'owned', api)).toThrow('unsupported meta or virtual context')
+})
+
+test.each(['isMeta', 'isVirtual'] as const)('unmatched %s flags on another session or non-context records do not change event authority', flag => {
+  const event = [row('user', 'Approval required.', 'a'), row('assistant', 'Pending.', 'b')]
+  const records = event.map(message => ({ type: message.role, uuid: message.handle, sessionId: 'owned', message: { role: message.role, content: message.text } }))
+  const ignored = [
+    { type: 'user', uuid: 'other-session', sessionId: 'other', [flag]: true, message: { role: 'user', content: 'Other session context.' } },
+    { type: 'queue-operation', sessionId: 'owned', operation: 'enqueue', [flag]: true, content: 'Queued, not contextual.' },
+    { type: 'progress', uuid: 'progress', sessionId: 'owned', [flag]: true, data: { type: 'hook_progress' } },
+  ]
+  const api = [{ role: 'assistant' as const, content: [{ type: 'text' as const, text: 'Pending.' }] }]
+  const jsonl = [...ignored, ...records].map(record => JSON.stringify(record)).join('\n') + '\n'
+  expect(persistedCompactSource(jsonl, event, 'owned', api)).toEqual([{ role: 'user', content: [{ type: 'text', text: 'Approval required.' }] }, ...api])
+})
+
 const cappedToolSource = () => {
   const readInput = { file_path: '/owned/task.ts' }, readResult = { type: 'text', file: { content: 'approval pending' } }
   const agentInput = { description: 'Check approval', prompt: 'Inspect the owned task', subagent_type: 'general-purpose' }

@@ -68,6 +68,7 @@ export function retainedTail(messages: readonly CompactMessage[], limits: Compac
  * complete order and each native UUID. Disk is context only; the caller still owns
  * cancellation, current public/API snapshots and model checks. Only plain text and
  * completed native tool exchanges are supported, with exact event/suffix agreement.
+ * Same-session meta/virtual context is unsupported, even when potentially archived.
  */
 export function persistedCompactSource(jsonl: string, messages: readonly CompactMessage[], session: string, api: readonly ApiMessage[]): ApiMessage[] {
   const fail = (reason: string): never => { throw new Error(`persisted compaction context ${reason}`) }
@@ -109,6 +110,8 @@ export function persistedCompactSource(jsonl: string, messages: readonly Compact
     try { row = object(JSON.parse(line)) } catch { return fail('contains an unreadable or partial row') }
     if (!row) return fail('contains an unsupported record')
     if (row.type === 'content-replacement' && row.sessionId === session) return fail('has unsupported content replacements')
+    // Native projection can omit contextual rows. Missing UUIDs cannot prove them inactive.
+    if (row.sessionId === session && (row.type === 'user' || row.type === 'assistant') && (row.isMeta === true || row.isVirtual === true)) return fail('has unsupported meta or virtual context')
     if (typeof row.uuid !== 'string' || !handles.has(row.uuid)) continue
     const previous = records.get(row.uuid)
     if (previous && JSON.stringify(previous) !== JSON.stringify(row)) return fail('has conflicting records for an event UUID')

@@ -419,6 +419,30 @@ test.each(['stable', 'appended-during', 'api-meta-during', 'cancelled', 'missing
   }
 })
 
+test.each(['isMeta', 'isVirtual'] as const)('real compaction refuses an unprojected %s prefix constraint before requesting a summary', async flag => {
+  const f = await compactFixture()
+  const path = `/owned/hidden-${flag}.jsonl`
+  const rows = Array.from({ length: 4098 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', text: `owned ${i}`, toolUses: [], handle: `visible-${i}` }))
+  const visible = rows.map(row => ({ type: row.role, uuid: row.handle, sessionId: 'empty-session', isSidechain: false, message: { role: row.role, content: row.role === 'user' ? row.text : [{ type: 'text', text: row.text }] } }))
+  const constraint = { type: 'user', uuid: 'hidden-constraint', sessionId: 'empty-session', isSidechain: false, [flag]: true, message: { role: 'user', content: 'HIDDEN_APPROVAL: do not publish without approval.' } }
+  const persisted = [visible[0]!, constraint, ...visible.slice(1)].map((row, i, all) => ({ ...row, parentUuid: i ? all[i - 1]!.uuid : null }))
+  const api = visible.slice(-4096).map(row => ({ role: row.message.role, content: typeof row.message.content === 'string' ? [{ type: 'text', text: row.message.content }] : row.message.content }))
+  f.files.set(path, persisted.map(row => JSON.stringify(row)).join('\n') + '\n')
+  await callbacks.get('classic.SessionStart')!(f.host, { source: 'startup', transcript_path: path }, async () => ({}))
+  f.active.rows = rows
+  f.host.session.messages = async (args: any = {}) => args.as === 'api' ? api : rows.slice(-4096).map(({ handle, ...row }) => row)
+  expect(persisted).toHaveLength(4099)
+  expect(JSON.stringify(persisted)).toContain('HIDDEN_APPROVAL')
+  expect(JSON.stringify(rows)).not.toContain('HIDDEN_APPROVAL')
+  expect(JSON.stringify(api)).not.toContain('HIDDEN_APPROVAL')
+  const snapshot = JSON.stringify(persisted)
+  const result = await callbacks.get('session.compact')!(f.host, { trigger: 'manual', messages: rows }, f.next)
+  expect(result.messages).toBeUndefined()
+  expect(result.skip).toContain('unsupported meta or virtual context; original transcript retained')
+  expect(f.requests).toHaveLength(0)
+  expect(JSON.stringify(persisted)).toBe(snapshot)
+})
+
 test('repeat compaction compares the public history snapshot with the same public scope', async () => {
   for (const changed of [false, true]) {
     const f = await compactFixture()
