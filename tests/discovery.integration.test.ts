@@ -966,6 +966,10 @@ test('an inherited child is labelled with the model Claude resolves for it, in C
     const configured = await spawn('opus', 'general-purpose')
     expect(configured.received.description).toBe('owned spawn (haiku)')
     expect(configured.received.model).toBeUndefined()
+    // A built-in type's own model is its definition's, before the variable (statusline-setup runs on sonnet).
+    const builtin = await spawn('opus', 'statusline-setup')
+    expect(builtin.received.description).toBe('owned spawn (sonnet)')
+    expect(builtin.received.model).toBeUndefined()
     // A definition's own "inherit" decides before the variable, as the parent's model.
     const name = 'inheriting-review'
     const directory = `${root}/fixture-${name}/.claude/agents`

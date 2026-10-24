@@ -42,7 +42,7 @@ import type { FamilyLine } from './discovery'
 import type { CandidateRoute } from './discovery'
 import { approvalQuestion, CONFIG_FILE, emptyLoaded, loadText, providerLines, remoteOf, TRUST_PREFIX } from './providers'
 import type { Loaded, Remote } from './providers'
-import { contested, definitionOf, rewriteMain, systemFor, withIdentity } from './prompts'
+import { contested, definedModel, definitionOf, rewriteMain, systemFor, withIdentity } from './prompts'
 import type { PromptsPort } from './prompts'
 import { splitTarget } from './protocol'
 import type { ApiMessage, Effort, Limits, RemoteTool, StepRequest, StepWire, Transport } from './protocol'
@@ -1718,7 +1718,7 @@ export const register: Register = on => {
     // Every subagent row is labelled with the model Claude will run it on, in Claude's own order: the Agent
     // call's model, the agent definition's, CLAUDE_CODE_SUBAGENT_MODEL, then the parent's (a fork's always).
     // As in Claude, the first one present decides, and "inherit" there (or an empty variable) is the parent's.
-    const chosen = e.fork ? undefined : decision.model ?? e.model ?? definition?.model ?? (await $.env.get('CLAUDE_CODE_SUBAGENT_MODEL') || undefined)
+    const chosen = e.fork ? undefined : decision.model ?? e.model ?? definedModel(e.subagentType, definition) ?? (await $.env.get('CLAUDE_CODE_SUBAGENT_MODEL') || undefined)
     const resolved = chosen === undefined || chosen === 'inherit' ? parentModel : chosen
     const effort = e.fork ? parentEffort : resolved && isRouted(resolved) ? (routedEffort(resolved, pending?.effort ?? definition?.effort, (await read($, prefsAtom)).effort) ?? parentEffort) : pending?.effort ?? definition?.effort ?? parentEffort
     const restored = { ...e, description: resolved === undefined ? description.text : agentLabel(description.text, resolved, effort) }
