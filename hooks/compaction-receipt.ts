@@ -9,7 +9,9 @@ export const compactOwner = (agentId?: string) => agentId === undefined ? 'main'
 export async function historyDigest(messages: readonly CompactMessage[]): Promise<string> {
   const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical)
     : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, canonical(item)])) : value
-  const rows = messages.map(({ role, text, toolUses, toolResults }) => ({ role, text, toolUses, ...(toolResults?.length ? { toolResults } : {}) }))
+  // Public reads enrich Agent calls from the live task registry; compact events do not.
+  // Only that lookup is non-transcript identity. Stored result/input identities still count.
+  const rows = messages.map(({ role, text, toolUses, toolResults }) => ({ role, text, toolUses: toolUses.map(({ agentId, ...tool }) => tool), ...(toolResults?.length ? { toolResults } : {}) }))
   const bytes = await crypto.subtle.digest('SHA-256', new Uint8Array(new TextEncoder().encode(JSON.stringify(canonical(rows)))))
   return Array.from(new Uint8Array(bytes), byte => byte.toString(16).padStart(2, '0')).join('')
 }

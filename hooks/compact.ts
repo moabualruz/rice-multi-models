@@ -4,7 +4,7 @@ import type { ApiMessage } from './protocol'
 export type CompactMessage = {
   role: 'user' | 'assistant'
   text: string
-  toolUses: { tool_use_id: string; tool: string; input: Record<string, unknown>; result?: unknown; text?: string; isError?: true }[]
+  toolUses: { tool_use_id: string; tool: string; input: Record<string, unknown>; result?: unknown; text?: string; isError?: true; agentId?: string }[]
   toolResults?: { tool_use_id: string; text: string; result?: unknown; isError: boolean }[]
   handle?: string
 }

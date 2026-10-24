@@ -398,6 +398,33 @@ test('repeat compaction compares the public history snapshot with the same publi
   }
 })
 
+test.each(['lookup-only', 'changed-before', 'changed-during', 'cancelled', 'model-changed'] as const)('Agent lookup enrichment does not mask compaction invalidation: %s', async boundary => {
+  const f = await compactFixture()
+  const call = { tool_use_id: 'owned-agent-call', tool: 'Agent', input: { description: 'owned task' } }
+  const eventRows = f.rows.map((row, i) => ({ ...row, toolUses: i === 3 ? [call] : [] }))
+  let changed = boundary === 'changed-before'
+  let tracked = true
+  const messages = f.host.session.messages
+  f.host.session.messages = async (args: any = {}) => args.as === 'api' ? messages(args) : eventRows.map(({ handle, ...row }) => ({ ...row, toolUses: row.toolUses.map(tool => ({ ...tool, ...(tracked ? { agentId: 'tracked-child' } : {}), ...(changed ? { input: { description: 'new task' } } : {}) })) }))
+  f.active.afterProvider = () => {
+    tracked = false
+    if (boundary === 'changed-during') changed = true
+    if (boundary === 'cancelled') f.controller.abort()
+    if (boundary === 'model-changed') f.selection.model = 'codex/other'
+  }
+  const result = await callbacks.get('session.compact')!(f.host, { trigger: 'manual', messages: eventRows }, f.next)
+  if (boundary === 'lookup-only') {
+    expect(result.messages?.[0].text).toContain('owned safe summary')
+    expect(result.messages?.at(-1)).toBe(eventRows[3])
+    expect(f.state.get('compaction-receipts')).toMatchObject({ entries: [{ status: 'prepared' }] })
+  } else {
+    expect(result.messages).toBeUndefined()
+    expect(result.skip).toContain('original transcript retained')
+    expect(f.requests).toHaveLength(boundary === 'changed-before' ? 0 : 1)
+    if (boundary !== 'changed-before') expect(f.state.get('compaction-receipts')).toMatchObject({ entries: [{ status: 'aborted', reason: boundary === 'cancelled' ? 'cancelled' : 'stale-context' }] })
+  }
+})
+
 test('a compact event already superseded before the public snapshot is read is refused', async () => {
   const f = await compactFixture()
   f.active.rows = [...f.rows, { role: 'user', text: 'new goal before preparation', toolUses: [] }]
