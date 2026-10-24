@@ -3,16 +3,21 @@
 // Modified by Mo Abualruz: failure texts name rice-multi-models; mintToolId comes from ./protocol.
 // A routed step's events as the engine's turn.step chunks: block indexes, coalesced deltas, tool calls,
 // and the end, which is one stop carrying usage. A failed request has a null stop reason,
-// never fabricated assistant text or a tool call. Pure.
+// no executable tool call, and for children an explicitly labelled runtime failure diagnostic. Pure.
 import type { TurnStepChunk, TurnStepToolUse, TurnUsage } from 'claude-code'
 
 import { mintToolId } from './protocol'
-import type { StepEvent, StopReason } from './protocol'
+import type { StepError, StepEvent, StopReason } from './protocol'
+import { redact } from './redact'
 
-type Failure = { kind: 'request' | 'response'; text: string }
+/** A runtime diagnostic, not a successful model answer or a fabricated compaction summary. */
+function childFailure(model: string, error: StepError): string {
+  const bounded = (text: string, max: number) => redact(text.slice(0, max * 4)).replace(/[\p{Cc}\p{Cf}]+/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, max)
+  return `rice-multi-models: child request failed [${error.cause ?? `${error.kind}_failed`}] on ${bounded(model, 200)}${error.status === undefined ? '' : ` (HTTP ${error.status})`}. ${bounded(error.text, 700)} No plugin recovery was attempted; existing transcript retained.`
+}
 // The step's end: its last chunks (the stop among them, last), what it answered, and the failure text when
 // it failed.
-type StepEnd = { chunks: TurnStepChunk[]; answer: string; toolUses: TurnStepToolUse[]; stopReason: StopReason | null; usage: TurnUsage | null; failure?: string; delivered?: true }
+type StepEnd = { chunks: TurnStepChunk[]; answer: string; toolUses: TurnStepToolUse[]; stopReason: StopReason | null; usage: TurnUsage | null; failure?: string; error?: StepError; diagnostic?: string; delivered?: true }
 
 export { coalesce } from './coalesce'
 
@@ -26,7 +31,7 @@ export function createAssembler(usageModel: string) {
   const toolUses: TurnStepToolUse[] = []
   let usage: TurnUsage | null = null
   let reason: StopReason | undefined
-  let failure: Failure | undefined
+  let failure: StepError | undefined
 
   return {
     feed(ev: StepEvent): TurnStepChunk[] {
@@ -47,16 +52,16 @@ export function createAssembler(usageModel: string) {
       }
       if (ev.type === 'usage') usage = { input_tokens: ev.in, output_tokens: ev.out, cache_read_input_tokens: ev.cacheRead, cache_creation_input_tokens: ev.cacheWrite, model: usageModel }
       else if (ev.type === 'stop') reason = ev.reason
-      else if (ev.type === 'error') failure ??= { kind: ev.kind, text: ev.text }
+      else if (ev.type === 'error') failure ??= ev
       return []
     },
     // Native unsuccessful stop: preserve received text and usage, but never authorize tools
     // or report end_turn after a provider failure. The caller withholds tool chunks until success.
-    end(o: { handback?: string; failure?: string; deliver?: boolean } = {}): StepEnd {
-      const failed: Failure | undefined =
+    end(o: { handback?: string; failure?: string; deliver?: boolean; child?: boolean } = {}): StepEnd {
+      const failed: StepError | undefined =
         o.failure !== undefined
-          ? { kind: 'request', text: o.failure }
-          : (failure ?? (reason === undefined ? { kind: 'request', text: `rice-multi-models: ${usageModel} ended the step with no stop; retry` } : undefined))
+          ? { type: 'error', kind: 'request', text: o.failure, aborted: true }
+          : (failure ?? (reason === undefined ? { type: 'error', kind: 'request', text: `rice-multi-models: ${usageModel} ended the step with no stop; retry` } : undefined))
       if (failed === undefined) {
         const stopReason = toolUses.length > 0 ? 'tool_use' : reason === 'tool_use' || reason === undefined ? 'end_turn' : reason
         // `deliver`: a text-only successful end is handed back as one call of `handback` carrying the text.
@@ -74,7 +79,13 @@ export function createAssembler(usageModel: string) {
         }
         return { chunks: [{ kind: 'stop', stopReason, usage }], answer, toolUses: [...toolUses], stopReason, usage }
       }
-      return { chunks: [{ kind: 'stop', stopReason: null, usage }], answer, toolUses: [], stopReason: null, usage, failure: failed.text }
+      // The public step API has no error chunk. Keep the unsuccessful null stop, but give a
+      // child a clearly labelled runtime diagnostic so its native report cannot be empty success.
+      const diagnostic = o.child && !failed.aborted ? childFailure(usageModel, failed) : undefined
+      const text = diagnostic === undefined ? '' : `${answer ? '\n\n' : ''}${diagnostic}`
+      const chunks: TurnStepChunk[] = diagnostic === undefined ? [] : [{ kind: 'text', index: next, text }]
+      chunks.push({ kind: 'stop', stopReason: null, usage })
+      return { chunks, answer: answer + text, toolUses: [], stopReason: null, usage, failure: failed.text, error: failed, ...(diagnostic ? { diagnostic } : {}) }
     },
   }
 }

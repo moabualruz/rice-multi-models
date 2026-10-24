@@ -5,6 +5,7 @@
 import { isObject } from '../../../hooks/config'
 import { decoderOver, isIndex, params, parseJson, sseReader } from '../codec'
 import type { Codec, Neutral, Sink } from '../codec'
+import { openaiFailureCause } from '../errors'
 import type { Document, Image, Text, Thinking } from '../history'
 import { responsesSearchEvidence } from '../../core/search.ts'
 
@@ -157,8 +158,12 @@ function decoder() {
       done(s, isObject(e['response']) ? e['response'] : {}, type === 'response.incomplete' ? 'incomplete' : 'completed')
     } else if (type === 'response.failed') {
       const r = isObject(e['response']) ? e['response'] : {}
-      s.fail(JSON.stringify(r['error'] ?? { message: 'the response failed' }))
-    } else if (type === 'error') s.fail(JSON.stringify(isObject(e['error']) ? e['error'] : { message: str(e['message']) || 'stream error', code: e['code'] }))
+      const error = r['error'] ?? { message: 'the response failed' }
+      s.fail(JSON.stringify(error), openaiFailureCause(error))
+    } else if (type === 'error') {
+      const error = isObject(e['error']) ? e['error'] : { message: str(e['message']) || 'stream error', code: e['code'] }
+      s.fail(JSON.stringify(error), openaiFailureCause(error))
+    }
   }
   return decoderOver(
     sseReader(),
@@ -185,5 +190,6 @@ export const responses: Codec = {
     return { path: '/responses', body: JSON.stringify(sent), effort: level ?? 'none' }
   },
   decoder,
+  errorCause: openaiFailureCause,
   stops: { stop: 'end_turn', tool_calls: 'tool_use', max_output_tokens: 'max_tokens', content_filter: 'refusal' },
 }

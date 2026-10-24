@@ -1,4 +1,5 @@
-import { oneLine } from '../styx/errors.ts'
+import { oneLine, openaiFailureCause } from '../styx/errors.ts'
+import type { StepFailureCause } from '../../hooks/protocol.ts'
 
 const TRANSIENT = new Set(['server_error', 'internal_server_error', 'internal_error', 'rate_limit_exceeded', 'rate_limit_error', 'too_many_requests', 'concurrency_limit_exceeded', 'concurrent_request_limit_exceeded', 'overloaded_error', 'service_unavailable', 'temporarily_unavailable', 'timeout', 'request_timeout'])
 const PERMANENT = new Set(['authentication_error', 'invalid_api_key', 'unauthorized', 'permission_denied', 'permission_error', 'invalid_request_error', 'invalid_request', 'insufficient_quota', 'billing_hard_limit_reached', 'content_policy_violation', 'model_not_found'])
@@ -20,7 +21,7 @@ export function retryAfterMs(value: unknown, now = Date.now()): number | undefin
   return Number.isFinite(date) ? Math.max(0, date - now) : undefined
 }
 
-export type FailureInfo = { event: string; code?: string; type?: string; status?: number; closeCode?: number; retryAfterMs?: number; transient?: boolean }
+export type FailureInfo = { event: string; code?: string; type?: string; status?: number; closeCode?: number; retryAfterMs?: number; transient?: boolean; cause?: StepFailureCause }
 
 export class ProviderFailure extends Error {
   readonly transient: boolean
@@ -28,9 +29,9 @@ export class ProviderFailure extends Error {
   constructor(message: string, readonly info: FailureInfo) {
     super(oneLine(message, 300))
     const labels = [info.code, info.type].filter((value): value is string => !!value)
-    this.overloaded = !labels.some(label => PERMANENT.has(label))
+    this.overloaded = info.cause !== 'context_overflow' && !labels.some(label => PERMANENT.has(label))
       && (labels.some(label => OVERLOAD.test(label)) || info.status === 503 || info.status === 529 || OVERLOAD.test(message))
-    this.transient = labels.some(label => PERMANENT.has(label)) ? false
+    this.transient = info.cause === 'context_overflow' || labels.some(label => PERMANENT.has(label)) ? false
       : this.overloaded ? true
       : info.status !== undefined
         ? info.status === 408 || info.status === 429 || (info.status >= 500 && info.status <= 599)
@@ -45,12 +46,14 @@ export class ProviderFailure extends Error {
     const inner = record(outer.error ?? response.error)
     const status = outer.status ?? outer.status_code ?? inner.status ?? inner.status_code
     const headers = record(outer.headers)
+    const cause = openaiFailureCause(inner) ?? openaiFailureCause(outer)
     return new ProviderFailure(string(outer.message) || string(inner.message) || 'OpenAI stream failed', {
       event: string(outer.type) || 'error',
       code: string(inner.code) || string(outer.code) || undefined,
       type: string(inner.type) || string(outer.error_type) || undefined,
       status: typeof status === 'number' ? status : undefined,
       retryAfterMs: retryAfterMs(headers['retry-after'] ?? outer.retry_after ?? inner.retry_after),
+      ...(cause ? { cause } : {}),
     })
   }
 

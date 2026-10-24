@@ -3,14 +3,13 @@
 // transcript, system prompt and tools, the shipped Node helper (dist/helper.mjs) calls
 // the provider, and its stream comes back as the engine's own chunks. Claude models pass through untouched.
 import { atom, read, update } from 'claude-code'
-import type { AgentModelOwner, CompactionReceipt } from '../types'
-import type { EngineInterface, ModelCompleteResult, ModelUsage, Origin, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
+import type { AgentDisplay, AgentModelOwner, CompactionReceipt } from '../types'
+import type { EngineInterface, ModelCompleteResult, ModelUsage, Origin, Register, ToolCallResult, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
-import { AGENT_TOOL, CARRIER_VALUE, classifyCall, emptyCarrier, entryOf, exactModelIds, forgetEntry, markDescription, pickRequested, recordEntry, unmarkDescription, withDescriptionSuffix } from './agent-model'
+import { AGENT_TOOL, CARRIER_VALUE, agentLabel, classifyCall, emptyCarrier, entryOf, exactModelIds, forgetEntry, markDescription, pickRequested, recordEntry, unmarkDescription, withDescriptionSuffix } from './agent-model'
 import { BUILTIN_AGENTS, HANDBACK_TOOL, identityLine, isFork, toolFilter } from './agents'
 import type { AgentDef } from './agents'
-import { anchoredEstimate, reportedInput, requestInputBudget } from './budget'
-import type { UsageAnchor } from './budget'
+import { requestInputBudget } from './budget'
 import { CLAUDE_FAMILY, familyOf, isNativeAlias, spawnDecision, stepModel } from './family'
 import type { FamilyPorts, SpawnDecision, TierMap } from './family'
 import { permissionContext, permissionIntent } from './permission-intent'
@@ -34,14 +33,14 @@ import { createMemory } from './memory'
 import { CATALOG_URL, kindCounts, liveIds, opencodeProvider, TIERS } from './opencode'
 import type { Tier } from './opencode'
 import { catalogueRows } from './picker'
-import { unknownMetadata } from './catalogue'
+import { NATIVE_MODEL_LIMITATIONS, unknownMetadata } from './catalogue'
 import type { ModelCatalogue } from './catalogue'
 import { runtimeConfig } from './catalogue-runtime'
 import type { PickerRow } from './picker'
 import { candidates, discoveryGuidance, limitsReport, modelsReport, withDiscoverySection } from './discovery'
 import type { FamilyLine } from './discovery'
 import type { CandidateRoute } from './discovery'
-import { approvalQuestion, CONFIG_FILE, emptyLoaded, estimateTokens, loadText, providerLines, remoteOf, TRUST_PREFIX } from './providers'
+import { approvalQuestion, CONFIG_FILE, emptyLoaded, loadText, providerLines, remoteOf, TRUST_PREFIX } from './providers'
 import type { Loaded, Remote } from './providers'
 import { contested, definitionOf, rewriteMain, systemFor, withIdentity } from './prompts'
 import type { PromptsPort } from './prompts'
@@ -51,6 +50,7 @@ import { fingerprint } from './config'
 import { capabilityContracts, formatCapabilityContracts, selectTools, toolCoverageWarning } from './capability-contract'
 import { STAMP } from './schemas.gen'
 import { createAssembler } from './step'
+import { redact } from './redact'
 import { setCapped } from './util'
 import { remoteTools } from './tools'
 import type { Described } from './tools'
@@ -80,13 +80,15 @@ import { createEvaluatorSources, registerEvaluatorSources } from './evaluator-so
 
 const PLUGIN = 'rice-multi-models'
 /** Who the requests to declared providers say they come from (OpenCode Go asks each client to name itself). */
-const USER_AGENT = 'rice-multi-models/0.16.1 (claude-code)'
+const USER_AGENT = 'rice-multi-models/0.17.0 (claude-code)'
 const PROVIDERS: Readonly<Record<string, string>> = { codex: 'OpenAI Codex (ChatGPT subscription)' }
 const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 const prefsAtom = atom({ plugin: 'rice-multi-models', key: 'prefs' } as const, { effort: null, transport: 'auto', helper: 'session' })
 /** Exact Agent model ids carried from a call's tool.call to its agent.spawn (see agent-model.ts), by tool_use_id; host state, so a hot reload keeps it. */
 const carrierAtom = atom({ plugin: 'rice-multi-models', key: 'agent-model-carrier' } as const, emptyCarrier)
 const ownersAtom = atom({ plugin: 'rice-multi-models', key: 'agent-model-owners' } as const, { entries: [] as readonly AgentModelOwner[] })
+const childFailuresAtom = atom({ plugin: 'rice-multi-models', key: 'child-failures' } as const, { entries: [] as readonly { agentId: string; turnId: string; report: string }[] })
+const agentDisplayAtom = atom({ plugin: 'rice-multi-models', key: 'agent-display' } as const, { entries: [] as readonly AgentDisplay[] })
 const receiptsAtom = atom({ plugin: 'rice-multi-models', key: 'compaction-receipts' } as const, { entries: [] as readonly CompactionReceipt[] })
 /** The main transcript's file, as the engine's classic hooks name it; a compaction cites it in its summary message. */
 const transcriptAtom = atom({ plugin: 'rice-multi-models', key: 'transcript' } as const, { path: null })
@@ -111,8 +113,6 @@ let helperReadiness: Promise<void> | undefined
 let codexDefaults: { model?: string; effort?: Effort } = {}
 let limits: Limits | undefined
 let lastStep: { model: string; who: string; ms: number; transport: string } | undefined
-/** Each conversation's last provider-reported request size, for the input-budget guard. */
-const usageAnchors = new Map<string, UsageAnchor>()
 /** The main model last recorded for this session, so a resume on another model can say so once. */
 let recordedMainModel: string | undefined
 const LAST_MODELS = 'last-main-models'
@@ -140,6 +140,8 @@ const reportedToolFallbacks = new Set<string>()
 let interactiveSession: boolean | undefined
 /** Whether each spawned agent runs in the background, by its agent id. */
 const spawnBackground = new Map<string, boolean>()
+/** Workflow agents, which `$.agent.list()` never names: live from their spawn until their `turn.complete`. */
+const liveWorkflowAgents = new Map<string, true>()
 let seenTranscriptPath: string | undefined
 
 /** Immutable last dispatched routed main request prefix, never reconstructed from current context. */
@@ -155,6 +157,28 @@ function activeContext(model: string) {
   return catalogue.models.find(entry => entry.model === target && entry.execution === 'native provider')?.metadata
 }
 
+/** The smallest reported window among the routed models running now: the main model and every live subagent. */
+async function windowInUse($: EngineInterface): Promise<number | undefined> {
+  const models = [await $.session.model()]
+  for (const agent of await $.agent.list().catch(() => [])) {
+    const model = ['pending', 'running', 'waiting', 'idle'].includes(agent.status) ? agentModels.get(agent.id) : undefined
+    if (model) models.push(model)
+  }
+  for (const id of liveWorkflowAgents.keys()) {
+    const model = agentModels.get(id)
+    if (model) models.push(model)
+  }
+  const windows = models.map(model => activeContext(model)?.contextWindow)
+    .filter((window): window is number => typeof window === 'number' && Number.isSafeInteger(window) && window > 0)
+  return windows.length ? Math.min(...windows) : undefined
+}
+
+/**
+ * Claude's own accounting and automatic compaction need each model's window, and the public API has no per-model or
+ * per-agent registration. The supported process-local CLAUDE_CODE_MAX_CONTEXT_TOKENS is that data: it carries the
+ * smallest window among the routed models in use so no loop outgrows its model before Claude compacts it. An owner's
+ * explicit override stays authoritative; the mod restores only the value it owns.
+ */
 async function syncNativeContext($: EngineInterface, restore = false): Promise<void> {
   const sync = nativeContextSync.then(async () => {
     const current = await $.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS') ?? null
@@ -169,10 +193,8 @@ async function syncNativeContext($: EngineInterface, restore = false): Promise<v
       await $.state.set(ref, { ...held, applied: null, relinquished: true })
       return
     }
-    const metadata = !restore && runtime.executable && !runtime.error && await $.env.get('DISABLE_COMPACT') === undefined
-      ? activeContext(await $.session.model()) : undefined
-    const window = metadata?.contextWindow
-    const desired = window !== undefined && window !== null && Number.isSafeInteger(window) && window > 0 ? String(window) : held.original
+    const window = !restore && runtime.executable && !runtime.error && await $.env.get('DISABLE_COMPACT') === undefined ? await windowInUse($) : undefined
+    const desired = window === undefined ? held.original : String(window)
     if ((await $.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS') ?? null) !== current) {
       await $.state.set(ref, { ...held, applied: null, relinquished: true })
       return
@@ -187,7 +209,7 @@ async function syncNativeContext($: EngineInterface, restore = false): Promise<v
       throw error
     }
   })
-  nativeContextSync = sync.catch(() => { $.ui.log(`${PLUGIN}: native primary context synchronization unavailable`, { to: 'debug' }) })
+  nativeContextSync = sync.catch(() => { $.ui.log(`${PLUGIN}: native context window synchronization unavailable`, { to: 'debug' }) })
   await nativeContextSync
 }
 
@@ -198,7 +220,7 @@ function outputLimit(model: string): number {
   return bounds.length ? Math.min(...bounds) : 2048
 }
 
-function requestBudget(model: string, outputReserve = outputLimit(model)): number {
+function summaryInputCapacity(model: string, outputReserve = outputLimit(model)): number {
   const configured = remoteOf(loaded, model)?.model
   const metadata = activeContext(model)
   return requestInputBudget({
@@ -207,15 +229,6 @@ function requestBudget(model: string, outputReserve = outputLimit(model)): numbe
     inputTokenLimit: configured?.maxInputTokens ?? metadata?.inputTokenLimit,
     outputTokenLimit: outputLimit(model),
   }, { outputReserve })
-}
-
-/** The local input guard. A conversation step anchors on the provider's own report for its previous request. */
-function budgetError(req: StepRequest, transcript?: readonly unknown[]): string | undefined {
-  const budget = requestBudget(req.target, req.native?.maxTokens ?? outputLimit(req.target))
-  const size = transcript === undefined ? estimateTokens(req) : anchoredEstimate(usageAnchors.get(req.who), req.target, transcript, () => estimateTokens(req))
-  return budget !== null && size > 0.95 * budget
-    ? `estimated request size ${Math.round(size / 1000)}k exceeds the local 95% safety threshold of ${req.target}'s ${budget} token input bound; compact the conversation, reduce context or start a new session (token estimates are approximate)`
-    : undefined
 }
 
 function defaultModel(provider: string): string | undefined {
@@ -505,6 +518,7 @@ async function promptOwner($: EngineInterface, agentId: string) {
     source = parent === undefined ? undefined : agents.find(each => each.id === parent)
   }
   const type = fork ? source?.type : agent?.type
+  // A project's agent file is Claude's to apply: its prompt goes to whichever model runs the agent.
   const def = (type && registered.get(type)) || (await definitionOf(promptsPort($), memory, type))
   return { agent, fork, type, def, route: fork && type === undefined ? undefined : { type, label: '' } }
 }
@@ -577,8 +591,7 @@ async function buildRequest($: EngineInterface, e: TurnStepInput, transcript: re
     }
   }
   const prefs = await read($, prefsAtom)
-  const isCodex = target.provider === 'codex' && !target.remote
-  const effort: Effort | number | undefined = e.effort ?? prefs.effort ?? (isCodex ? codexDefaults.effort : undefined)
+  const effort = routedEffort(e.model, e.effort, prefs.effort) as Effort | number | undefined
 
   return {
     req: { target: e.model, system, tools, transcript: messages, ...(effort === undefined ? {} : { effort }), who, session: await $.session.id(), transport: prefs.transport },
@@ -614,10 +627,30 @@ function cacheOwner(owner: AgentModelOwner): void {
   if (owner.background !== undefined) setCapped(spawnBackground, owner.id, owner.background)
 }
 
-async function rememberOwner($: EngineInterface, id: string, model: string, background?: boolean): Promise<void> {
-  const owner: AgentModelOwner = { id, model, explicitNative: !isRouted(model) && claimedRefusal(model) === undefined, ...(background === undefined ? {} : { background }) }
+async function rememberOwner($: EngineInterface, id: string, model: string, background?: boolean, effort?: string | number): Promise<void> {
+  const owner: AgentModelOwner = { id, model, explicitNative: !isRouted(model) && claimedRefusal(model) === undefined, ...(background === undefined ? {} : { background }), ...(effort === undefined ? {} : { effort }) }
   cacheOwner(owner)
   await update($, ownersAtom, state => ({ entries: [...state.entries.filter(entry => entry.id !== id), { ...state.entries.find(entry => entry.id === id), ...owner }].slice(-256) }))
+  await update($, agentDisplayAtom, state => ({ entries: state.entries.map(entry => entry.agentId === id ? { ...entry, model, ...(effort === undefined ? {} : { effort }) } : entry) }))
+}
+
+function routedEffort(model: string, explicit?: string | number, preference?: Effort | null): string | number | undefined {
+  return explicit ?? preference ?? (targetOf(model)?.provider === 'codex' && !targetOf(model)?.remote ? codexDefaults.effort : undefined)
+}
+
+/** Display joins are exact ids, never descriptions, names or inferred Claude tiers. */
+async function rememberDisplay($: EngineInterface, entry: AgentDisplay): Promise<void> {
+  if (!entry.toolUseId) return
+  await update($, agentDisplayAtom, state => ({ entries: [...state.entries.filter(row => row.toolUseId !== entry.toolUseId), { ...state.entries.find(row => row.toolUseId === entry.toolUseId), ...entry }].slice(-256) }))
+}
+
+/** The public tool result can mark failure; the public step stream cannot carry a native API error. */
+async function childHandback<R extends ToolCallResult>($: EngineInterface, result: R): Promise<R | { deny: string }> {
+  if (result.deny !== undefined || result.isError) return result
+  const record = result.result as { status?: unknown; agentId?: unknown } | undefined
+  if (record?.status !== 'completed' || typeof record.agentId !== 'string') return result
+  const failed = (await read($, childFailuresAtom)).entries.find(entry => entry.agentId === record.agentId)
+  return failed ? { deny: failed.report } : result
 }
 
 async function restoreOwner($: EngineInterface, id: string): Promise<void> {
@@ -705,12 +738,19 @@ function carriesTask(transcript: readonly ApiMessage[]): boolean {
     : message.content.some(block => block.type !== 'text' || typeof block.text !== 'string' || !reminder(block.text))))
 }
 
+/** Keep only bounded runtime diagnostics, by exact child identity, across a native handback or reload. */
+async function rememberChildFailure($: EngineInterface, e: TurnStepInput, report?: string): Promise<void> {
+  if (e.agentId === undefined) return
+  await update($, childFailuresAtom, state => ({ entries: [...state.entries.filter(entry => entry.agentId !== e.agentId), ...(report ? [{ agentId: e.agentId!, turnId: e.turnId, report }] : [])].slice(-256) }))
+}
+
 /** A step answered with a visible refusal, without any provider request. */
 async function* refusedStep($: EngineInterface, e: TurnStepInput, text: string): AsyncGenerator<TurnStepChunk, TurnStepResult> {
   $.ui.log(text, { to: 'transcript' })
   const assembler = createAssembler(e.model)
   assembler.feed({ type: 'error', kind: 'request', text })
-  const end = assembler.end()
+  const end = assembler.end({ child: e.agentId !== undefined })
+  await rememberChildFailure($, e, end.diagnostic)
   yield* end.chunks
   return { turnId: e.turnId, index: e.index, answer: end.answer, toolUses: end.toolUses, stopReason: end.stopReason, usage: end.usage }
 }
@@ -720,7 +760,6 @@ async function* routedStep($: EngineInterface, e: TurnStepInput, signal?: AbortS
   $.ui.log(`${PLUGIN}: step ${who} ${e.model} index=${e.index} effort=${e.effort ?? 'unset'}`, { to: 'debug' })
   const assembler = createAssembler(e.model)
   let handback: string | undefined
-  let anchorMessages: number | undefined
   const pending: TurnStepChunk[] = []
   let holdingTools = false
   let visibleAnswer = ''
@@ -730,7 +769,6 @@ async function* routedStep($: EngineInterface, e: TurnStepInput, signal?: AbortS
     const transcript = await $.session.messages(e.agentId === undefined ? { as: 'api' } : { as: 'api', agentId: e.agentId })
     if (!Array.isArray(transcript)) throw new Error(`the transcript of ${who} is unreadable (${transcript.deny})`)
     if (e.agentId !== undefined && !carriesTask(transcript as ApiMessage[])) throw new Error(`the task of ${who} is not readable by plugins (subagent transcripts need session persistence); nothing was sent`)
-    anchorMessages = transcript.length
     const built = await buildRequest($, e, transcript as ApiMessage[])
     handback = built.handback
     const remote = targetOf(e.model)?.remote
@@ -738,11 +776,6 @@ async function* routedStep($: EngineInterface, e: TurnStepInput, signal?: AbortS
       const refused = await approval($, remote)
       if (refused) throw new Error(refused)
     }
-    const overBudget = budgetError(built.req, transcript)
-    if (overBudget) throw new Error(overBudget)
-    const metadata = catalogue.models.find(entry => entry.model === (remote?.target ?? e.model))?.metadata
-    if (metadata?.tools === false && built.req.tools.length) throw new Error(`${e.model} reports no tool-call support; choose a tool-capable model for this session`)
-    if (typeof built.req.effort === 'string' && metadata?.reasoningEfforts && !metadata.reasoningEfforts.includes(built.req.effort)) throw new Error(`${e.model} reports reasoning efforts ${metadata.reasoningEfforts.join(', ') || 'none'}; requested ${built.req.effort}`)
     const continuation = loaded.config?.continuation
     if (continuation?.mode === 'durable') {
       if (!runtime.executable) throw new Error('Durable continuation requires the native Node helper')
@@ -795,18 +828,17 @@ async function* routedStep($: EngineInterface, e: TurnStepInput, signal?: AbortS
     if (loaded.config?.continuation?.mode === 'durable') lastContinuationStatus = ['budget-full', 'expired', 'cleared', 'opaque-state-not-retained'].includes(lastContinuationStatus) ? `blocked: ${lastContinuationStatus}` : 'blocked: durable dispatch or store operation failed'
     assembler.feed({ type: 'error', kind: 'request', text: `rice-multi-models: ${error instanceof Error ? error.message : String(error)}` })
   }
-  const end = assembler.end({ ...(handback ? { handback } : {}), ...(signal?.aborted ? { failure: `${PLUGIN}: request aborted` } : {}) })
-  const reported = reportedInput(end.usage)
-  if (reported !== undefined && anchorMessages !== undefined) setCapped(usageAnchors, who, { model: e.model, tokens: reported, messages: anchorMessages })
+  const end = assembler.end({ child: e.agentId !== undefined, ...(handback ? { handback } : {}), ...(signal?.aborted ? { failure: `${PLUGIN}: request aborted` } : {}) })
+  await rememberChildFailure($, e, end.diagnostic)
   if (end.failure !== undefined) {
-    $.ui.log(end.failure, { to: 'transcript' })
+    $.ui.log(end.diagnostic ?? redact(end.failure).slice(0, 1200), { to: 'transcript' })
     for (const chunk of pending) if (chunk.kind === 'text') yield chunk
   } else {
     yield* pending
   }
   yield* end.chunks
 
-  return { turnId: e.turnId, index: e.index, answer: end.failure === undefined ? end.answer : visibleAnswer, toolUses: end.toolUses, stopReason: end.stopReason, usage: end.usage }
+  return { turnId: e.turnId, index: e.index, answer: end.failure === undefined || end.diagnostic !== undefined ? end.answer : visibleAnswer, toolUses: end.toolUses, stopReason: end.stopReason, usage: end.usage }
 }
 
 /** Host-attested caller plugin, not an inferred loop identity for hidden requests. */
@@ -841,7 +873,7 @@ async function reconcileCompaction($: EngineInterface, agentId?: string, model?:
   const session = await $.session.id(), now = await $.clock.now()
   for (const row of pending) {
     const observed = await observedReceipt(row, active, session, model ?? (agentId === undefined ? await $.session.model() : agentModels.get(agentId)), now)
-    if (observed !== row && await saveReceipt($, observed, row) && observed.status === 'installed') usageAnchors.delete(agentId ?? 'main')
+    if (observed !== row) await saveReceipt($, observed, row)
   }
 }
 
@@ -854,11 +886,6 @@ async function complete($: EngineInterface, req: StepRequest, timeoutMs?: number
   if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 2147483647)) return { isAnswered: false, reason: 'api-error', status: null, error: 'invalid_request', usage: NO_USAGE }
   const remote = targetOf(req.target)?.remote
   if (remote && (await approval($, remote))) return { isAnswered: false, reason: 'api-error', status: null, error: 'invalid_request', usage: NO_USAGE }
-  const refused = budgetError(req)
-  if (refused) {
-    $.ui.log(`${PLUGIN}: ${refused}`, { to: 'debug' })
-    return { isAnswered: false, reason: 'api-error', status: null, error: 'invalid_request', usage: NO_USAGE }
-  }
   let answer: Awaited<ReturnType<typeof collectText>>
   const started = await $.clock.now()
   try { answer = await collectText(helperPort($, timeoutMs), await wireFor($, req), signal) } catch (error) {
@@ -868,6 +895,7 @@ async function complete($: EngineInterface, req: StepRequest, timeoutMs?: number
   const usage = answer.usage ?? NO_USAGE
   if (signal?.aborted || answer.aborted || answer.error !== undefined && timeoutMs !== undefined && await $.clock.now() - started >= timeoutMs) return { isAnswered: false, reason: 'aborted', usage }
   if (answer.error !== undefined) {
+    if (answer.cause) $.ui.log(`${PLUGIN}: ${req.target} auxiliary request failed [${answer.cause}]; no plugin recovery attempted`, { to: 'transcript' })
     const status = answer.status ?? null
     const error = status === 429 ? 'rate_limit' : status === 529 ? 'overloaded' : status === 401 || status === 403 ? 'authentication_failed' : status === 402 ? 'billing_error' : status === 404 ? 'model_not_found' : status !== null && status >= 500 ? 'server_error' : status !== null && status >= 400 ? 'invalid_request' : 'unknown'
     return { isAnswered: false, reason: 'api-error', status, error, usage }
@@ -1088,10 +1116,14 @@ async function nativeContextStatus($: EngineInterface) {
     activeContextWindow: metadata?.contextWindow ?? null,
     maxContextWindow: metadata?.maxContextWindow ?? null,
     inputTokenLimit: metadata?.inputTokenLimit ?? null,
-    effectiveInputBound: requestBudget(model),
+    outputTokenLimit: metadata?.outputTokenLimit ?? null,
+    autoCompactTokenLimit: metadata?.autoCompactTokenLimit ?? null,
+    reasoningEfforts: metadata?.reasoningEfforts ?? null,
+    capabilities: { inputModalities: metadata?.inputModalities ?? null, tools: metadata?.tools ?? null, parallelToolCalls: metadata?.parallelToolCalls ?? null },
     nativeWindow: usage.context.window,
     override: held?.applied !== null && held?.applied !== undefined && held.applied === current ? 'plugin-owned' : current !== null ? 'owner/external' : 'unmanaged',
-    scope: 'primary model only; process-wide override does not establish independent custom-subagent windows or plugin-unload restoration',
+    scope: 'native accounting and automatic compaction are host-owned; the mod supplies the smallest reported window of the routed main model and live routed subagents as CLAUDE_CODE_MAX_CONTEXT_TOKENS and applies no input-budget aborts',
+    limitations: NATIVE_MODEL_LIMITATIONS,
   }
 }
 
@@ -1134,8 +1166,9 @@ async function statusText($: EngineInterface): Promise<string> {
     `Codex session candidate: ${defaultModel('codex') ?? 'none discovered'}`,
     `Discovery: ${catalogue.providers.map(provider => `${provider.provider}: ${provider.status}${provider.error ? ` (${provider.error})` : ''}`).join('; ')}`,
     await capabilitySummary($),
-    `Primary context (${context.model}): active context ${context.activeContextWindow ?? 'unknown'}, maximum context ${context.maxContextWindow ?? 'unknown'}, reported input ${context.inputTokenLimit ?? 'unknown'}, effective input bound ${context.effectiveInputBound ?? 'unknown'}, native window ${context.nativeWindow}; override ${context.override}.`,
-    `Native context scope: ${context.scope}. Numeric per-model registration is unsupported.`,
+    `Primary context (${context.model}): active context ${context.activeContextWindow ?? 'unknown'}, maximum context ${context.maxContextWindow ?? 'unknown'}, reported input ${context.inputTokenLimit ?? 'unknown'}, reported output ${context.outputTokenLimit ?? 'unknown'}, native window ${context.nativeWindow}; override ${context.override}.`,
+    `Native context scope: ${context.scope}. ${NATIVE_MODEL_LIMITATIONS.registration}`,
+    `Native child recovery limitation: ${NATIVE_MODEL_LIMITATIONS.childBudget} ${NATIVE_MODEL_LIMITATIONS.recovery}`,
     'Compaction: native-like session.compact replacement on the same exact active model only, using captured native wording and bounded input/output capacity. Mod-owned preparing/prepared/aborted receipts confirm installed-observed only from actual active context. Core summarizer lifecycle/UI/accounting is not equivalent. Configured PreCompact policy is never bypassed or manually dispatched: replacement is refused when present or unreadable. Failed, cancelled or incomplete summaries retain original history; clipped source coverage is disclosed.',
     `Compaction receipts: ${JSON.stringify((await read($, receiptsAtom)).entries.map(({ id, owner, trigger, status, reason }) => ({ id, owner, trigger, status, reason })))}`,
     tools.source === 'installed claude'
@@ -1431,7 +1464,7 @@ export const register: Register = on => {
     complete: async (port, request, approved, _timeoutMs, signal) => {
       signal.throwIfAborted()
       const remote = targetOf(request.target)?.remote
-      if (budgetError(request) || remote && !approved.includes(remote.fingerprint)) return { isAnswered: false }
+      if (remote && !approved.includes(remote.fingerprint)) return { isAnswered: false }
       const answer = await collectText(port, { configText: loaded.text, approved, req: request, userAgent: USER_AGENT }, signal)
       signal.throwIfAborted()
       return { isAnswered: answer.error === undefined && ['end_turn', 'stop_sequence'].includes(answer.stopReason ?? '') && answer.text.trim() !== '', text: answer.text }
@@ -1491,7 +1524,7 @@ export const register: Register = on => {
     runtime = await detectRuntime($)
     codexDefaults = await readCodexDefaults($)
     await loadProviders($)
-    agentModels.clear(); spawnDecisions.clear(); spawnBackground.clear()
+    agentModels.clear(); spawnDecisions.clear(); spawnBackground.clear(); liveWorkflowAgents.clear()
     for (const owner of (await read($, ownersAtom)).entries) cacheOwner(owner)
     await refreshCatalogue($)
     // A nested claude process can migrate settings; run it before any judgment
@@ -1515,20 +1548,8 @@ export const register: Register = on => {
     return started
   })
 
-  on('classic.PreModelSwitch', async ($, e, next) => {
-    if (isRouted(e.to_model) && e.from_model !== e.to_model) {
-      await ensureFreshCapacity($)
-      const metadata = activeContext(e.to_model)
-      const configured = remoteOf(loaded, e.to_model)?.model
-      const bounds = [configured?.contextWindow, configured?.maxInputTokens, metadata?.inputTokenLimit, metadata?.contextWindow]
-        .filter((value): value is number => value !== undefined && value !== null && Number.isSafeInteger(value) && value > 0)
-      const bound = bounds.length ? requestBudget(e.to_model) : undefined
-      if (bound !== undefined && e.context_tokens > bound) {
-        return { permissionDecision: 'deny', permissionDecisionReason: `${PLUGIN}: switching to ${e.to_model} would exceed its freshly discovered ${bound} token input/context bound (${e.context_tokens} context tokens). Compact the current conversation or reduce context before retrying.` }
-      }
-    }
-    return next(e)
-  }).catch(() => ({ permissionDecision: 'deny', permissionDecisionReason: `${PLUGIN}: model-switch context check failed; current model and transcript retained` }))
+  // Model-switch decisions and recovery belong to the native host, not an estimated plugin budget.
+  on('classic.PreModelSwitch', ($, e, next) => next(e))
 
   on('classic.PostModelSwitch', async ($, e, next) => {
     await noteTranscript($, e).catch(() => {})
@@ -1593,7 +1614,7 @@ export const register: Register = on => {
       const actual = next.trace.find(link => link.plugin === 'engine' && link.tier === 'core' && ['returned', 'passed'].includes(link.outcome) && link.returned?.value?.agent === type)?.received
       if (actual) {
         registered.set(type, { name: actual.name, prompt: actual.prompt, model: actual.model, tools: actual.tools, disallowedTools: actual.disallowedTools,
-          ...(typeof actual.effort === 'string' ? { effort: actual.effort } : {}), ...(actual.omitClaudeMd ? { omitClaudeMd: true } : {}), ...(actual.hooks ? { hooks: actual.hooks } : {}),
+          ...(typeof actual.effort === 'string' || typeof actual.effort === 'number' ? { effort: actual.effort } : {}), ...(actual.omitClaudeMd ? { omitClaudeMd: true } : {}), ...(actual.hooks ? { hooks: actual.hooks } : {}),
         })
       } else {
         registered.delete(type)
@@ -1614,7 +1635,13 @@ export const register: Register = on => {
   // Let native rules and PreToolUse hooks decide the exact action first. A
   // one-shot refusal stops its old implementation before provider extraction.
   on('tool.call', async ($, e, next) => {
-    if (e.tool === AGENT_TOOL) return agentCall($, e, next).finally(() => { toolModes.delete(e.tool_use_id) })
+    if (e.tool === AGENT_TOOL) {
+      try {
+        const effort = typeof e.effort === 'string' || typeof e.effort === 'number' ? e.effort : undefined
+        await rememberDisplay($, { toolUseId: e.tool_use_id, ...(effort === undefined ? {} : { effort }) })
+        return await childHandback($, await agentCall($, e, next))
+      } finally { toolModes.delete(e.tool_use_id) }
+    }
     if (e.tool !== 'WebSearch' && e.tool !== 'WebFetch') return next(e).finally(() => { toolModes.delete(e.tool_use_id) })
     const initialModel = e.agentId === undefined ? await $.session.model() : agentModels.get(e.agentId)
     if (initialModel === undefined) return { deny: `${PLUGIN}: web tool conversation model is unknown; retry after its next observed turn` }
@@ -1671,7 +1698,7 @@ export const register: Register = on => {
       $.ui.log(`${PLUGIN}: WebSearch answered via ${outcome.stage}`, { to: 'debug' })
       return { result }
     } finally { webToolGate.end(ticket); toolModes.delete(e.tool_use_id) }
-  }).catch((_host, e) => ({ deny: e.tool === AGENT_TOOL ? `${PLUGIN}: the Agent model could not be resolved; no subagent was started` : `${PLUGIN}: the web tool failed; no action was approved or replayed automatically` }))
+  }).catch((_host, e, next) => ({ deny: e.tool === AGENT_TOOL ? next.called ? `${PLUGIN}: the Agent call failed after native dispatch; it may have started, and was not replayed. Existing transcript retained.` : `${PLUGIN}: the Agent model could not be resolved; no subagent was started` : `${PLUGIN}: the web tool failed; no action was approved or replayed automatically` }))
 
   on('tool.check', async ($, e, next) => {
     let verdict = await next(e)
@@ -1719,7 +1746,9 @@ export const register: Register = on => {
       // resolve it from today's main model or rewrite it with a fresh Agent request.
       const result = await next(e)
       if (result.agentId && result.model) {
-        await rememberOwner($, result.agentId, result.model, e.background)
+        const effort = (await read($, ownersAtom)).entries.find(owner => owner.id === result.agentId)?.effort
+        await rememberOwner($, result.agentId, result.model, e.background, effort)
+        await rememberDisplay($, { toolUseId: e.tool_use_id, agentId: result.agentId, model: result.model, ...(effort === undefined ? {} : { effort }) })
         setCapped(agentModels, result.agentId, result.model)
         setCapped(spawnBackground, result.agentId, e.background)
         setCapped(spawnDecisions, result.agentId, { model: result.model, family: familyOf(result.model, familyPorts), explicit: true, reason: 'native resumed invocation model' })
@@ -1744,18 +1773,55 @@ export const register: Register = on => {
     const decision = spawnDecision({ parentModel, requested: picked.requested, definitionModel: definition?.model, fork: e.fork }, tiers(), familyPorts)
     $.ui.log(`${PLUGIN}: spawn ${e.subagentType} from ${parentModel}: ${decision.model ?? 'native resolution'} (${decision.reason})`, { to: 'debug' })
     if (picked.exact !== undefined && decision.model !== picked.exact) return { deny: `${PLUGIN}: Agent model ${picked.exact} cannot be run by this session (${decision.reason}); no subagent was started` }
-    const restored = description.marked ? { ...e, description: description.text } : e
+    const pending = (await read($, agentDisplayAtom)).entries.find(entry => entry.toolUseId === e.tool_use_id)
+    const parentEffort = e.parentAgentId === undefined ? undefined : (await read($, ownersAtom)).entries.find(owner => owner.id === e.parentAgentId)?.effort
+    const resolved = decision.model ?? e.model
+    const effort = e.fork ? parentEffort : resolved && isRouted(resolved) ? routedEffort(resolved, pending?.effort ?? definition?.effort, (await read($, prefsAtom)).effort) : pending?.effort ?? definition?.effort
+    const restored = { ...e, description: resolved === undefined ? description.text : agentLabel(description.text, resolved, effort) }
     const result = await next(decision.model !== undefined && decision.model !== e.model ? { ...restored, model: decision.model } : restored)
     if (picked.exact !== undefined && result.model !== picked.exact) $.ui.log(`${PLUGIN}: Agent model ${picked.exact} was requested but the subagent started on ${result.model}`, { to: 'transcript' })
     if (result.agentId) {
       const observed = e.fork ? parentModel : result.model ?? decision.model
-      if (observed) await rememberOwner($, result.agentId, observed, e.background)
+      if (observed) {
+        await rememberOwner($, result.agentId, observed, e.background, effort)
+        await rememberDisplay($, { toolUseId: e.tool_use_id, agentId: result.agentId, model: observed, ...(effort === undefined ? {} : { effort }) })
+      }
       setCapped(spawnDecisions, result.agentId, observed ? { ...decision, model: observed, family: familyOf(observed, familyPorts) } : decision)
       if (observed) setCapped(agentModels, result.agentId, observed)
+      if (e.workflow) setCapped(liveWorkflowAgents, result.agentId, true, 256)
+      if (observed) await syncNativeContext($)
       setCapped(spawnBackground, result.agentId, e.background)
     }
     return result
   }).catch((_host, e, next) => next.called ? next(e) : { deny: `${PLUGIN}: the Agent model could not be resolved; no subagent was started` })
+
+  // Preserve native rendering and behavior; only public display props change. There is no
+  // public AgentList/agent-row renderer or child identity on Spinner in 2.1.310.
+  on('ui.render', async ($, e, next) => {
+    if (e.component === 'ToolUse' && e.props.tool === AGENT_TOOL && e.props.input && typeof e.props.input === 'object' && !Array.isArray(e.props.input)) {
+      const entry = (await read($, agentDisplayAtom)).entries.find(row => row.toolUseId === e.props.tool_use_id)
+      if (entry?.model) {
+        const input = e.props.input as Record<string, unknown>
+        return next({ ...e, props: { ...e.props, input: { ...input, description: agentLabel(typeof input['description'] === 'string' ? input['description'] : 'Agent', entry.model, entry.effort) } } })
+      }
+    } else if (e.component === 'ToolProgress') {
+      const entry = (await read($, agentDisplayAtom)).entries.find(row => row.toolUseId === e.props.tool_use_id)
+      if (entry?.model) return next({ ...e, props: { ...e.props, hint: agentLabel(e.props.hint, entry.model, entry.effort) } })
+    } else if (e.component === 'UserMessage' && e.props.task?.id) {
+      const owner = (await read($, ownersAtom)).entries.find(row => row.id === e.props.task!.id)
+      if (owner) return next({ ...e, props: { ...e.props, text: agentLabel(e.props.text, owner.model, owner.effort) } })
+    }
+    return next(e)
+  })
+
+  // A workflow agent leaves the window data when its turn completes: no list row ends it.
+  on('turn.complete', { agentId: /[\s\S]+/ }, async ($, e, next) => {
+    try {
+      return await next(e)
+    } finally {
+      if (e.agentId !== undefined && liveWorkflowAgents.delete(e.agentId)) await syncNativeContext($)
+    }
+  })
 
   on('tool.describe', async ($, e, next) => {
     const answer = await next(e)
@@ -1773,7 +1839,9 @@ export const register: Register = on => {
       // Claude: a hook failure would otherwise run the native request.
       return yield* refusedStep($, e, `${PLUGIN}: the model family of this conversation could not be resolved (${error instanceof Error ? error.message : String(error)}); nothing was sent`)
     }
-    if (e.agentId !== undefined) await rememberOwner($, e.agentId, e.model, spawnBackground.get(e.agentId))
+    if (e.agentId !== undefined) await rememberOwner($, e.agentId, e.model, spawnBackground.get(e.agentId), isRouted(e.model) ? routedEffort(e.model, e.effort, (await read($, prefsAtom)).effort) : e.effort)
+    // Ended subagents leave the window data at the next step of any loop.
+    if (isRouted(e.model) || agentModels.size) await syncNativeContext($)
     await reconcileCompaction($, e.agentId, e.model)
     const claimed = claimedRefusal(e.model)
     if (claimed) return yield* refusedStep($, e, claimed)
@@ -1843,7 +1911,7 @@ export const register: Register = on => {
       }
       await ensureFreshCapacity($)
       next.signal.throwIfAborted()
-      const budget = requestBudget(model)
+      const budget = summaryInputCapacity(model)
       let retained: readonly CompactMessage[]
       try {
         retained = retainedTail(e.messages, budget === null ? {} : { retainChars: Math.floor(budget * 0.15 * 3.5) })
@@ -1856,23 +1924,14 @@ export const register: Register = on => {
       const system = rewriteMain((await $.prompt.compose({ model })).sections, identityLine(targetOf(model)?.model ?? model, targetOf(model)?.label ?? 'codex'))
       const prompt = compactionPrompt(template, e.instructions)
       const session = await $.session.id()
-      // Fit the conversation to the model's input bound by shortening tool outputs, then leaving out the oldest
-      // exchanges; halve the share until the local guard accepts the request.
-      let share = 1
-      let request: StepRequest | undefined
-      let coverage = ''
-      for (let attempt = 0; attempt < 5; attempt++) {
-        const room = Math.floor(budget * 0.9 * 3.5 * share) - system.length - prompt.length - 2048
-        const fitted = fitTranscript(api as ApiMessage[], Math.max(room, 0))
-        if (!fitted.fits) break
-        coverage = fitted.omitted || fitted.clipped ? fitted.explanation : ''
-        const instructions = coverage ? `Source coverage notice: ${coverage}. Only summarize content actually supplied. Never reconstruct excluded content.\n\n${prompt}` : prompt
-        request = { target: model, system, tools: [], transcript: withUserText(fitted.messages, instructions), who, session, ...(effort === undefined ? {} : { effort }), native: { maxTokens: outputBound } }
-        if (!budgetError(request)) break
-        request = undefined
-        share /= 2
-      }
-      if (!request) return skip(`${PLUGIN}: the summary request does not fit ${model}'s bounded input capacity with intact tool pairs; original transcript retained`)
+      // This is the existing native-dispatched summary's bounded source projection, not a
+      // request guard or a compaction/retry controller. Ordinary turns are never pre-aborted.
+      const room = Math.floor(budget * 0.9 * 3.5) - system.length - prompt.length - 2048
+      const fitted = fitTranscript(api as ApiMessage[], Math.max(room, 0))
+      if (!fitted.fits) return skip(`${PLUGIN}: the summary request does not fit ${model}'s bounded input capacity with intact tool pairs; original transcript retained`)
+      const coverage = fitted.omitted || fitted.clipped ? fitted.explanation : ''
+      const instructions = coverage ? `Source coverage notice: ${coverage}. Only summarize content actually supplied. Never reconstruct excluded content.\n\n${prompt}` : prompt
+      const request: StepRequest = { target: model, system, tools: [], transcript: withUserText(fitted.messages, instructions), who, session, ...(effort === undefined ? {} : { effort }), native: { maxTokens: outputBound } }
       if (coverage) $.ui.log(`${PLUGIN}: compaction request coverage: ${coverage}`, { to: 'transcript' })
       const answer = await complete($, request, undefined, true, next.signal)
       receipt.usage = answer.usage

@@ -18,6 +18,12 @@ routed providers. Release 0.16.1 excludes runtime Agent lookup enrichment from c
 history identity and adds bounded, read-only recovery of persisted main-session text and
 completed ordinary native tools when public history is capped. Unsupported or ambiguous
 context still refuses compaction; see the [compaction limits](docs/host-limits.md#compaction-lifecycle-and-collapsed-row).
+Release 0.17.0 hands Claude model data instead of plugin guards: no request-size abort,
+model-switch denial or pre-request tool and effort refusals, so Claude's own accounting,
+compaction and recovery run. Claude receives the smallest context window among the routed
+main model and live routed subagents, so subagents compact natively. Subagent rows show
+the resolved model and effort, a failed child reports its error, and project agent files
+run as Claude applies them whatever model they name.
 Earlier owner/model, capacity, streaming, failure and fork repairs remain.
 The mod registers no MCP tools and needs no launcher, proxy or gateway.
 
