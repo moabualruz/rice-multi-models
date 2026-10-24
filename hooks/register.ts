@@ -243,6 +243,11 @@ async function discoverCapacity(port: EvaluatorCapacityPort): Promise<void> {
 const NATIVE_ENV_NAMES = ['CLAUDE_CODE_MAX_CONTEXT_TOKENS', 'CLAUDE_CODE_MODEL_CAPABILITIES'] as const
 type NativeEnvName = typeof NATIVE_ENV_NAMES[number]
 let nativeEnvSync = Promise.resolve()
+/**
+ * The environment that goes with the per-model settings Claude last received (see syncPicker): its largest
+ * window never reaches Claude before the settings that lower each model to its own.
+ */
+let settledEnv: Record<string, string> = {}
 
 /**
  * The model data Claude reads from its own environment for non-Claude ids (see nativeModelEnv). An owner's
@@ -250,14 +255,18 @@ let nativeEnvSync = Promise.resolve()
  * `restore` puts back the original value it found.
  */
 async function syncNativeEnv($: EngineInterface, restore = false): Promise<void> {
-  const desired: Record<string, string> = restore || !runtime.executable || runtime.error ? {} : nativeModelEnv(catalogue, aliasTargets())
+  const desired: Record<string, string> = restore || !runtime.executable || runtime.error ? {} : settledEnv
   const sync = nativeEnvSync.then(async () => {
     const ref = { plugin: 'rice-multi-models', key: 'nativeEnv' } as const
     const stored = (await $.state.get(ref)).value ?? {}
     const held = { ...stored }
     // Claude lists the variables a module touches, so each is named literally.
     const readEnv = (name: NativeEnvName) => name === 'CLAUDE_CODE_MAX_CONTEXT_TOKENS' ? $.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS') : $.env.get('CLAUDE_CODE_MODEL_CAPABILITIES')
-    const writeEnv = (name: NativeEnvName, value: string | undefined) => name === 'CLAUDE_CODE_MAX_CONTEXT_TOKENS' ? $.env.set('CLAUDE_CODE_MAX_CONTEXT_TOKENS', value) : $.env.set('CLAUDE_CODE_MODEL_CAPABILITIES', value)
+    const writeEnv = async (name: NativeEnvName, value: string | undefined) => {
+      const result = name === 'CLAUDE_CODE_MAX_CONTEXT_TOKENS' ? await $.env.set('CLAUDE_CODE_MAX_CONTEXT_TOKENS', value) : await $.env.set('CLAUDE_CODE_MODEL_CAPABILITIES', value)
+      // The engine can hold a write and say why instead of throwing: that write did not happen.
+      if (result?.deny !== undefined) throw new Error(`${name} was not set: ${result.deny}`)
+    }
     // The value found is recorded before any change, so a value the mod sets always has its owner record.
     for (const name of NATIVE_ENV_NAMES) held[name] ??= { original: await readEnv(name) ?? null, applied: null, relinquished: false }
     if (NATIVE_ENV_NAMES.some(name => stored[name] === undefined)) await $.state.set(ref, { ...held })
@@ -278,7 +287,7 @@ async function syncNativeEnv($: EngineInterface, restore = false): Promise<void>
       await $.state.set(ref, held)
     } catch (error) {
       // A sync that cannot finish puts back what it changed, so the recorded state stays true.
-      for (const { name, previous, value } of written.reverse()) if ((await readEnv(name) ?? null) === value) await writeEnv(name, previous ?? undefined)
+      for (const { name, previous, value } of written.reverse()) if ((await readEnv(name) ?? null) === value) await writeEnv(name, previous ?? undefined).catch(() => {})
       throw error
     }
   })
@@ -286,9 +295,9 @@ async function syncNativeEnv($: EngineInterface, restore = false): Promise<void>
   await nativeEnvSync
 }
 
+/** A new catalogue; its native data reaches Claude through the picker sync that follows (see syncPicker). */
 async function refreshCatalogue($: EngineInterface): Promise<void> {
   await discoverCapacity({ now: await $.clock.now(), helper: helperFile($.plugin.root), approved: [...await approvedSet($)], run: (argv, options) => $.process.run(argv, options) })
-  await syncNativeEnv($)
 }
 
 async function refreshCapacity(port: EvaluatorCapacityPort): Promise<void> {
@@ -300,7 +309,8 @@ async function refreshCapacity(port: EvaluatorCapacityPort): Promise<void> {
 async function ensureFreshCapacity($: EngineInterface): Promise<void> {
   const before = catalogue
   await refreshCapacity({ now: await $.clock.now(), helper: helperFile($.plugin.root), approved: [...await approvedSet($)], run: (argv, options) => $.process.run(argv, options) })
-  // A refresh that ran discovery gives Claude its per-model settings before the environment's largest window.
+  // A refresh that ran discovery gives Claude its per-model settings, and with them their environment; a
+  // failed write leaves Claude the last pair that landed until the next refresh tries again.
   if (catalogue !== before) await syncPicker($, runtime, routedRows())
   await syncNativeEnv($)
 }
@@ -320,8 +330,14 @@ async function detectRuntime($: EngineInterface): Promise<Runtime> {
   })
 }
 
+/** The picker rows and per-model settings, then the environment that goes with settings that landed. */
 async function syncPicker($: EngineInterface, current: Runtime, rows: PickerRow[]): Promise<PickerResult> {
-  return synchronizePicker({ helper: helperFile($.plugin.root), run: (argv, options) => $.process.run(argv, options) }, current, rows, nativeModelSettings(catalogue, aliasTargets()))
+  const data = catalogue
+  const aliases = aliasTargets()
+  const result = await synchronizePicker({ helper: helperFile($.plugin.root), run: (argv, options) => $.process.run(argv, options) }, current, rows, nativeModelSettings(data, aliases))
+  if (result.ok) settledEnv = nativeModelEnv(data, aliases)
+  await syncNativeEnv($)
+  return result
 }
 
 async function startupNotice($: EngineInterface, interactive: boolean, current: Runtime, picker: PickerResult | undefined, rows: PickerRow[], defaultModel: string | undefined, catalogueSummary?: string, capabilities?: string): Promise<void> {
@@ -1524,6 +1540,7 @@ export const register: Register = on => {
     if (needsRouting) await ensureHelper($)
     const rows = routedRows()
     const picker = runtime.error ? undefined : await syncPicker($, runtime, rows)
+    if (!picker) await syncNativeEnv($)
     await startupNotice($, e.isInteractive, runtime, picker, rows, defaultModel('codex'), undefined, await capabilitySummary($))
 
     return started

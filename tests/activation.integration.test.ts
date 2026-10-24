@@ -1103,8 +1103,24 @@ test('an automatic catalogue refresh gives Claude the new per-model settings wit
   expect(f.syncs.at(-1).modelSettings).toEqual({ 'codex/fresh': { autoCompactWindow: 500000 } })
 })
 
+test('the environment\'s largest window waits for the per-model settings that lower each model to its own', async () => {
+  const f = contextFixture()
+  const run = f.host.process.run
+  let refuse = true
+  f.host.process.run = async (argv: string[], options: any) => argv[2] === 'sync-picker' && refuse
+    ? { exitCode: 0, stdout: JSON.stringify({ ok: false, changed: false, count: 0, path: '', error: 'fixture settings lock timeout' }), stderr: '' }
+    : run(argv, options)
+  await startContext(f)
+  expect(f.syncs).toEqual([])
+  expect(f.env.has('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(false)
+  refuse = false
+  await callbacks.get('command.run')!(f.host, { args: 'refresh' })
+  expect(f.syncs.at(-1).modelSettings).toEqual({ 'codex/fresh': { autoCompactWindow: 500000 } })
+  expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('500000')
+})
+
 test('a native environment sync that cannot finish puts back what it changed and keeps the original for session end', async () => {
-  for (const failure of ['persist', 'write'] as const) {
+  for (const failure of ['persist', 'write', 'held'] as const) {
     const f = contextFixture()
     f.discovery.catalogue.models[0]!.metadata.reasoningEfforts = ['low', 'high']
     if (failure === 'persist') {
@@ -1116,8 +1132,10 @@ test('a native environment sync that cannot finish puts back what it changed and
     } else {
       const set = f.host.env.set
       f.host.env.set = async (key: string, value: string | undefined) => {
-        if (key === 'CLAUDE_CODE_MODEL_CAPABILITIES') throw new Error('fixture environment write denied')
-        return set(key, value)
+        if (key !== 'CLAUDE_CODE_MODEL_CAPABILITIES') return set(key, value)
+        // The engine can also resolve a write it holds, without making it.
+        if (failure === 'held') return { deny: 'fixture organization settings hold this variable' }
+        throw new Error('fixture environment write denied')
       }
     }
     expect(await startContext(f)).toEqual({ started: true })
