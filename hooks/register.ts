@@ -1815,7 +1815,7 @@ export const register: Register = on => {
   })
 
   // A workflow agent leaves the window data when its turn completes: no list row ends it.
-  on('turn.complete', async ($, e, next) => {
+  on('turn.complete', { agentId: /[\s\S]+/ }, async ($, e, next) => {
     try {
       return await next(e)
     } finally {
