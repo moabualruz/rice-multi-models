@@ -80,7 +80,7 @@ import { createEvaluatorSources, registerEvaluatorSources } from './evaluator-so
 
 const PLUGIN = 'rice-multi-models'
 /** Who the requests to declared providers say they come from (OpenCode Go asks each client to name itself). */
-const USER_AGENT = 'rice-multi-models/0.17.2 (claude-code)'
+const USER_AGENT = 'rice-multi-models/0.17.3 (claude-code)'
 const PROVIDERS: Readonly<Record<string, string>> = { codex: 'OpenAI Codex (ChatGPT subscription)' }
 const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 const prefsAtom = atom({ plugin: 'rice-multi-models', key: 'prefs' } as const, { effort: null, transport: 'auto', helper: 'session' })
@@ -587,8 +587,8 @@ function cacheOwner(owner: AgentModelOwner): void {
   if (owner.background !== undefined) setCapped(spawnBackground, owner.id, owner.background)
 }
 
-async function rememberOwner($: EngineInterface, id: string, model: string, background?: boolean, effort?: string | number): Promise<void> {
-  const owner: AgentModelOwner = { id, model, explicitNative: !isRouted(model) && claimedRefusal(model) === undefined, ...(background === undefined ? {} : { background }), ...(effort === undefined ? {} : { effort }) }
+async function rememberOwner($: EngineInterface, id: string, model: string, background?: boolean, effort?: string | number, workflowRunId?: string): Promise<void> {
+  const owner: AgentModelOwner = { id, model, explicitNative: !isRouted(model) && claimedRefusal(model) === undefined, ...(background === undefined ? {} : { background }), ...(effort === undefined ? {} : { effort }), ...(workflowRunId === undefined ? {} : { workflowRunId }) }
   cacheOwner(owner)
   await update($, ownersAtom, state => ({ entries: [...state.entries.filter(entry => entry.id !== id), { ...state.entries.find(entry => entry.id === id), ...owner }].slice(-256) }))
   await update($, agentDisplayAtom, state => ({ entries: state.entries.map(entry => entry.agentId === id ? { ...entry, model, ...(effort === undefined ? {} : { effort }) } : entry) }))
@@ -1714,11 +1714,24 @@ export const register: Register = on => {
     $.ui.log(`${PLUGIN}: spawn ${e.subagentType} from ${parentModel}: ${decision.model ?? 'native resolution'} (${decision.reason})`, { to: 'debug' })
     if (picked.exact !== undefined && decision.model !== picked.exact) return { deny: `${PLUGIN}: Agent model ${picked.exact} cannot be run by this session (${decision.reason}); no subagent was started` }
     const pending = (await read($, agentDisplayAtom)).entries.find(entry => entry.toolUseId === e.tool_use_id)
-    const parentEffort = e.parentAgentId === undefined ? mainEffort : (await read($, ownersAtom)).entries.find(owner => owner.id === e.parentAgentId)?.effort
-    // Every subagent row is labelled with the model Claude will run it on, in Claude's own order: the Agent
-    // call's model, the agent definition's, CLAUDE_CODE_SUBAGENT_MODEL, then the parent's (a fork's always).
-    // As in Claude, the first one present decides, and "inherit" there (or an empty variable) is the parent's.
-    const chosen = e.fork ? undefined : decision.model ?? e.model ?? definedModel(e.subagentType, definition) ?? (await $.env.get('CLAUDE_CODE_SUBAGENT_MODEL') || undefined)
+    const parentOwner = e.parentAgentId === undefined ? undefined : (await read($, ownersAtom)).entries.find(owner => owner.id === e.parentAgentId)
+    const parentEffort = e.parentAgentId === undefined ? mainEffort : parentOwner?.effort
+    // Every subagent row is labelled with the model Claude will run it on, in Claude's own order. A fork runs on
+    // its parent's. An agent in a workflow run (a script's agent(), or a non-teammate an agent of the run starts)
+    // takes CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL in place of the call's and the definition's model. Otherwise
+    // CLAUDE_CODE_SUBAGENT_MODEL_FORCE keeps only a call's "inherit" and drops the definition's, and that
+    // variable then outranks a workflow model too: Claude keeps one only when managed policy sets it, which no
+    // variable shows, so it is taken as unset. Then the Agent call's model, the definition's,
+    // CLAUDE_CODE_SUBAGENT_MODEL and the parent's: the first one present decides, and "inherit" there (or an empty
+    // variable) is the parent's.
+    const workflowRunId = e.workflow?.runId ?? (e.isTeammate ? undefined : parentOwner?.workflowRunId)
+    const forced = /^(1|true|yes|on)$/i.test((await $.env.get('CLAUDE_CODE_SUBAGENT_MODEL_FORCE'))?.trim() ?? '')
+    const workflowSetting = workflowRunId === undefined || forced ? undefined : (await $.env.get('CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL'))?.trim()
+    const workflowModel = workflowSetting && workflowSetting.toLowerCase() !== 'inherit' ? workflowSetting : undefined
+    const requested = decision.model ?? e.model
+    const call = workflowModel !== undefined ? undefined : forced ? (requested === 'inherit' ? requested : undefined) : requested
+    const declared = workflowModel !== undefined || forced ? undefined : definedModel(e.subagentType, definition)
+    const chosen = e.fork ? undefined : call ?? declared ?? workflowModel ?? ((await $.env.get('CLAUDE_CODE_SUBAGENT_MODEL'))?.trim() || undefined)
     const resolved = chosen === undefined || chosen === 'inherit' ? parentModel : chosen
     const effort = e.fork ? parentEffort : resolved && isRouted(resolved) ? (routedEffort(resolved, pending?.effort ?? definition?.effort, (await read($, prefsAtom)).effort) ?? parentEffort) : pending?.effort ?? definition?.effort ?? parentEffort
     const restored = { ...e, description: resolved === undefined ? description.text : agentLabel(description.text, resolved, effort) }
@@ -1727,7 +1740,7 @@ export const register: Register = on => {
     if (result.agentId) {
       const observed = e.fork ? parentModel : result.model ?? decision.model
       if (observed) {
-        await rememberOwner($, result.agentId, observed, e.background, effort)
+        await rememberOwner($, result.agentId, observed, e.background, effort, workflowRunId)
         await rememberDisplay($, { toolUseId: e.tool_use_id, agentId: result.agentId, model: observed, ...(effort === undefined ? {} : { effort }) })
       }
       setCapped(spawnDecisions, result.agentId, observed ? { ...decision, model: observed, family: familyOf(observed, familyPorts) } : decision)

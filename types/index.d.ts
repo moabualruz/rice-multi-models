@@ -5,7 +5,7 @@ export type ModelPrefs = {
   helper: 'session' | 'once'
 }
 
-export type AgentModelOwner = { id: string; model: string; explicitNative: boolean; background?: boolean; effort?: string | number }
+export type AgentModelOwner = { id: string; model: string; explicitNative: boolean; background?: boolean; effort?: string | number; workflowRunId?: string }
 
 /** Observed invocation display data only; never a substitute model identity or agent address. */
 export type AgentDisplay = { toolUseId: string; agentId?: string; model?: string; effort?: string | number }

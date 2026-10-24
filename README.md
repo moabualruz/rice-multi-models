@@ -35,6 +35,10 @@ effort, and a failed subagent's error stays in its own answer.
 Release 0.17.2 labels every subagent row with the model Claude runs it on, inherited ones
 included, in Claude's own order: the Agent call's model, the agent definition's,
 `CLAUDE_CODE_SUBAGENT_MODEL`, then the parent's.
+Release 0.17.3 adds the two variables Claude resolves before that order: an agent in a workflow
+run takes `CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL` in place of the call's and the definition's
+model, and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` outranks every other model, so its row shows
+`CLAUDE_CODE_SUBAGENT_MODEL`, or the parent's when that is unset.
 Earlier owner/model, capacity, streaming, failure and fork repairs remain.
 The mod registers no MCP tools and needs no launcher, proxy or gateway.
 
