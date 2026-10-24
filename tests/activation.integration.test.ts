@@ -1102,7 +1102,8 @@ test('a live workflow child, which no agent list names, holds the window across 
   const fresh = await import('../hooks/register.ts?owned-workflow-reload')
   const reloaded = new Map<string, (...args: any[]) => any>()
   fresh.register(((event: string, match: any, callback: any) => { reloaded.set(event, callback ?? match); return { catch: () => undefined } }) as any)
-  await reloaded.get('session.start')!(f.host, { isInteractive: false }, async () => ({ started: true }))
+  // A hot reload need not replay session.start before the next synchronization.
+  await reloaded.get('command.run')!(f.host, { args: 'setup repair' })
   expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('32768')
   expect(await complete(reloaded, 'owned-ended-subagent')).toEqual({ text: 'owned answer' })
   expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('32768')

@@ -159,11 +159,10 @@ function activeContext(model: string) {
 /** The smallest reported window among the routed models running now: the main model and every live subagent. */
 async function windowInUse($: EngineInterface): Promise<number | undefined> {
   const models = [await $.session.model()]
-  for (const agent of await $.agent.list().catch(() => [])) {
-    const model = ['pending', 'running', 'waiting', 'idle'].includes(agent.status) ? agentModels.get(agent.id) : undefined
-    if (model) models.push(model)
-  }
-  for (const id of (await read($, workflowAgentsAtom)).entries) {
+  const listed = (await $.agent.list().catch(() => [])).filter(agent => ['pending', 'running', 'waiting', 'idle'].includes(agent.status)).map(agent => agent.id)
+  // Ownership comes from session state, so a reloaded module still counts every live child.
+  for (const id of [...listed, ...(await read($, workflowAgentsAtom)).entries]) {
+    await restoreOwner($, id)
     const model = agentModels.get(id)
     if (model) models.push(model)
   }
