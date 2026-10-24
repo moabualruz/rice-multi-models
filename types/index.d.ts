@@ -5,7 +5,10 @@ export type ModelPrefs = {
   helper: 'session' | 'once'
 }
 
-export type AgentModelOwner = { id: string; model: string; explicitNative: boolean; background?: boolean }
+export type AgentModelOwner = { id: string; model: string; explicitNative: boolean; background?: boolean; effort?: string | number }
+
+/** Observed invocation display data only; never a substitute model identity or agent address. */
+export type AgentDisplay = { toolUseId: string; agentId?: string; model?: string; effort?: string | number }
 
 /** Mod-owned transaction receipt. Hashes identify context, never retain its content. */
 export type CompactionReceipt = {
@@ -23,7 +26,10 @@ declare module 'claude-code' {
     'rice-multi-models': {
       prefs: ModelPrefs
       'agent-model-owners': { entries: readonly AgentModelOwner[] }
+      /** Bounded runtime diagnostics for the last failed step of each child; never provider payloads. */
+      'child-failures': { entries: readonly { agentId: string; turnId: string; report: string }[] }
       'compaction-receipts': { entries: readonly CompactionReceipt[] }
+      'agent-display': { entries: readonly AgentDisplay[] }
       nativeContext: { original: string | null; applied: string | null; relinquished: boolean }
       /** The main transcript's file, as the engine's classic hooks name it (a compaction summary cites it). */
       transcript: { path: string | null }

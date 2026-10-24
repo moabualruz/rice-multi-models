@@ -7,6 +7,7 @@ import { isObject, openAIOutputTokenParam } from '../../../hooks/config'
 import type { ModelConfig } from '../../../hooks/config'
 import { decoderOver, isIndex, params, parseJson, sseReader } from '../codec'
 import type { Codec, Neutral, Sink } from '../codec'
+import { openaiFailureCause } from '../errors'
 import type { Document, Image, Text } from '../history'
 
 type Json = Record<string, unknown>
@@ -131,7 +132,7 @@ function decoder() {
     const why = invalidChunk(c)
     if (why !== undefined) return s.fail(`malformed stream chunk: ${why}`)
     const chunk = c as Json
-    if (chunk['error'] !== undefined && chunk['error'] !== null) return s.fail(JSON.stringify(chunk['error']))
+    if (chunk['error'] !== undefined && chunk['error'] !== null) return s.fail(JSON.stringify(chunk['error']), openaiFailureCause(chunk['error']))
     const u = chunk['usage']
     if (isObject(u)) {
       const cached = (isObject(u['prompt_tokens_details']) ? (u['prompt_tokens_details']['cached_tokens'] as number | null | undefined) : 0) ?? 0
@@ -186,5 +187,6 @@ export const openai: Codec = {
     return { path: '/chat/completions', body: JSON.stringify(sent), effort: level ?? 'none' }
   },
   decoder,
+  errorCause: openaiFailureCause,
   stops: { stop: 'end_turn', length: 'max_tokens', content_filter: 'refusal', tool_calls: 'tool_use', function_call: 'tool_use' },
 }

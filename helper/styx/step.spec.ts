@@ -19,6 +19,7 @@ type Options = {
   providerParams?: Record<string, unknown>
   modelParams?: Record<string, unknown>
   aliasParams?: Record<string, unknown>
+  reply?: { status: number; body: string }
 }
 
 const emptyBody = async function* (): AsyncGenerator<Uint8Array, undefined> {}
@@ -57,7 +58,8 @@ async function invoke(options: Options = {}) {
   const stepper = createStepper({
     post: async request => {
       posted.push(request)
-      return { status: 200, body: emptyBody(), cancel() {} }
+      const body = async function* () { yield new TextEncoder().encode(options.reply!.body); return undefined }
+      return { status: options.reply?.status ?? 200, body: options.reply ? body() : emptyBody(), cancel() {} }
     },
     run: async () => ({ exitCode: 0, stdout: 'synthetic-key' }),
     now: () => 1,
@@ -75,6 +77,40 @@ async function invoke(options: Options = {}) {
   for await (const event of stepper.step({ req, configText, approved: [fingerprint(provider)] }, new AbortController().signal)) events.push(event)
   return { body: posted[0] === undefined ? undefined : JSON.parse(posted[0].body) as Record<string, unknown>, posted, events }
 }
+
+test('codec-owned HTTP context overflow survives the helper boundary without retrying the unchanged request', async () => {
+  for (const providerKind of ['openai', 'responses', 'anthropic'] as const) {
+    const error = providerKind === 'anthropic'
+      ? { type: 'invalid_request_error', message: 'prompt is too long: 34000 tokens > 32768 maximum' }
+      : { type: 'invalid_request_error', code: 'context_length_exceeded', message: 'Owned input does not fit.' }
+    const result = await invoke({ providerKind, owner: 'owned-child', reply: { status: 400, body: JSON.stringify({ error }) } })
+    expect(result.events.find(event => event.type === 'error')).toMatchObject({ kind: 'request', status: 400, cause: 'context_overflow' })
+    expect(result.posted).toHaveLength(1)
+    expect(result.events.some(event => event.type === 'stop')).toBe(false)
+  }
+})
+
+test('codec-owned in-stream context overflow survives decoding and assembly, unlike unrelated or quoted errors', async () => {
+  for (const providerKind of ['openai', 'responses', 'anthropic'] as const) {
+    const error = providerKind === 'anthropic'
+      ? { type: 'invalid_request_error', message: 'prompt is too long: 34000 tokens > 32768 maximum' }
+      : { type: 'invalid_request_error', code: 'context_length_exceeded', message: 'Owned input does not fit.' }
+    const event = providerKind === 'responses' ? { type: 'response.failed', response: { error } } : { type: 'error', error }
+    const result = await invoke({ providerKind, reply: { status: 200, body: `data: ${JSON.stringify(event)}\n\n` } })
+    expect(result.events.find(event => event.type === 'error')).toMatchObject({ kind: 'response', cause: 'context_overflow' })
+    expect(result.posted).toHaveLength(1)
+  }
+  for (const providerKind of ['openai', 'responses', 'anthropic', 'gemini', 'bedrock'] as const) {
+    for (const body of [
+      JSON.stringify({ error: { type: 'invalid_request_error', code: 'bad_parameter', message: 'The user wrote context_length_exceeded in a prompt.' } }),
+      JSON.stringify({ error: { type: 'rate_limit_error', code: 'rate_limit_exceeded', message: 'Too many tokens per minute.' } }),
+      '<html><body>context_length_exceeded</body></html>',
+    ]) {
+      const result = await invoke({ providerKind, reply: { status: 400, body } })
+      expect(result.events.find(event => event.type === 'error')).not.toHaveProperty('cause')
+    }
+  }
+})
 
 test('runtime Responses bodies use a stable key scoped by provider, endpoint, exact model, session, and owner', async () => {
   const baseline = await invoke()

@@ -59,6 +59,11 @@ function fixture() {
           return discovery.unavailable ? { exitCode: 1, stdout: '', stderr: 'fixture unavailable' } : { exitCode: 0, stdout: JSON.stringify(discovery.catalogue), stderr: '' }
         }
         if (argv[2] === 'search-config') return { exitCode: 0, stdout: JSON.stringify({ ok: true, config: { version: 1, endpoints: [] } }), stderr: '' }
+        if (argv[2] === 'capture-tools') {
+          const sets = { foreground: ['Read'], background: ['Read'] }
+          const capture = { version: '2.1.296', tools: [{ name: 'Read', description: 'Read', input_schema: { type: 'object' } }], agentHead: 'Owned agent head', agentTail: 'Owned agent tail', prompts: { 'general-purpose': 'Owned general-purpose prompt' }, offered: { 'general-purpose': sets }, custom: sets }
+          return { exitCode: 0, stdout: JSON.stringify({ ok: true, capture }), stderr: '' }
+        }
         if (argv[2] === 'fetch-config-status') return { exitCode: 0, stdout: JSON.stringify(fetchStatus.result), stderr: '' }
         if (argv[2] === 'sync-picker') {
           const input = JSON.parse(options.stdin)
@@ -262,7 +267,7 @@ test('freshly discovered Codex models and limits are shared by the picker and vi
   }
   await callbacks.get('session.start')!(f.host, { isInteractive: true }, async () => ({}))
   expect(f.discoveries.length).toBe(1)
-  expect(f.syncs.at(-1).rows).toEqual([{ model: 'codex/custom-default', label: 'Fixture custom model', description: 'native provider; reported context 64000, input unknown, output 2048; native context registration unsupported' }])
+  expect(f.syncs.at(-1).rows).toEqual([{ model: 'codex/custom-default', label: 'Fixture custom model', description: 'native provider; reported context 64000, input unknown, output 2048, maximum context unknown, auto-compact unknown; effort unknown; modalities unknown; tools unknown, parallel unknown; native context registration unsupported' }])
   expect(f.notices.join('\n')).toContain('/model codex/custom-default')
 })
 
@@ -755,8 +760,6 @@ test('fork snapshots the last dispatched main request even when that request fai
   for await (const _chunk of callbacks.get('turn.step')!(f.host, { model: 'codex/fresh', turnId: 'last-sent-failure', index: 0, messageCount: 1 }, noNative)) {}
   const dispatchedContext = JSON.stringify(sent[1]!.transcript)
   failedMessages[0]!.content = 'MUTATED_AFTER_DISPATCH'
-  messages = [{ role: 'user', content: 'x'.repeat(30_000) }]
-  for await (const _chunk of callbacks.get('turn.step')!(f.host, { model: 'codex/fresh', turnId: 'unsent-over-budget', index: 0, messageCount: 1 }, noNative)) {}
   expect(sent.filter(request => request.who === 'main')).toHaveLength(2)
   messages = [{ role: 'user', content: 'CURRENT_CONTEXT_MUST_NOT_LEAK' }]
   f.host.prompt.compose = async () => { throw new Error('fork must not compose a new system') }
@@ -771,6 +774,90 @@ test('fork snapshots the last dispatched main request even when that request fai
   expect(forkTranscript).toContain('FORK_QUESTION')
   expect(JSON.stringify(sent[1]!.transcript)).toBe(dispatchedContext)
   expect(sent.at(-1).transcript).toEqual([{ role: 'user', content: [{ type: 'text', text: 'LAST_SENT_FAILED_PREFIX' }, { type: 'text', text: 'FORK_QUESTION' }] }])
+})
+
+test('a small child dispatches after Read without an input guard; provider overflow is explicit at step and handback', async () => {
+  const f = contextFixture()
+  f.env.set('CLAUDE_CODE_MAX_CONTEXT_TOKENS', '500000')
+  f.discovery.catalogue.models.push({ model: 'codex/tight-child', label: 'Owned child', execution: 'native provider', source: 'fixture', observedAt: 1_800_000_000_000, metadata: { ...unknownMetadata(), contextWindow: 32768, maxContextWindow: 32768, outputTokenLimit: 4096 } })
+  await startContext(f)
+  let transcript: any[] = [{ role: 'user', content: 'Read the owned input.' }]
+  f.host.session.messages = async () => transcript
+  f.host.prompt = { compose: async () => ({ sections: [{ id: 'base', text: 'Owned instructions' }] }) }
+  let requests = 0
+  f.host.process.spawn = async function* () {
+    requests++
+    const events = requests === 1
+      ? [{ type: 'tool_use', id: 'toolu_owned_read', name: 'Read', input: { file_path: '/owned/input' } }, { type: 'usage', in: 30000, out: 20, cacheRead: 0, cacheWrite: 0 }, { type: 'stop', reason: 'tool_use' }]
+      : [{ type: 'error', kind: 'request', cause: 'context_overflow', status: 400, text: 'Owned provider input limit.' }]
+    for (const event of events) yield { stream: 'stdout', text: JSON.stringify(event) + '\n' }
+    return { code: 0 }
+  }
+  const noNative = async function* () { throw new Error('no recovery or native fallback') }
+  const input = { model: 'codex/tight-child', agentId: 'owned-tight-child', turnId: 'owned-tight-turn', index: 0, messageCount: 1 }
+  const toolResult = await callbacks.get('tool.call')!(f.host, { tool: 'Agent', tool_use_id: 'toolu_tight_child' }, async () => {
+    for await (const _chunk of callbacks.get('turn.step')!(f.host, input, noNative)) {}
+    transcript = [...transcript, { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_owned_read', name: 'Read', input: { file_path: '/owned/input' } }] }, { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_owned_read', content: 'Owned input.' }] }]
+    const before = JSON.stringify(transcript), chunks: any[] = []
+    const stream = callbacks.get('turn.step')!(f.host, { ...input, index: 1, messageCount: 3 }, noNative)
+    let item = await stream.next()
+    while (!item.done) { chunks.push(item.value); item = await stream.next() }
+    expect(chunks.at(-1)).toMatchObject({ kind: 'stop', stopReason: null })
+    expect(item.value.toolUses).toEqual([])
+    const diagnostic = chunks.filter(chunk => chunk.kind === 'text').map(chunk => chunk.text).join('')
+    expect(diagnostic).toContain('context_overflow')
+    expect(diagnostic).toContain('codex/tight-child')
+    expect(diagnostic).toContain('HTTP 400')
+    expect(diagnostic).not.toContain('completed')
+    expect(item.value.answer).toContain(diagnostic)
+    expect(JSON.stringify(transcript)).toBe(before)
+    return { ref: 9, result: { status: 'completed', agentId: input.agentId, content: [] }, text: 'Subagent completed but returned no output.' }
+  })
+  const deny = String(toolResult.deny)
+  expect(deny).toContain('context_overflow')
+  expect(deny).toContain('codex/tight-child')
+  expect(requests).toBe(2)
+  expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('500000')
+  expect(f.contextWrites).toEqual([])
+})
+
+test('provider overflow reports stay child-owned, bounded and redacted; a later successful turn clears the failure', async () => {
+  const f = contextFixture()
+  await startContext(f)
+  f.host.session.messages = async () => [{ role: 'user', content: 'Owned child task' }]
+  f.host.prompt = { compose: async () => ({ sections: [{ id: 'base', text: 'Owned instructions' }] }) }
+  let failing = true, requests = 0
+  f.host.process.spawn = async function* () {
+    requests++
+    const events = failing
+      ? [{ type: 'error', kind: 'request', cause: 'context_overflow', status: 400, text: `Owned context limit. Bearer ${'x'.repeat(64)}\n${'overflow '.repeat(2000)}` }]
+      : [{ type: 'text', text: 'Owned continuation' }, { type: 'stop', reason: 'end_turn' }]
+    for (const event of events) yield { stream: 'stdout', text: JSON.stringify(event) + '\n' }
+    return { code: 0 }
+  }
+  const noNative = async function* () { throw new Error('no retry or fallback') }
+  for (const agentId of ['owned-background', 'owned-resumed', 'owned-fork']) {
+    const stream = callbacks.get('turn.step')!(f.host, { agentId, model: 'codex/fresh', turnId: `${agentId}-turn`, index: 1, messageCount: 3 }, noNative)
+    const chunks: any[] = []
+    let item = await stream.next()
+    while (!item.done) { chunks.push(item.value); item = await stream.next() }
+    expect(item.value.stopReason).toBeNull()
+    expect(item.value.toolUses).toEqual([])
+    expect(item.value.answer).toContain('context_overflow')
+    expect(item.value.answer).toContain('codex/fresh')
+    expect(item.value.answer.length).toBeLessThan(1400)
+    expect(item.value.answer).not.toContain('x'.repeat(64))
+    expect(chunks.filter(chunk => chunk.kind === 'text').map(chunk => chunk.text).join('')).toBe(item.value.answer)
+  }
+  expect(requests).toBe(3)
+  const other = { result: { status: 'completed', agentId: 'unrelated-child', content: [] } }
+  expect(await callbacks.get('tool.call')!(f.host, { tool: 'Agent', tool_use_id: 'toolu_other' }, async () => other)).toBe(other)
+  const failed = await callbacks.get('tool.call')!(f.host, { tool: 'Agent', tool_use_id: 'toolu_resumed' }, async () => ({ result: { status: 'completed', agentId: 'owned-resumed', content: [] } }))
+  expect(failed.deny).toContain('context_overflow')
+  failing = false
+  for await (const _chunk of callbacks.get('turn.step')!(f.host, { agentId: 'owned-resumed', model: 'codex/fresh', turnId: 'later-turn', index: 0, messageCount: 1 }, noNative)) {}
+  const success = { result: { status: 'completed', agentId: 'owned-resumed', content: [{ type: 'text', text: 'Owned continuation' }] } }
+  expect(await callbacks.get('tool.call')!(f.host, { tool: 'Agent', tool_use_id: 'toolu_later' }, async () => success)).toBe(success)
 })
 
 test('a failed routed stream preserves text after an incomplete tool without committing the tool', async () => {
@@ -897,11 +984,12 @@ test('capacity observations expire and optional discovery failure stays bounded 
   }
   const complete = callbacks.get('model.complete')!
   const native = async () => { throw new Error('no native fallback') }
-  expect((await complete(f.host, { model: 'codex/fresh', prompt: 'large '.repeat(7000) }, native)).value).toMatchObject({ isAnswered: false, error: 'invalid_request' })
-  expect(requests).toHaveLength(0)
+  // No plugin input guard: a large request is sent and the provider decides.
+  expect((await complete(f.host, { model: 'codex/fresh', prompt: 'large '.repeat(7000) }, native)).value.isAnswered).toBe(true)
+  expect(requests).toHaveLength(1)
   expect(f.discoveries).toHaveLength(2)
   expect((await complete(f.host, { model: 'codex/fresh', prompt: 'small request' }, native)).value.isAnswered).toBe(true)
-  expect(requests[0].native.maxTokens).toBe(1024)
+  expect(requests[1].native.maxTokens).toBe(1024)
   expect(f.discoveries).toHaveLength(2)
   f.discovery.unavailable = false
   f.discovery.catalogue.models[0]!.observedAt = now
@@ -939,6 +1027,25 @@ const switchContext = (f: ReturnType<typeof fixture>, model: string) => {
   return callbacks.get('classic.PostModelSwitch')!(f.host, { from_model, to_model: model, source: 'sdk' }, async () => ({ switched: true }))
 }
 
+test('complete model metadata is reported without substituting a process-global native window', async () => {
+  const f = contextFixture()
+  f.discovery.catalogue.models[0]!.metadata = { ...f.discovery.catalogue.models[0]!.metadata, outputTokenLimit: 4096, autoCompactTokenLimit: 450000, reasoningEfforts: ['low', 'high'], inputModalities: ['text', 'image'], tools: true, parallelToolCalls: true }
+  expect(await startContext(f)).toEqual({ started: true })
+  expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('500000')
+  const report = await callbacks.get('command.run')!(f.host, { args: 'status' })
+  expect(report.text).toContain('active context 500000')
+  expect(report.text).toContain('maximum context 872000')
+  expect(report.text).toContain('reported input 470000')
+  expect(report.text).toContain('reported output 4096')
+  expect(report.text).toContain('native window 500000')
+  expect(report.text).toContain('No public model.register/model definition operation')
+  expect(report.text).toContain('smallest reported window')
+  const row = f.syncs.at(-1).rows[0]
+  expect(row.model).toBe('codex/fresh')
+  for (const data of ['450000', 'low|high', 'text|image', 'tools true', 'parallel true']) expect(row.description).toContain(data)
+  expect(row.behavesAs).toBeUndefined()
+})
+
 test('native primary context uses the fresh active window, not maximum ceiling or input bound', async () => {
   const f = contextFixture()
   expect(await startContext(f)).toEqual({ started: true })
@@ -948,7 +1055,6 @@ test('native primary context uses the fresh active window, not maximum ceiling o
   expect(report.text).toContain('active context 500000')
   expect(report.text).toContain('maximum context 872000')
   expect(report.text).toContain('reported input 470000')
-  expect(report.text).toContain('effective input bound 467952')
   expect(report.text).toContain('native window 500000')
 })
 

@@ -91,6 +91,18 @@ function failed(send: Send, code = 'server_error') {
   send({ type: 'response.failed', response: { error: { code, message: 'synthetic provider failure' } } })
 }
 
+test('a typed context overflow is terminal once, even when its message resembles transient overload', async () => {
+  const server = await serve(async (_attempt, send) => {
+    send({ type: 'response.failed', response: { error: { code: 'context_length_exceeded', message: 'Owned input exceeds context capacity.' } } })
+  })
+  try {
+    const events = await collect(stepEvents(server.url))
+    expect(events.find(event => event.type === 'error')).toMatchObject({ cause: 'context_overflow' })
+    expect(events.some(event => event.type === 'stop')).toBe(false)
+    expect(server.requests()).toBe(1)
+  } finally { server.close() }
+})
+
 async function nextWithDeadlockGuard<T>(iterator: AsyncIterator<T>): Promise<IteratorResult<T>> {
   let timer: ReturnType<typeof setTimeout> | undefined
   try {

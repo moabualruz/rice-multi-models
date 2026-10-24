@@ -52,6 +52,12 @@ const provider = createServer(async (request, response) => {
     response.end(JSON.stringify(family === 'gemini' ? { models: ['main', 'child'].map(id => ({ name: 'models/' + id, inputTokenLimit: 495904, outputTokenLimit: 4096 })) } : { data: ['main', 'child'].map(id => ({ id, ...(family === 'anthropic' ? { max_input_tokens: 495904, max_tokens: 4096 } : {}) })) }))
     return
   }
+  // The provider, not the mod, owns its input limit: the budget family rejects every request as too long.
+  if (family === 'budget' && request.method === 'POST') {
+    observations.push({ phase, kind: 'provider', family, model: body.model })
+    response.writeHead(400, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ error: { message: 'Owned fixture: input exceeds the model context window', type: 'invalid_request_error', code: 'context_length_exceeded' } })); return
+  }
   // The engine's own summary prompt, which the routed compaction sends, asks for the two blocks its answer is read by.
   const compaction = text.includes('<analysis>') && text.includes('<summary>')
   if (protocols.includes(family) && family !== 'openai') {
@@ -287,10 +293,10 @@ try {
   }
   if (wants('budget')) {
     const { code, result } = await run('budget', ['--no-session-persistence', '--tools', ''], 'Owned oversized context. '.repeat(250), { model: 'budget/main', expectSuccess: false })
-    assert.equal(code, 1, 'a no-output budget refusal is an unsuccessful native CLI result')
-    assert.equal(result?.is_error, true, 'the bounded guard is not a successful assistant answer')
+    assert.equal(code, 1, 'a provider context overflow is an unsuccessful native CLI result')
+    assert.equal(result?.is_error, true, 'the provider refusal is not a successful assistant answer')
     assert.ok(result.result === undefined || result.result === '', 'the diagnostic is not fabricated assistant content')
-    assert.equal(observations.filter(event => event.phase === 'budget' && event.kind === 'provider').length, 0, 'an oversized request stops before provider dispatch')
+    assert.equal(observations.filter(event => event.phase === 'budget' && event.kind === 'provider').length, 1, 'the request reaches the provider once: no plugin pre-abort and no replay')
   }
   if (wants('failure')) {
     const rejected = await run('request-failure', ['--no-session-persistence'], 'Return the owned quota rejection.', { expectSuccess: false })

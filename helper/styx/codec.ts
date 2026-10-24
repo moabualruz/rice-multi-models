@@ -6,7 +6,7 @@
 import type { Effort } from '../../hooks/protocol'
 import { EFFORTS, isObject } from '../../hooks/config'
 import type { ModelConfig, ProviderConfig } from '../../hooks/config'
-import type { RemoteTool, SearchSource, StopReason, Usage } from '../../hooks/protocol'
+import type { RemoteTool, SearchSource, StepFailureCause, StopReason, Usage } from '../../hooks/protocol'
 import { ERROR_TEXT_MAX } from './errors'
 import type { Message, Thinking } from './history'
 
@@ -48,20 +48,22 @@ export type Decoded =
   | { t: 'search_sources'; sources: SearchSource[]; searched: boolean }
   | ({ t: 'usage' } & Usage)
   | { t: 'finish'; reason: string }
-  | { t: 'error'; message: string }
+  | { t: 'error'; message: string; cause?: StepFailureCause }
 
 // `feed` takes the response's bytes as they come; `end`, called once the response ended cleanly, gives what
 // remains, an error when the response was incomplete.
 type Decoder = { feed(bytes: Uint8Array): Decoded[]; end(): Decoded[] }
 // What a decoder's handlers write to and read from: the events out so far, and the first fault, which ends
 // the reading (a later one is not recorded).
-export type Sink = { out: Decoded[]; failed: boolean; fail(message: string): void }
+export type Sink = { out: Decoded[]; failed: boolean; fail(message: string, cause?: StepFailureCause): void }
 
 export type Codec = {
   // The request: its path under the provider's baseUrl, its body, the headers the kind requires, the effort
   // level applied, and `lost` when the thinking param was left out for want of a tool turn's signed blocks.
   encode(n: Neutral, p: ProviderConfig, m: ModelConfig): { path: string; body: string; headers?: Record<string, string>; effort: Effort | 'none'; lost?: true }
   decoder(): Decoder
+  /** Classification belongs to this protocol; unsupported error shapes stay unclassified. */
+  errorCause?(error: unknown): StepFailureCause | undefined
   // The stop reason each finish reason reads as; any other reads as end_turn.
   stops: Readonly<Record<string, StopReason>>
 }
@@ -161,7 +163,7 @@ export function sseReader() {
 // A decoder over `source`'s items: each goes to `item` until a fault ends the reading, and a source that throws
 // (a corrupt frame) is a fault. `end` adds what a response that ended cleanly still owes.
 export function decoderOver<T>(source: { feed(bytes: Uint8Array): Iterable<T>; end(): Iterable<T> }, item: (s: Sink, x: T) => void, end: (s: Sink) => void): Decoder {
-  const s: Sink = { out: [], failed: false, fail: message => void (s.failed || ((s.failed = true), s.out.push({ t: 'error', message: message.slice(0, ERROR_TEXT_MAX) }))) }
+  const s: Sink = { out: [], failed: false, fail: (message, cause) => void (s.failed || ((s.failed = true), s.out.push({ t: 'error', message: message.slice(0, ERROR_TEXT_MAX), ...(cause ? { cause } : {}) }))) }
   const read = (items: () => Iterable<T>) => {
     s.out = []
     try {

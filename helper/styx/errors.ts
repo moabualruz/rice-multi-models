@@ -6,6 +6,7 @@
 // The one-line texts of failed provider requests: what failed, why, and what to do. Every provider text in
 // them is redacted and cut short. Pure.
 import type { ProviderConfig } from '../../hooks/config'
+import type { StepFailureCause } from '../../hooks/protocol'
 import { firstLine, redact } from '../../hooks/redact'
 
 // How a request ended without a usable response: no connection (refused, unresolved, or none within the
@@ -42,6 +43,18 @@ export function errorDetail(error: unknown): { message: string; type: string } {
   const text = (x: unknown) => (typeof x === 'string' ? x : typeof x === 'number' ? String(x) : '')
   const message = text(inner['message']) || text(o['message']) || text(o['detail']) || (typeof error === 'string' ? firstLine(error) : JSON.stringify(v))
   return { message, type: `${text(inner['type'])} ${text(inner['code'])}`.trim() }
+}
+
+/** OpenAI-compatible APIs identify overflow by a structured code/type, not by arbitrary message text. */
+export function openaiFailureCause(error: unknown): StepFailureCause | undefined {
+  const { type } = errorDetail(error)
+  return type.split(/\s+/).some(label => label === 'context_length_exceeded' || label === 'model_context_window_exceeded') ? 'context_overflow' : undefined
+}
+
+/** Anthropic's invalid_request_error also covers other errors; require its specific token-bound report. */
+export function anthropicFailureCause(error: unknown): StepFailureCause | undefined {
+  const { type, message } = errorDetail(error)
+  return type === 'invalid_request_error' && /^prompt is too long: \d+ tokens > \d+ maximum\b/.test(message) ? 'context_overflow' : undefined
 }
 
 // The models a gateway's key-access error (LiteLLM's format) names as allowed (`models=['a', 'b']`), when it names any.

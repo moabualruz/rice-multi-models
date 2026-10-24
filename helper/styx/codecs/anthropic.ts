@@ -7,6 +7,7 @@ import { isObject } from '../../../hooks/config'
 import { str } from '../../../hooks/transcript'
 import { count, decoderOver, lastUsers, lostThinking, obj, params, parseJson, sseReader, thinkingReader } from '../codec'
 import type { Codec, Sink } from '../codec'
+import { anthropicFailureCause } from '../errors'
 import type { Message } from '../history'
 import { uniqueSearchSources } from '../../core/search.ts'
 
@@ -73,7 +74,7 @@ function decoder() {
     const block = obj(ev['content_block'])
     switch (ev['type']) {
       case 'error':
-        return fail(JSON.stringify(ev['error'] ?? ev))
+        return fail(JSON.stringify(ev['error'] ?? ev), anthropicFailureCause(ev['error'] ?? ev))
       case 'message_start':
         return take(obj(obj(ev['message'])['usage']))
       case 'content_block_start':
@@ -150,5 +151,6 @@ export const anthropic: Codec = {
     return { path: '/v1/messages', body: JSON.stringify(sent), headers: { 'anthropic-version': '2023-06-01' }, effort: level ?? 'none', ...(lost ? { lost } : {}) }
   },
   decoder,
+  errorCause: anthropicFailureCause,
   stops: { end_turn: 'end_turn', max_tokens: 'max_tokens', tool_use: 'tool_use', stop_sequence: 'end_turn', refusal: 'refusal' },
 }

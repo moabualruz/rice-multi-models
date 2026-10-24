@@ -4746,6 +4746,14 @@ function errorDetail(error) {
   const message = text2(inner["message"]) || text2(o["message"]) || text2(o["detail"]) || (typeof error === "string" ? firstLine(error) : JSON.stringify(v));
   return { message, type: `${text2(inner["type"])} ${text2(inner["code"])}`.trim() };
 }
+function openaiFailureCause(error) {
+  const { type } = errorDetail(error);
+  return type.split(/\s+/).some((label) => label === "context_length_exceeded" || label === "model_context_window_exceeded") ? "context_overflow" : void 0;
+}
+function anthropicFailureCause(error) {
+  const { type, message } = errorDetail(error);
+  return type === "invalid_request_error" && /^prompt is too long: \d+ tokens > \d+ maximum\b/.test(message) ? "context_overflow" : void 0;
+}
 var allowedModels = (message) => (/models=\[([^\]]*)\]/.exec(message)?.[1] ?? "").split(",").map((s) => s.trim().replace(/^['"]|['"]$/g, "")).filter((s) => MODEL_NAME_RE.test(s) && !/^sk-/i.test(s));
 function httpErrorText(p, status, body2, model2) {
   if (/^\s*</.test(body2) && /<(?:!doctype\s+html|html|head|body)\b/i.test(body2.slice(0, 512))) {
@@ -4808,8 +4816,8 @@ var ProviderFailure = class _ProviderFailure extends Error {
     super(oneLine(message, 300));
     this.info = info;
     const labels = [info.code, info.type].filter((value) => !!value);
-    this.overloaded = !labels.some((label) => PERMANENT.has(label)) && (labels.some((label) => OVERLOAD.test(label)) || info.status === 503 || info.status === 529 || OVERLOAD.test(message));
-    this.transient = labels.some((label) => PERMANENT.has(label)) ? false : this.overloaded ? true : info.status !== void 0 ? info.status === 408 || info.status === 429 || info.status >= 500 && info.status <= 599 : info.closeCode !== void 0 ? TRANSIENT_CLOSE.has(info.closeCode) : labels.some((label) => TRANSIENT.has(label)) || labels.length === 0 && (info.event === "response.failed" || info.event === "error") || info.transient === true;
+    this.overloaded = info.cause !== "context_overflow" && !labels.some((label) => PERMANENT.has(label)) && (labels.some((label) => OVERLOAD.test(label)) || info.status === 503 || info.status === 529 || OVERLOAD.test(message));
+    this.transient = info.cause === "context_overflow" || labels.some((label) => PERMANENT.has(label)) ? false : this.overloaded ? true : info.status !== void 0 ? info.status === 408 || info.status === 429 || info.status >= 500 && info.status <= 599 : info.closeCode !== void 0 ? TRANSIENT_CLOSE.has(info.closeCode) : labels.some((label) => TRANSIENT.has(label)) || labels.length === 0 && (info.event === "response.failed" || info.event === "error") || info.transient === true;
   }
   transient;
   overloaded;
@@ -4819,12 +4827,14 @@ var ProviderFailure = class _ProviderFailure extends Error {
     const inner = record(outer.error ?? response.error);
     const status = outer.status ?? outer.status_code ?? inner.status ?? inner.status_code;
     const headers2 = record(outer.headers);
+    const cause = openaiFailureCause(inner) ?? openaiFailureCause(outer);
     return new _ProviderFailure(string(outer.message) || string(inner.message) || "OpenAI stream failed", {
       event: string(outer.type) || "error",
       code: string(inner.code) || string(outer.code) || void 0,
       type: string(inner.type) || string(outer.error_type) || void 0,
       status: typeof status === "number" ? status : void 0,
-      retryAfterMs: retryAfterMs(headers2["retry-after"] ?? outer.retry_after ?? inner.retry_after)
+      retryAfterMs: retryAfterMs(headers2["retry-after"] ?? outer.retry_after ?? inner.retry_after),
+      ...cause ? { cause } : {}
     });
   }
   finalText(attempts) {
@@ -6824,7 +6834,7 @@ async function* codexStep(req, model2, signal, options = {}) {
             await waitForRetry(delay2, signal);
             continue;
           }
-          queue.push({ type: "error", kind: error instanceof UpstreamError || error instanceof CodexAuthError ? "request" : "response", text: finalText(failure, attempt), ...failure.info.status === void 0 ? {} : { status: failure.info.status }, ...signal.aborted ? { aborted: true } : {} });
+          queue.push({ type: "error", kind: error instanceof UpstreamError || error instanceof CodexAuthError ? "request" : "response", text: finalText(failure, attempt), ...failure.info.cause ? { cause: failure.info.cause } : {}, ...failure.info.status === void 0 ? {} : { status: failure.info.status }, ...signal.aborted ? { aborted: true } : {} });
           return;
         }
       }
@@ -6996,7 +7006,7 @@ function sseReader() {
   return { feed: (bytes) => data(lines.feed(bytes)), end: () => data(lines.end()) };
 }
 function decoderOver(source, item, end) {
-  const s = { out: [], failed: false, fail: (message) => void (s.failed || (s.failed = true, s.out.push({ t: "error", message: message.slice(0, ERROR_TEXT_MAX) }))) };
+  const s = { out: [], failed: false, fail: (message, cause) => void (s.failed || (s.failed = true, s.out.push({ t: "error", message: message.slice(0, ERROR_TEXT_MAX), ...cause ? { cause } : {} }))) };
   const read2 = (items) => {
     s.out = [];
     try {
@@ -7073,7 +7083,7 @@ function decoder() {
     const block = obj(ev["content_block"]);
     switch (ev["type"]) {
       case "error":
-        return fail(JSON.stringify(ev["error"] ?? ev));
+        return fail(JSON.stringify(ev["error"] ?? ev), anthropicFailureCause(ev["error"] ?? ev));
       case "message_start":
         return take(obj(obj(ev["message"])["usage"]));
       case "content_block_start":
@@ -7161,6 +7171,7 @@ var anthropic = {
     return { path: "/v1/messages", body: JSON.stringify(sent), headers: { "anthropic-version": "2023-06-01" }, effort: level ?? "none", ...lost ? { lost } : {} };
   },
   decoder,
+  errorCause: anthropicFailureCause,
   stops: { end_turn: "end_turn", max_tokens: "max_tokens", tool_use: "tool_use", stop_sequence: "end_turn", refusal: "refusal" }
 };
 
@@ -7567,7 +7578,7 @@ function decoder4() {
     const why = invalidChunk(c);
     if (why !== void 0) return s.fail(`malformed stream chunk: ${why}`);
     const chunk = c;
-    if (chunk["error"] !== void 0 && chunk["error"] !== null) return s.fail(JSON.stringify(chunk["error"]));
+    if (chunk["error"] !== void 0 && chunk["error"] !== null) return s.fail(JSON.stringify(chunk["error"]), openaiFailureCause(chunk["error"]));
     const u = chunk["usage"];
     if (isObject(u)) {
       const cached = (isObject(u["prompt_tokens_details"]) ? u["prompt_tokens_details"]["cached_tokens"] : 0) ?? 0;
@@ -7620,6 +7631,7 @@ var openai = {
     return { path: "/chat/completions", body: JSON.stringify(sent), effort: level ?? "none" };
   },
   decoder: decoder4,
+  errorCause: openaiFailureCause,
   stops: { stop: "end_turn", length: "max_tokens", content_filter: "refusal", tool_calls: "tool_use", function_call: "tool_use" }
 };
 
@@ -7744,8 +7756,12 @@ function decoder5() {
       done(s, isObject(e["response"]) ? e["response"] : {}, type === "response.incomplete" ? "incomplete" : "completed");
     } else if (type === "response.failed") {
       const r = isObject(e["response"]) ? e["response"] : {};
-      s.fail(JSON.stringify(r["error"] ?? { message: "the response failed" }));
-    } else if (type === "error") s.fail(JSON.stringify(isObject(e["error"]) ? e["error"] : { message: str2(e["message"]) || "stream error", code: e["code"] }));
+      const error = r["error"] ?? { message: "the response failed" };
+      s.fail(JSON.stringify(error), openaiFailureCause(error));
+    } else if (type === "error") {
+      const error = isObject(e["error"]) ? e["error"] : { message: str2(e["message"]) || "stream error", code: e["code"] };
+      s.fail(JSON.stringify(error), openaiFailureCause(error));
+    }
   }
   return decoderOver(
     sseReader(),
@@ -7771,6 +7787,7 @@ var responses = {
     return { path: "/responses", body: JSON.stringify(sent), effort: level ?? "none" };
   },
   decoder: decoder5,
+  errorCause: openaiFailureCause,
   stops: { stop: "end_turn", tool_calls: "tool_use", max_output_tokens: "max_tokens", content_filter: "refusal" }
 };
 
@@ -8041,6 +8058,7 @@ var finishToken = (reason) => reason.toLowerCase().match(/^[a-z0-9_.-]{1,64}$/)?
 function assembler(codec, provider2, ids, mint = mintToolId, captureContinuation = false) {
   const output = captureContinuation ? continuationOutput() : void 0;
   let failure;
+  let failureCause;
   let finish;
   let usage;
   let before = 0;
@@ -8066,8 +8084,10 @@ function assembler(codec, provider2, ids, mint = mintToolId, captureContinuation
         else if (d.t === "search_sources") emit({ type: "search_sources", sources: d.sources, searched: d.searched });
         else if (d.t === "usage") usage = { in: d.in, out: d.out, cacheRead: d.cacheRead, cacheWrite: d.cacheWrite, ...d.reasoning === void 0 ? {} : { reasoning: d.reasoning } };
         else if (d.t === "finish") finish = finishToken(d.reason);
-        else if (d.t === "error") failure = d.message;
-        else {
+        else if (d.t === "error") {
+          failure = d.message;
+          failureCause = d.cause;
+        } else {
           const input = typeof d.args === "string" ? parseJson(d.args.trim() === "" ? "{}" : d.args) : d.args;
           if (d.name === "") failure = "a tool call arrived with no name";
           else if (!isObject(input)) failure = `the ${d.name} call's arguments are not a JSON object`;
@@ -8090,7 +8110,7 @@ function assembler(codec, provider2, ids, mint = mintToolId, captureContinuation
       if (cut !== void 0) return { events: [...received, { type: "error", kind: "request", text: cut }], finish: "error" };
       if (failure !== void 0) {
         const text2 = `rice-multi-models: ${p.id} response failed: ${oneLine(errorDetail(failure).message, 300)}; retry, or see the debug log`;
-        return { events: [...received, { type: "error", kind: "response", text: text2 }], finish: "error" };
+        return { events: [...received, { type: "error", kind: "response", text: text2, ...failureCause ? { cause: failureCause } : {} }], finish: "error" };
       }
       const reason = own(codec.stops, finish ?? "stop");
       const events = [...received, { type: "stop", reason: reason ?? "end_turn" }];
@@ -8141,7 +8161,7 @@ function createStepper(env) {
       );
       return [...events, st];
     };
-    const refuse = (text2, status2) => close([{ type: "error", kind: "request", text: text2, ...status2 === void 0 ? {} : { status: status2 } }], "error");
+    const refuse = (text2, status2, cause) => close([{ type: "error", kind: "request", text: text2, ...status2 === void 0 ? {} : { status: status2 }, ...cause ? { cause } : {} }], "error");
     if (t?.kind !== "remote") return yield* refuse(`rice-multi-models: ${req.target} is not configured in this session; run /rice-models reload`);
     const { provider: p, model: m } = t;
     const approved = new Set(w.approved);
@@ -8203,7 +8223,10 @@ function createStepper(env) {
     }
     if ("cut" in answer) return signal.aborted ? void close([], "aborted") : yield* refuse(cutText(p, answer.cut));
     http = String(answer.status);
-    if (answer.status < 200 || answer.status > 299) return yield* refuse(httpErrorText(p, answer.status, await errorBody(answer), m.id), answer.status);
+    if (answer.status < 200 || answer.status > 299) {
+      const body2 = await errorBody(answer);
+      return yield* refuse(httpErrorText(p, answer.status, body2, m.id), answer.status, codec.errorCause?.(body2));
+    }
     const decoder6 = codec.decoder();
     const asm = assembler(codec, req.continuation ? scope : p.id, ids, mintToolId, req.continuation !== void 0);
     let cut;
