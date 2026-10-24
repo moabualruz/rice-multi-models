@@ -24,6 +24,8 @@ compaction and recovery run. Claude receives the smallest context window among t
 main model and live routed subagents, so subagents compact natively. Subagent rows show
 the resolved model and effort, a failed child reports its error, and project agent files
 run as Claude applies them whatever model they name.
+Release 0.17.1 removes the context window override and the subagent result rewrite: the mod
+reports each model's data and Claude resolves windows and compacts every agent natively.
 Earlier owner/model, capacity, streaming, failure and fork repairs remain.
 The mod registers no MCP tools and needs no launcher, proxy or gateway.
 

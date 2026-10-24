@@ -4,7 +4,7 @@
 // the provider, and its stream comes back as the engine's own chunks. Claude models pass through untouched.
 import { atom, read, update } from 'claude-code'
 import type { AgentDisplay, AgentModelOwner, CompactionReceipt } from '../types'
-import type { EngineInterface, ModelCompleteResult, ModelUsage, Origin, Register, ToolCallResult, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
+import type { EngineInterface, ModelCompleteResult, ModelUsage, Origin, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
 import { AGENT_TOOL, CARRIER_VALUE, agentLabel, classifyCall, emptyCarrier, entryOf, exactModelIds, forgetEntry, markDescription, pickRequested, recordEntry, unmarkDescription, withDescriptionSuffix } from './agent-model'
 import { BUILTIN_AGENTS, HANDBACK_TOOL, identityLine, isFork, toolFilter } from './agents'
@@ -80,16 +80,14 @@ import { createEvaluatorSources, registerEvaluatorSources } from './evaluator-so
 
 const PLUGIN = 'rice-multi-models'
 /** Who the requests to declared providers say they come from (OpenCode Go asks each client to name itself). */
-const USER_AGENT = 'rice-multi-models/0.17.0 (claude-code)'
+const USER_AGENT = 'rice-multi-models/0.17.1 (claude-code)'
 const PROVIDERS: Readonly<Record<string, string>> = { codex: 'OpenAI Codex (ChatGPT subscription)' }
 const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 const prefsAtom = atom({ plugin: 'rice-multi-models', key: 'prefs' } as const, { effort: null, transport: 'auto', helper: 'session' })
 /** Exact Agent model ids carried from a call's tool.call to its agent.spawn (see agent-model.ts), by tool_use_id; host state, so a hot reload keeps it. */
 const carrierAtom = atom({ plugin: 'rice-multi-models', key: 'agent-model-carrier' } as const, emptyCarrier)
 const ownersAtom = atom({ plugin: 'rice-multi-models', key: 'agent-model-owners' } as const, { entries: [] as readonly AgentModelOwner[] })
-const childFailuresAtom = atom({ plugin: 'rice-multi-models', key: 'child-failures' } as const, { entries: [] as readonly { agentId: string; turnId: string; report: string }[] })
 const agentDisplayAtom = atom({ plugin: 'rice-multi-models', key: 'agent-display' } as const, { entries: [] as readonly AgentDisplay[] })
-const workflowAgentsAtom = atom({ plugin: 'rice-multi-models', key: 'workflow-agents' } as const, { entries: [] as readonly string[] })
 const receiptsAtom = atom({ plugin: 'rice-multi-models', key: 'compaction-receipts' } as const, { entries: [] as readonly CompactionReceipt[] })
 /** The main transcript's file, as the engine's classic hooks name it; a compaction cites it in its summary message. */
 const transcriptAtom = atom({ plugin: 'rice-multi-models', key: 'transcript' } as const, { path: null })
@@ -127,7 +125,6 @@ let catalogueCheckedAt: number | undefined
 let capacityExpiresAt: number | undefined
 let catalogueRefresh: Promise<void> | undefined
 const CAPACITY_MAX_AGE_MS = 5 * 60_000
-let nativeContextSync = Promise.resolve()
 let compactionTemplate: Promise<CompactionTemplate> | undefined
 /** The installed claude's tool definitions and agent prompts, per combination of the session's built-in tools (toolSetKey). */
 const toolCaptures = new Map<string, Promise<NativeCapture>>()
@@ -154,61 +151,6 @@ function activeContext(model: string) {
   const provider = target.slice(0, target.indexOf('/'))
   if (!isRouted(model) || !catalogue.providers.some(entry => entry.provider === provider && entry.status === 'fresh')) return undefined
   return catalogue.models.find(entry => entry.model === target && entry.execution === 'native provider')?.metadata
-}
-
-/** The smallest reported window among the routed models running now: the main model and every live subagent. */
-async function windowInUse($: EngineInterface): Promise<number | undefined> {
-  const models = [await $.session.model()]
-  const listed = (await $.agent.list().catch(() => [])).filter(agent => ['pending', 'running', 'waiting', 'idle'].includes(agent.status)).map(agent => agent.id)
-  // Ownership comes from session state, so a reloaded module still counts every live child.
-  for (const id of [...listed, ...(await read($, workflowAgentsAtom)).entries]) {
-    await restoreOwner($, id)
-    const model = agentModels.get(id)
-    if (model) models.push(model)
-  }
-  const windows = models.map(model => activeContext(model)?.contextWindow)
-    .filter((window): window is number => typeof window === 'number' && Number.isSafeInteger(window) && window > 0)
-  return windows.length ? Math.min(...windows) : undefined
-}
-
-/**
- * Claude's own accounting and automatic compaction need each model's window, and the public API has no per-model or
- * per-agent registration. The supported process-local CLAUDE_CODE_MAX_CONTEXT_TOKENS is that data: it carries the
- * smallest window among the routed models in use so no loop outgrows its model before Claude compacts it. An owner's
- * explicit override stays authoritative; the mod restores only the value it owns.
- */
-async function syncNativeContext($: EngineInterface, restore = false): Promise<void> {
-  const sync = nativeContextSync.then(async () => {
-    const current = await $.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS') ?? null
-    const ref = { plugin: 'rice-multi-models', key: 'nativeContext' } as const
-    let held = (await $.state.get(ref)).value
-    if (!held) {
-      held = { original: current, applied: null, relinquished: false }
-      await $.state.set(ref, held)
-    }
-    if (held.relinquished || held.original !== null) return
-    if (current !== (held.applied ?? held.original)) {
-      await $.state.set(ref, { ...held, applied: null, relinquished: true })
-      return
-    }
-    const window = !restore && runtime.executable && !runtime.error && await $.env.get('DISABLE_COMPACT') === undefined ? await windowInUse($) : undefined
-    const desired = window === undefined ? held.original : String(window)
-    if ((await $.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS') ?? null) !== current) {
-      await $.state.set(ref, { ...held, applied: null, relinquished: true })
-      return
-    }
-    if (desired !== current) await $.env.set('CLAUDE_CODE_MAX_CONTEXT_TOKENS', desired ?? undefined)
-    try {
-      await $.state.set(ref, { ...held, applied: desired })
-    } catch (error) {
-      if (desired !== current && (await $.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS') ?? null) === desired) {
-        await $.env.set('CLAUDE_CODE_MAX_CONTEXT_TOKENS', current ?? undefined)
-      }
-      throw error
-    }
-  })
-  nativeContextSync = sync.catch(() => { $.ui.log(`${PLUGIN}: native context window synchronization unavailable`, { to: 'debug' }) })
-  await nativeContextSync
 }
 
 function outputLimit(model: string): number {
@@ -298,7 +240,6 @@ async function discoverCapacity(port: EvaluatorCapacityPort): Promise<void> {
 
 async function refreshCatalogue($: EngineInterface): Promise<void> {
   await discoverCapacity({ now: await $.clock.now(), helper: helperFile($.plugin.root), approved: [...await approvedSet($)], run: (argv, options) => $.process.run(argv, options) })
-  await syncNativeContext($)
 }
 
 async function refreshCapacity(port: EvaluatorCapacityPort): Promise<void> {
@@ -309,7 +250,6 @@ async function refreshCapacity(port: EvaluatorCapacityPort): Promise<void> {
 
 async function ensureFreshCapacity($: EngineInterface): Promise<void> {
   await refreshCapacity({ now: await $.clock.now(), helper: helperFile($.plugin.root), approved: [...await approvedSet($)], run: (argv, options) => $.process.run(argv, options) })
-  await syncNativeContext($)
 }
 
 /** Engine calls stay in this module; imported setup logic receives plain values and callable ports. */
@@ -642,14 +582,6 @@ async function rememberDisplay($: EngineInterface, entry: AgentDisplay): Promise
   await update($, agentDisplayAtom, state => ({ entries: [...state.entries.filter(row => row.toolUseId !== entry.toolUseId), { ...state.entries.find(row => row.toolUseId === entry.toolUseId), ...entry }].slice(-256) }))
 }
 
-/** The public tool result can mark failure; the public step stream cannot carry a native API error. */
-async function childHandback<R extends ToolCallResult>($: EngineInterface, result: R): Promise<R | { deny: string }> {
-  if (result.deny !== undefined || result.isError) return result
-  const record = result.result as { status?: unknown; agentId?: unknown } | undefined
-  if (record?.status !== 'completed' || typeof record.agentId !== 'string') return result
-  const failed = (await read($, childFailuresAtom)).entries.find(entry => entry.agentId === record.agentId)
-  return failed ? { deny: failed.report } : result
-}
 
 async function restoreOwner($: EngineInterface, id: string): Promise<void> {
   if (agentModels.has(id) && spawnDecisions.has(id)) return
@@ -736,11 +668,6 @@ function carriesTask(transcript: readonly ApiMessage[]): boolean {
     : message.content.some(block => block.type !== 'text' || typeof block.text !== 'string' || !reminder(block.text))))
 }
 
-/** Keep only bounded runtime diagnostics, by exact child identity, across a native handback or reload. */
-async function rememberChildFailure($: EngineInterface, e: TurnStepInput, report?: string): Promise<void> {
-  if (e.agentId === undefined) return
-  await update($, childFailuresAtom, state => ({ entries: [...state.entries.filter(entry => entry.agentId !== e.agentId), ...(report ? [{ agentId: e.agentId!, turnId: e.turnId, report }] : [])].slice(-256) }))
-}
 
 /** A step answered with a visible refusal, without any provider request. */
 async function* refusedStep($: EngineInterface, e: TurnStepInput, text: string): AsyncGenerator<TurnStepChunk, TurnStepResult> {
@@ -748,7 +675,6 @@ async function* refusedStep($: EngineInterface, e: TurnStepInput, text: string):
   const assembler = createAssembler(e.model)
   assembler.feed({ type: 'error', kind: 'request', text })
   const end = assembler.end({ child: e.agentId !== undefined })
-  await rememberChildFailure($, e, end.diagnostic)
   yield* end.chunks
   return { turnId: e.turnId, index: e.index, answer: end.answer, toolUses: end.toolUses, stopReason: end.stopReason, usage: end.usage }
 }
@@ -827,7 +753,6 @@ async function* routedStep($: EngineInterface, e: TurnStepInput, signal?: AbortS
     assembler.feed({ type: 'error', kind: 'request', text: `rice-multi-models: ${error instanceof Error ? error.message : String(error)}` })
   }
   const end = assembler.end({ child: e.agentId !== undefined, ...(handback ? { handback } : {}), ...(signal?.aborted ? { failure: `${PLUGIN}: request aborted` } : {}) })
-  await rememberChildFailure($, e, end.diagnostic)
   if (end.failure !== undefined) {
     $.ui.log(end.diagnostic ?? redact(end.failure).slice(0, 1200), { to: 'transcript' })
     for (const chunk of pending) if (chunk.kind === 'text') yield chunk
@@ -1107,7 +1032,6 @@ async function nativeContextStatus($: EngineInterface) {
   const model = await $.session.model()
   const metadata = activeContext(model)
   const usage = await $.session.usage({ breakdown: 'summary' })
-  const held = (await $.state.get({ plugin: 'rice-multi-models', key: 'nativeContext' })).value
   const current = await $.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS') ?? null
   return {
     model,
@@ -1119,8 +1043,8 @@ async function nativeContextStatus($: EngineInterface) {
     reasoningEfforts: metadata?.reasoningEfforts ?? null,
     capabilities: { inputModalities: metadata?.inputModalities ?? null, tools: metadata?.tools ?? null, parallelToolCalls: metadata?.parallelToolCalls ?? null },
     nativeWindow: usage.context.window,
-    override: held?.applied !== null && held?.applied !== undefined && held.applied === current ? 'plugin-owned' : current !== null ? 'owner/external' : 'unmanaged',
-    scope: 'native accounting and automatic compaction are host-owned; the mod supplies the smallest reported window of the routed main model and live routed subagents as CLAUDE_CODE_MAX_CONTEXT_TOKENS and applies no input-budget aborts',
+    override: current !== null ? 'owner/external' : 'unset',
+    scope: 'the mod reports model data and sets no context override; window resolution, accounting and automatic compaction are Claude\'s own',
     limitations: NATIVE_MODEL_LIMITATIONS,
   }
 }
@@ -1267,7 +1191,6 @@ async function setupCommand($: EngineInterface, action: string | undefined): Pro
   if (action && !['repair', 'codex'].includes(action)) return 'Usage: /rice-models setup [repair|codex]. No global install is performed.'
   runtime = await detectRuntime($)
   if (runtime.error) {
-    await syncNativeContext($, true)
     return setupSummary(runtime, undefined, 0, undefined, undefined, await capabilitySummary($))
   }
   if (action === 'codex') {
@@ -1551,9 +1474,7 @@ export const register: Register = on => {
 
   on('classic.PostModelSwitch', async ($, e, next) => {
     await noteTranscript($, e).catch(() => {})
-    const switched = await next(e)
-    await syncNativeContext($)
-    return switched
+    return next(e)
   })
 
   on('session.end', async ($, e, next) => {
@@ -1574,7 +1495,6 @@ export const register: Register = on => {
       }
     }
     if (e.reason === 'clear') for (const row of (await read($, receiptsAtom)).entries) if (['preparing', 'prepared'].includes(row.status)) await saveReceipt($, { ...row, status: 'aborted', reason: 'clear' }, row)
-    await syncNativeContext($, true)
     return next(e)
   })
 
@@ -1637,7 +1557,7 @@ export const register: Register = on => {
       try {
         const effort = typeof e.effort === 'string' || typeof e.effort === 'number' ? e.effort : undefined
         await rememberDisplay($, { toolUseId: e.tool_use_id, ...(effort === undefined ? {} : { effort }) })
-        return await childHandback($, await agentCall($, e, next))
+        return await agentCall($, e, next)
       } finally { toolModes.delete(e.tool_use_id) }
     }
     if (e.tool !== 'WebSearch' && e.tool !== 'WebFetch') return next(e).finally(() => { toolModes.delete(e.tool_use_id) })
@@ -1786,11 +1706,6 @@ export const register: Register = on => {
       }
       setCapped(spawnDecisions, result.agentId, observed ? { ...decision, model: observed, family: familyOf(observed, familyPorts) } : decision)
       if (observed) setCapped(agentModels, result.agentId, observed)
-      if (e.workflow) {
-        const id = result.agentId
-        await update($, workflowAgentsAtom, state => ({ entries: [...state.entries.filter(entry => entry !== id), id].slice(-256) }))
-      }
-      if (observed) await syncNativeContext($)
       setCapped(spawnBackground, result.agentId, e.background)
     }
     return result
@@ -1815,19 +1730,6 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // A workflow agent leaves the window data when its turn completes: no list row ends it.
-  on('turn.complete', { agentId: /[\s\S]+/ }, async ($, e, next) => {
-    try {
-      return await next(e)
-    } finally {
-      const id = e.agentId
-      if (id !== undefined && (await read($, workflowAgentsAtom)).entries.includes(id)) {
-        await update($, workflowAgentsAtom, state => ({ entries: state.entries.filter(entry => entry !== id) }))
-        await syncNativeContext($)
-      }
-    }
-  })
-
   on('tool.describe', async ($, e, next) => {
     const answer = await next(e)
     described.set(e.tool, { description: answer.description, isDeferred: answer.isDeferred ?? e.isDeferred })
@@ -1845,8 +1747,6 @@ export const register: Register = on => {
       return yield* refusedStep($, e, `${PLUGIN}: the model family of this conversation could not be resolved (${error instanceof Error ? error.message : String(error)}); nothing was sent`)
     }
     if (e.agentId !== undefined) await rememberOwner($, e.agentId, e.model, spawnBackground.get(e.agentId), isRouted(e.model) ? routedEffort(e.model, e.effort, (await read($, prefsAtom)).effort) : e.effort)
-    // Ended subagents leave the window data at the next step of any loop.
-    if (isRouted(e.model) || agentModels.size) await syncNativeContext($)
     await reconcileCompaction($, e.agentId, e.model)
     const claimed = claimedRefusal(e.model)
     if (claimed) return yield* refusedStep($, e, claimed)

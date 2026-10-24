@@ -26,13 +26,8 @@ declare module 'claude-code' {
     'rice-multi-models': {
       prefs: ModelPrefs
       'agent-model-owners': { entries: readonly AgentModelOwner[] }
-      /** Bounded runtime diagnostics for the last failed step of each child; never provider payloads. */
-      'child-failures': { entries: readonly { agentId: string; turnId: string; report: string }[] }
       'compaction-receipts': { entries: readonly CompactionReceipt[] }
       'agent-display': { entries: readonly AgentDisplay[] }
-      /** Live workflow agents, which `$.agent.list()` never names: from their spawn until their turn completes. */
-      'workflow-agents': { entries: readonly string[] }
-      nativeContext: { original: string | null; applied: string | null; relinquished: boolean }
       /** The main transcript's file, as the engine's classic hooks name it (a compaction summary cites it). */
       transcript: { path: string | null }
       /** Exact Agent model ids awaiting their agent.spawn, by tool_use_id (see hooks/agent-model.ts). */
