@@ -970,6 +970,10 @@ test('an inherited child is labelled with the model Claude resolves for it, in C
     const builtin = await spawn('opus', 'statusline-setup')
     expect(builtin.received.description).toBe('owned spawn (sonnet)')
     expect(builtin.received.model).toBeUndefined()
+    // Explore's own definition says inherit, so it runs on the parent's model and the variable does not apply.
+    const explore = await spawn('opus', 'Explore')
+    expect(explore.received.description).toBe('owned spawn (opus)')
+    expect(explore.received.model).toBeUndefined()
     // A definition's own "inherit" decides before the variable, as the parent's model.
     const name = 'inheriting-review'
     const directory = `${root}/fixture-${name}/.claude/agents`
