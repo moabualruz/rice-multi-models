@@ -27,8 +27,9 @@ run as Claude applies them whatever model they name.
 Release 0.17.1 fills Claude's own model fields instead: every model is a picker row, its
 real window is its per-model `modelSettings.<id>.autoCompactWindow`, its effort levels go to
 `CLAUDE_CODE_MODEL_CAPABILITIES`, and `CLAUDE_CODE_MAX_CONTEXT_TOKENS` holds the largest window,
-so Claude compacts each agent at its own model's size. Every subagent row shows its model and
-effort, and a failed subagent's error stays in its own answer.
+so from the launch after a model's window is written Claude compacts each agent at its own
+model's size (until then that model bounds the largest window). Every subagent row shows its
+model and effort, and a failed subagent's error stays in its own answer.
 Earlier owner/model, capacity, streaming, failure and fork repairs remain.
 The mod registers no MCP tools and needs no launcher, proxy or gateway.
 

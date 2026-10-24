@@ -32,10 +32,14 @@ function nativeIds(catalogue: ModelCatalogue, aliases: AliasTargets): [string, M
 }
 
 /**
- * Whether Claude reads an id as one of its own models, such as `opencode/claude-sonnet-4-6`: its
- * `modelSettings` resolve to that Claude model and Claude's own window data applies, so the mod leaves both alone.
+ * Whether Claude reads an id as one of its own models: an id naming a Claude family and version anywhere, such
+ * as `opencode/claude-sonnet-4-6`, resolves to that model in Claude's `modelSettings` and gets Claude's own
+ * window data, so the mod leaves both alone. Any other id, `my-claude-route` included, stays its own.
  */
-const namesClaudeModel = (id: string) => /claude-/i.test(id)
+const namesClaudeModel = (id: string) => /claude-(?:opus|sonnet|haiku|fable|mythos)-\d|claude-\d(?:-\d)?-(?:opus|sonnet|haiku)/i.test(id)
+
+/** Whether Claude takes a window as a per-model `autoCompactWindow`. */
+const perModelWindow = (window: number) => window >= 100_000 && window <= 1_000_000
 
 /** Each model's real window as its compaction window (Claude's range is 100000 to 1000000), and its top effort when it caps below xhigh. */
 export function nativeModelSettings(catalogue: ModelCatalogue, aliases: AliasTargets = {}): Record<string, NativeModelSettings> {
@@ -45,7 +49,7 @@ export function nativeModelSettings(catalogue: ModelCatalogue, aliases: AliasTar
     const window = windowOf(metadata.contextWindow)
     const top = EFFORTS.filter(level => metadata.reasoningEfforts?.includes(level)).at(-1)
     const entry: NativeModelSettings = {
-      ...(window !== undefined && window >= 100_000 && window <= 1_000_000 ? { autoCompactWindow: window } : {}),
+      ...(window !== undefined && perModelWindow(window) ? { autoCompactWindow: window } : {}),
       ...(top === 'low' || top === 'medium' || top === 'high' ? { maxEffortLevel: top } : {}),
     }
     if (Object.keys(entry).length) settings[id] = entry
@@ -57,16 +61,25 @@ export function nativeModelSettings(catalogue: ModelCatalogue, aliases: AliasTar
  * Claude's process environment for non-Claude models: the largest reported window among the ids it applies
  * to, which each model's own `autoCompactWindow` then lowers to its real size, and each id's effort levels in
  * Claude's capability syntax (matched to the exact id). Unknown data adds nothing, so Claude's native defaults stay.
+ *
+ * Claude loads per-model windows when it launches (`loaded`, keyed as Claude keys them), so one written later
+ * applies from its next launch: until then a model without its loaded window bounds the largest window.
  */
-export function nativeModelEnv(catalogue: ModelCatalogue, aliases: AliasTargets = {}): Record<string, string> {
+export function nativeModelEnv(catalogue: ModelCatalogue, aliases: AliasTargets = {}, loaded: Readonly<Record<string, number>> = {}): Record<string, string> {
   const ids = nativeIds(catalogue, aliases)
   const windows = ids.flatMap(([id, metadata]) => namesClaudeModel(id) ? [] : windowOf(metadata.contextWindow) ?? [])
+  const unloaded = ids.flatMap(([id, metadata]) => {
+    const window = windowOf(metadata.contextWindow)
+    if (namesClaudeModel(id) || window === undefined || !perModelWindow(window)) return []
+    const own = loaded[id.toLowerCase()]
+    return own !== undefined && own <= window ? [] : [window]
+  })
   const capabilities = ids.flatMap(([id, { reasoningEfforts: efforts }]) => {
     if (efforts === null) return []
     return [`${id}=${efforts.length === 0 ? '-effort' : ['effort', efforts.includes('xhigh') ? 'xhigh_effort' : '-xhigh_effort', efforts.includes('max') ? 'max_effort' : '-max_effort'].join(',')}`]
   })
   return {
-    ...(windows.length ? { CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(Math.max(...windows)) } : {}),
+    ...(windows.length ? { CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(Math.min(Math.max(...windows), ...unloaded)) } : {}),
     ...(capabilities.length ? { CLAUDE_CODE_MODEL_CAPABILITIES: capabilities.join(';') } : {}),
   }
 }

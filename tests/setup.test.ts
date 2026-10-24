@@ -81,12 +81,17 @@ test('catalogue data maps to Claude\'s native per-model fields and leaves unknow
   })
   expect(nativeModelEnv({ models: [], providers: [] })).toEqual({})
   // An alias is a model id of its own to Claude: it carries its target's fields, and nothing when its target has none.
-  const aliases = { preferred: 'local/qwen', quiet: 'local/unknown', steady: 'opencode/claude-sonnet-4-6' }
-  expect(nativeModelSettings(catalogue, aliases)).toEqual({ 'codex/gpt-6.1-sol': { autoCompactWindow: 500000 }, 'local/qwen': { maxEffortLevel: 'high' }, preferred: { maxEffortLevel: 'high' }, steady: { autoCompactWindow: 900000, maxEffortLevel: 'high' } })
+  // An alias that only contains "claude-" names no Claude model, so it is an id of its own too.
+  const aliases = { preferred: 'local/qwen', quiet: 'local/unknown', steady: 'opencode/claude-sonnet-4-6', 'my-claude-route': 'codex/gpt-6.1-sol' }
+  expect(nativeModelSettings(catalogue, aliases)).toEqual({ 'codex/gpt-6.1-sol': { autoCompactWindow: 500000 }, 'local/qwen': { maxEffortLevel: 'high' }, preferred: { maxEffortLevel: 'high' }, steady: { autoCompactWindow: 900000, maxEffortLevel: 'high' }, 'my-claude-route': { autoCompactWindow: 500000 } })
+  // Before Claude has loaded their windows, the models that need one bound the largest window.
   expect(nativeModelEnv(catalogue, aliases)).toEqual({
-    CLAUDE_CODE_MAX_CONTEXT_TOKENS: '900000',
-    CLAUDE_CODE_MODEL_CAPABILITIES: 'codex/gpt-6.1-sol=effort,xhigh_effort,-max_effort;local/qwen=effort,-xhigh_effort,-max_effort;local/plain=-effort;opencode/claude-sonnet-4-6=effort,-xhigh_effort,-max_effort;preferred=effort,-xhigh_effort,-max_effort;steady=effort,-xhigh_effort,-max_effort',
+    CLAUDE_CODE_MAX_CONTEXT_TOKENS: '500000',
+    CLAUDE_CODE_MODEL_CAPABILITIES: 'codex/gpt-6.1-sol=effort,xhigh_effort,-max_effort;local/qwen=effort,-xhigh_effort,-max_effort;local/plain=-effort;opencode/claude-sonnet-4-6=effort,-xhigh_effort,-max_effort;preferred=effort,-xhigh_effort,-max_effort;steady=effort,-xhigh_effort,-max_effort;my-claude-route=effort,xhigh_effort,-max_effort',
   })
+  // Once Claude launched with each one's window, the largest is free; a loaded window above a model's own does not count.
+  expect(nativeModelEnv(catalogue, aliases, { 'codex/gpt-6.1-sol': 500000, steady: 900000, 'my-claude-route': 500000 }).CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe('900000')
+  expect(nativeModelEnv(catalogue, aliases, { 'codex/gpt-6.1-sol': 600000, steady: 900000, 'my-claude-route': 500000 }).CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe('500000')
 })
 
 test('picker sync never adds an empty picker block to settings that had none', async () => temporary(async configDir => {

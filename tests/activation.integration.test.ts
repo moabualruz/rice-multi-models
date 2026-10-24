@@ -1103,20 +1103,19 @@ test('an automatic catalogue refresh gives Claude the new per-model settings wit
   expect(f.syncs.at(-1).modelSettings).toEqual({ 'codex/fresh': { autoCompactWindow: 500000 } })
 })
 
-test('the environment\'s largest window waits for the per-model settings that lower each model to its own', async () => {
-  const f = contextFixture()
-  const run = f.host.process.run
-  let refuse = true
-  f.host.process.run = async (argv: string[], options: any) => argv[2] === 'sync-picker' && refuse
-    ? { exitCode: 0, stdout: JSON.stringify({ ok: false, changed: false, count: 0, path: '', error: 'fixture settings lock timeout' }), stderr: '' }
-    : run(argv, options)
-  await startContext(f)
-  expect(f.syncs).toEqual([])
-  expect(f.env.has('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(false)
-  refuse = false
-  await callbacks.get('command.run')!(f.host, { args: 'refresh' })
-  expect(f.syncs.at(-1).modelSettings).toEqual({ 'codex/fresh': { autoCompactWindow: 500000 } })
-  expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe('500000')
+test('the environment\'s largest window waits for the per-model windows Claude loaded at launch', async () => {
+  for (const loaded of [false, true]) {
+    const f = contextFixture()
+    const fresh = f.discovery.catalogue.models[0]!
+    f.discovery.catalogue.models.push({ ...fresh, model: 'codex/small', label: 'Small model', metadata: { ...fresh.metadata, contextWindow: 128000 } })
+    // What Claude read from settings when it launched: nothing yet, or the windows an earlier launch's sync wrote.
+    const launched = { 'codex/fresh': { autoCompactWindow: 500000 }, 'Codex/Small': { autoCompactWindow: 128000 } }
+    f.host.settings = { read: async (args: any) => args?.key === undefined ? {} : args.key === 'modelSettings' && loaded ? launched : undefined }
+    await startContext(f)
+    expect(f.syncs.at(-1).modelSettings).toEqual({ 'codex/fresh': { autoCompactWindow: 500000 }, 'codex/small': { autoCompactWindow: 128000 } })
+    // Settings written now apply from Claude's next launch, so a model without its loaded window bounds the largest.
+    expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(loaded ? '500000' : '128000')
+  }
 })
 
 test('a native environment sync that cannot finish puts back what it changed and keeps the original for session end', async () => {

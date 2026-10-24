@@ -244,10 +244,30 @@ const NATIVE_ENV_NAMES = ['CLAUDE_CODE_MAX_CONTEXT_TOKENS', 'CLAUDE_CODE_MODEL_C
 type NativeEnvName = typeof NATIVE_ENV_NAMES[number]
 let nativeEnvSync = Promise.resolve()
 /**
- * The environment that goes with the per-model settings Claude last received (see syncPicker): its largest
- * window never reaches Claude before the settings that lower each model to its own.
+ * The per-model compaction windows Claude loaded when this process launched (see readLoadedWindows): the
+ * settings the mod writes apply from Claude's next launch, so the environment is sized against these.
  */
-let settledEnv: Record<string, string> = {}
+let loadedWindows: Record<string, number> = {}
+
+/**
+ * Claude's per-model windows as it loaded them, read once per process at the first `session.start` (before
+ * the mod writes any) and kept in reload-surviving state, keyed in lower case as Claude keys them.
+ */
+async function readLoadedWindows($: EngineInterface): Promise<Record<string, number>> {
+  const ref = { plugin: 'rice-multi-models', key: 'loadedWindows' } as const
+  const held = (await $.state.get(ref)).value
+  if (held) return held
+  const windows: Record<string, number> = {}
+  try {
+    const settings = await $.settings.read({ key: 'modelSettings' })
+    for (const [id, entry] of Object.entries(typeof settings === 'object' && settings !== null ? settings : {})) {
+      const window = (entry as { autoCompactWindow?: unknown } | null)?.autoCompactWindow
+      if (typeof window === 'number' && Number.isSafeInteger(window)) windows[id.toLowerCase()] = window
+    }
+  } catch { /* Unread settings load nothing: every model then bounds the largest window. */ }
+  await $.state.set(ref, windows)
+  return windows
+}
 
 /**
  * The model data Claude reads from its own environment for non-Claude ids (see nativeModelEnv). An owner's
@@ -255,7 +275,7 @@ let settledEnv: Record<string, string> = {}
  * `restore` puts back the original value it found.
  */
 async function syncNativeEnv($: EngineInterface, restore = false): Promise<void> {
-  const desired: Record<string, string> = restore || !runtime.executable || runtime.error ? {} : settledEnv
+  const desired: Record<string, string> = restore || !runtime.executable || runtime.error ? {} : nativeModelEnv(catalogue, aliasTargets(), loadedWindows)
   const sync = nativeEnvSync.then(async () => {
     const ref = { plugin: 'rice-multi-models', key: 'nativeEnv' } as const
     const stored = (await $.state.get(ref)).value ?? {}
@@ -309,8 +329,7 @@ async function refreshCapacity(port: EvaluatorCapacityPort): Promise<void> {
 async function ensureFreshCapacity($: EngineInterface): Promise<void> {
   const before = catalogue
   await refreshCapacity({ now: await $.clock.now(), helper: helperFile($.plugin.root), approved: [...await approvedSet($)], run: (argv, options) => $.process.run(argv, options) })
-  // A refresh that ran discovery gives Claude its per-model settings, and with them their environment; a
-  // failed write leaves Claude the last pair that landed until the next refresh tries again.
+  // A refresh that ran discovery writes its per-model settings for Claude's next launch, then the environment.
   if (catalogue !== before) await syncPicker($, runtime, routedRows())
   await syncNativeEnv($)
 }
@@ -330,12 +349,9 @@ async function detectRuntime($: EngineInterface): Promise<Runtime> {
   })
 }
 
-/** The picker rows and per-model settings, then the environment that goes with settings that landed. */
+/** The picker rows and per-model settings (for Claude's next launch), then the environment. */
 async function syncPicker($: EngineInterface, current: Runtime, rows: PickerRow[]): Promise<PickerResult> {
-  const data = catalogue
-  const aliases = aliasTargets()
-  const result = await synchronizePicker({ helper: helperFile($.plugin.root), run: (argv, options) => $.process.run(argv, options) }, current, rows, nativeModelSettings(data, aliases))
-  if (result.ok) settledEnv = nativeModelEnv(data, aliases)
+  const result = await synchronizePicker({ helper: helperFile($.plugin.root), run: (argv, options) => $.process.run(argv, options) }, current, rows, nativeModelSettings(catalogue, aliasTargets()))
   await syncNativeEnv($)
   return result
 }
@@ -1523,8 +1539,7 @@ export const register: Register = on => {
     await loadProviders($)
     agentModels.clear(); spawnDecisions.clear(); spawnBackground.clear()
     for (const owner of (await read($, ownersAtom)).entries) cacheOwner(owner)
-    // A session's environment comes only from its own settings sync below.
-    settledEnv = {}
+    loadedWindows = await readLoadedWindows($)
     await refreshCatalogue($)
     // A nested claude process can migrate settings; run it before any judgment
     // is pending so its settings change cannot invalidate one.
