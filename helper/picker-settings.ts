@@ -119,11 +119,11 @@ export async function syncPicker(input: PickerSyncInput): Promise<PickerSyncResu
       return typeof own === 'number' && typeof value === 'number' && own <= value ? undefined : value
     }
     // Claude keys a model's settings case-insensitively, without a trailing date and then without a trailing
-    // [1m], so the person's own entry under another spelling of the same model, whatever keys it holds, is
-    // theirs and the mod adds no key beside it.
+    // [1m], so the person's own entry under another spelling of the same model, whatever keys it holds (an
+    // empty one included: the mod never leaves one), is theirs and the mod adds no key beside it.
     const sameModel = (id: string) => id.toLowerCase().replace(/-\d{8}$/, '').replace(/\[1m\]$/, '')
     const theirs = (id: string) => Object.entries(modelSettings).some(([other, entry]) =>
-      other !== id && sameModel(other) === sameModel(id) && object(entry) && Object.keys(entry).some(key => !(object(ownedSettings[other]) && ownedSettings[other][key] === entry[key])))
+      other !== id && sameModel(other) === sameModel(id) && object(entry) && (Object.keys(entry).length === 0 || Object.keys(entry).some(key => !(object(ownedSettings[other]) && ownedSettings[other][key] === entry[key]))))
     for (const id of new Set([...Object.keys(ownedSettings), ...Object.keys(wanted)])) {
       const existing = modelSettings[id] === undefined ? {} : object(modelSettings[id]) ? { ...(modelSettings[id] as Json) } : undefined
       if (existing === undefined) continue
