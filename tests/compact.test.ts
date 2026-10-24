@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { retainedTail, withUserText, type CompactMessage } from '../hooks/compact'
+import { persistedCompactSource, retainedTail, withUserText, type CompactMessage } from '../hooks/compact'
 
 const row = (role: 'user' | 'assistant', text: string, handle: string): CompactMessage => ({ role, text, toolUses: [], handle })
 
@@ -56,6 +56,89 @@ test('the latest user message stays in the tail however long the history before 
   original.push(row('user', 'Keep going', 'latest'))
   const retained = retainedTail(original, { retainChars: 10_000 })
   expect(retained.at(-1)!.text).toBe('Keep going')
+})
+
+test('persisted context uses event UUID order and native API normalization, never file or branch order', () => {
+  const event = [row('user', 'Approval required.', 'a'), row('assistant', 'Pending.', 'b'), row('user', 'Continue.', 'c'), row('assistant', 'Checking.', 'd')]
+  const records = event.map(message => ({ type: message.role, uuid: message.handle, sessionId: 'owned', message: { role: message.role, content: message.text } }))
+  const api = event.slice(-2).map(message => ({ role: message.role, content: [{ type: 'text', text: message.text }] }))
+  const jsonl = [...records].reverse().concat({ ...records[0]!, uuid: 'archived', message: { role: 'user', content: 'Not active.' } }).map(record => JSON.stringify(record)).join('\n') + '\n'
+  const recovered = persistedCompactSource(jsonl, event, 'owned', api)
+  expect(recovered.map(message => JSON.stringify(message.content))).toEqual(event.map(message => JSON.stringify([{ type: 'text', text: message.text }])))
+  expect(recovered.at(-1)).toBe(api.at(-1))
+  expect(JSON.stringify(recovered)).not.toContain('Not active.')
+  for (const [source, messages, session, suffix, reason] of [
+    [jsonl.trimEnd(), event, 'owned', api, 'unflushed'],
+    [jsonl + '{partial\n', event, 'owned', api, 'partial'],
+    [jsonl, [{ ...event[0]!, handle: undefined }, ...event.slice(1)], 'owned', api, 'UUID'],
+    [jsonl, event, 'other', api, 'session'],
+    [jsonl, event, 'owned', [{ role: 'user', content: 'newer native content' }], 'API suffix'],
+  ] as const) expect(() => persistedCompactSource(source, messages, session, suffix)).toThrow(reason)
+})
+
+const cappedToolSource = () => {
+  const readInput = { file_path: '/owned/task.ts' }, readResult = { type: 'text', file: { content: 'approval pending' } }
+  const agentInput = { description: 'Check approval', prompt: 'Inspect the owned task', subagent_type: 'general-purpose' }
+  const agentResult = { agentId: 'stored-child', totalDurationMs: 17, content: [{ type: 'text', text: 'Approval pending.' }] }
+  const records: any[] = [
+    { type: 'user', uuid: 'approval', message: { role: 'user', content: 'Publication requires approval.' } },
+    { type: 'assistant', uuid: 'agent-call', message: { role: 'assistant', content: [{ type: 'text', text: 'Checking. ' }, { type: 'text', text: 'Delegating.' }, { type: 'tool_use', id: 'agent', name: 'Agent', input: agentInput }] } },
+    { type: 'user', uuid: 'agent-result', toolUseResult: agentResult, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'agent', content: [{ type: 'text', text: 'Approval pending.' }] }] } },
+    { type: 'assistant', uuid: 'read-call', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'read', name: 'Read', input: readInput }] } },
+    { type: 'user', uuid: 'read-result', toolUseResult: readResult, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'read', content: 'approval pending' }] } },
+    ...Array.from({ length: 4097 }, (_, i) => ({ type: i % 2 ? 'user' : 'assistant', uuid: `filler-${i}`, message: { role: i % 2 ? 'user' : 'assistant', content: [{ type: 'text', text: `owned ${i}` }] } })),
+  ].map(record => ({ ...record, sessionId: 'owned', isSidechain: false }))
+  const event: CompactMessage[] = [
+    row('user', 'Publication requires approval.', 'approval'),
+    { ...row('assistant', 'Checking. Delegating.', 'agent-call'), toolUses: [{ tool_use_id: 'agent', tool: 'Agent', input: agentInput, text: 'Approval pending.', result: agentResult, agentId: 'stored-child', durationMs: 17 }] },
+    { ...row('user', '', 'agent-result'), toolResults: [{ tool_use_id: 'agent', text: 'Approval pending.', isError: false, result: agentResult }] },
+    { ...row('assistant', '', 'read-call'), toolUses: [{ tool_use_id: 'read', tool: 'Read', input: readInput, text: 'approval pending', result: readResult }] },
+    { ...row('user', '', 'read-result'), toolResults: [{ tool_use_id: 'read', text: 'approval pending', isError: false, result: readResult }] },
+    ...records.slice(5).map(record => row(record.type as 'user' | 'assistant', record.message.content[0].text, record.uuid)),
+  ]
+  const api = records.slice(-4096).map(record => ({ role: record.message.role, content: record.message.content }))
+  return { records, event, api, jsonl: () => [...records].reverse().map(record => JSON.stringify(record)).join('\n') + '\n' }
+}
+
+test('capped persisted context recovers native Agent and Read exchanges outside the API suffix', () => {
+  const f = cappedToolSource()
+  const recovered = persistedCompactSource(f.jsonl(), f.event, 'owned', f.api)
+  expect(recovered).toHaveLength(f.event.length)
+  expect(recovered[1]!.content).toEqual(f.records[1]!.message.content)
+  expect(recovered[2]!.content).toEqual(f.records[2]!.message.content)
+  expect(recovered[3]!.content).toEqual(f.records[3]!.message.content)
+  expect(recovered[4]!.content).toEqual(f.records[4]!.message.content)
+  expect(recovered.at(-1)).toBe(f.api.at(-1))
+})
+
+test.each(['input', 'result-text', 'stored-result', 'event-result', 'error', 'pending', 'duplicate-call', 'duplicate-result', 'orphan-result', 'missing', 'conflicting', 'unflushed', 'annotated', 'replacement'] as const)('persisted native tool recovery fails closed on %s', boundary => {
+  const f = cappedToolSource()
+  if (boundary === 'input') f.records[1].message.content[2].input = { ...f.records[1].message.content[2].input, prompt: 'Publish now' }
+  if (boundary === 'result-text') f.records[2].message.content[0].content[0].text = 'Approved.'
+  if (boundary === 'stored-result') f.records[2].toolUseResult = { ...f.records[2].toolUseResult, agentId: 'different-child' }
+  if (boundary === 'event-result') f.event[1]!.toolUses[0]!.result = { changed: true }
+  if (boundary === 'error') f.records[4].message.content[0].is_error = true
+  if (boundary === 'pending') { f.records[4].message.content = []; f.event[4]!.toolResults = []; delete f.event[3]!.toolUses[0]!.result; delete f.event[3]!.toolUses[0]!.text }
+  if (boundary === 'duplicate-call') f.records[3].message.content.push(structuredClone(f.records[1].message.content[2]))
+  if (boundary === 'duplicate-result') f.records[4].message.content.push(structuredClone(f.records[4].message.content[0]))
+  if (boundary === 'orphan-result') f.records[4].message.content[0].tool_use_id = 'unknown'
+  if (boundary === 'missing') f.records.splice(2, 1)
+  if (boundary === 'conflicting') f.records.push({ ...f.records[2], toolUseResult: { different: true } })
+  if (boundary === 'annotated') f.records[2].message.content[0].content[0].citations = [{ type: 'char_location' }]
+  if (boundary === 'replacement') f.records.push({ type: 'content-replacement', sessionId: 'owned', replacements: [] })
+  expect(() => persistedCompactSource(boundary === 'unflushed' ? f.jsonl().trimEnd() : f.jsonl(), f.event, 'owned', f.api)).toThrow('persisted compaction context')
+})
+
+test('persisted native tool blocks agree with the available API suffix and retain error identity', () => {
+  const f = cappedToolSource()
+  f.records[4].message.content[0].is_error = true
+  f.event[4]!.toolResults![0]!.isError = true
+  f.event[3]!.toolUses[0]!.isError = true
+  const api = f.records.slice(1).map(record => ({ role: record.message.role, content: record.message.content }))
+  expect(persistedCompactSource(f.jsonl(), f.event, 'owned', api).at(1)).toBe(api[0])
+  const changed = structuredClone(api)
+  changed[2]!.content[0].input.file_path = '/owned/different.ts'
+  expect(() => persistedCompactSource(f.jsonl(), f.event, 'owned', changed)).toThrow('API suffix')
 })
 
 test('the prompt is appended to the last user turn, or opens a new one when the transcript ends on the model', () => {

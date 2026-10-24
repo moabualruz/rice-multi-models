@@ -21,7 +21,7 @@ import type { Reasoning } from './carry'
 import { CONTINUATION_OFF, continuationSessionPrefix, continuationStatus } from './continuation'
 import type { ContinuationRecord } from './continuation'
 import { clearContinuations, continuationRecords, saveContinuation, withContinuationStore } from './continuation-store'
-import { retainedTail, withUserText } from './compact'
+import { persistedCompactSource, retainedTail, withUserText } from './compact'
 import type { CompactMessage } from './compact'
 import { compactOwner, compactionPolicyBlock, historyContains, historyDigest, observedReceipt, putReceipt, RECEIPT_TTL_MS, receiptText } from './compaction-receipt'
 import { compactionPrompt, fitTranscript, isTemplate, summaryBody, summaryMessage } from './native-compaction'
@@ -1799,10 +1799,11 @@ export const register: Register = on => {
     if (claimed || e.agentId !== undefined && spawnDecisions.get(e.agentId)?.family !== CLAUDE_FAMILY && spawnDecisions.has(e.agentId) && !isRouted(model)) return { skip: `${PLUGIN}: the observed compaction model is unavailable; original transcript retained` }
     if (!isRouted(model)) return next(e)
     const who = e.agentId ?? 'main'
-    // Public reads can include pre-boundary history while the compact event contains only
-    // current context. Validate its suffix, then compare like-for-like public snapshots.
+    // Public reads can include archived history, or cap the complete event at 4096
+    // rows. Validate the shared suffix, then compare like-for-like public snapshots.
     const snapshot = await $.session.messages(e.agentId === undefined ? {} : { agentId: e.agentId })
-    if (!Array.isArray(snapshot) || snapshot.length < e.messages.length || await historyDigest(snapshot.slice(snapshot.length - e.messages.length)) !== await historyDigest(e.messages)) return { skip: `${PLUGIN}: compaction context changed before preparing; original transcript retained` }
+    const overlap = Array.isArray(snapshot) ? Math.min(snapshot.length, e.messages.length) : 0
+    if (!Array.isArray(snapshot) || !overlap || snapshot.length < e.messages.length && snapshot.length !== 4096 || await historyDigest(snapshot.slice(-overlap)) !== await historyDigest(e.messages.slice(-overlap))) return { skip: `${PLUGIN}: compaction context changed before preparing; original transcript retained` }
     const now = await $.clock.now()
     const receipt: CompactionReceipt = { id: crypto.randomUUID(), session: await $.session.id(), owner: compactOwner(e.agentId), model, trigger: e.trigger, status: 'preparing', at: now, expiresAt: now + RECEIPT_TTL_MS, source: await historyDigest(snapshot) }
     await saveReceipt($, receipt)
@@ -1827,8 +1828,19 @@ export const register: Register = on => {
         return skip(`${PLUGIN}: Claude Code's own compaction text could not be read from the installed claude (${error instanceof Error ? error.message : String(error)}); ${model} was not asked to compact, original transcript retained`)
       }
       next.signal.throwIfAborted()
-      const api = await $.session.messages({ as: 'api', ...(e.agentId === undefined ? {} : { agentId: e.agentId }) })
-      if (!Array.isArray(api)) return skip(`${PLUGIN}: the conversation of ${who} is unreadable (${api.deny}); original transcript retained`)
+      const history = await $.session.messages({ as: 'api', ...(e.agentId === undefined ? {} : { agentId: e.agentId }) })
+      if (!Array.isArray(history)) return skip(`${PLUGIN}: the conversation of ${who} is unreadable (${history.deny}); original transcript retained`)
+      const apiSnapshot = JSON.stringify(history)
+      let api: readonly ApiMessage[] = history
+      if (snapshot.length < e.messages.length) {
+        const path = e.agentId === undefined ? await transcriptPath($) : undefined
+        if (!path) return skip(`${PLUGIN}: capped compaction context has no observed main-session transcript path; original transcript retained`)
+        try {
+          api = persistedCompactSource(await $.fs.read(path), e.messages, receipt.session, api)
+        } catch (error) {
+          return skip(`${PLUGIN}: ${error instanceof Error ? error.message : 'persisted compaction context is unreadable'}; original transcript retained`)
+        }
+      }
       await ensureFreshCapacity($)
       next.signal.throwIfAborted()
       const budget = requestBudget(model)
@@ -1871,7 +1883,10 @@ export const register: Register = on => {
       // A context/model switch, superseding attempt or cancellation cannot install a
       // summary of an older snapshot. Original tail objects keep their opaque handles.
       const active = await $.session.messages(e.agentId === undefined ? {} : { agentId: e.agentId })
-      if (await $.session.id() !== receipt.session || (e.agentId === undefined ? await $.session.model() : agentModels.get(e.agentId)) !== model || !Array.isArray(active) || await historyDigest(active) !== receipt.source) return skip(`${PLUGIN}: compaction context changed while preparing; stale result discarded, original transcript retained`, 'stale-context')
+      // Public appends can be API-only meta rows. The projected snapshot alone
+      // misses them, including while native headless compaction is awaiting I/O.
+      const activeApi = await $.session.messages({ as: 'api', ...(e.agentId === undefined ? {} : { agentId: e.agentId }) })
+      if (await $.session.id() !== receipt.session || (e.agentId === undefined ? await $.session.model() : agentModels.get(e.agentId)) !== model || !Array.isArray(active) || await historyDigest(active) !== receipt.source || JSON.stringify(activeApi) !== apiSnapshot) return skip(`${PLUGIN}: compaction context changed while preparing; stale result discarded, original transcript retained`, 'stale-context')
       const cite = e.agentId === undefined ? await transcriptPath($) : undefined
       const messages = [{ role: 'user' as const, text: summaryMessage(template, coverage ? `[Compaction source coverage: ${coverage}. Excluded content was not summarized.]\n\n${body}` : body, cite), toolUses: [] }, ...retained]
       next.signal.throwIfAborted()

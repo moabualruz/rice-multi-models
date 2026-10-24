@@ -14,6 +14,8 @@ const native = process.env.RICE_CLAUDE_EXECUTABLE || 'claude'
 let child
 try {
   mkdirSync(plugin); mkdirSync(config)
+  const readFixture = join(fixture, 'owned.txt')
+  writeFileSync(readFixture, 'OWNED_CAPPED_READ_RESULT: approval remains pending.')
   for (const directory of ['.claude-plugin', 'hooks', 'types', 'dist', 'scripts', 'README.md']) cpSync(join(root, directory), join(plugin, directory), { recursive: true })
   writeFileSync(join(fixture, '.claude.json'), JSON.stringify({ hasCompletedOnboarding: true }))
   writeFileSync(join(config, 'settings.json'), '{}')
@@ -49,7 +51,9 @@ try {
     const transcript=JSON.stringify(wire.req.transcript)
     const launch=wire.req.who==='main'&&!summary&&transcript.includes('OWNED_TRACKED_AGENT')&&!transcript.includes('toolu_owned_projection')
     if(wire.req.who==='main'&&!summary&&transcript.includes('toolu_owned_projection'))await ownedChildDone
-    const events=launch?[{type:'tool_use',id:'toolu_owned_projection',name:'Agent',input:{description:'Owned tracked Agent',prompt:'Owned synthetic child',subagent_type:'general-purpose',run_in_background:true}},{type:'stop',reason:'tool_use'}]:[{type:'text',text},{type:'usage',in:10000,out:20,cacheRead:0,cacheWrite:0},{type:'stop',reason:'end_turn'}]
+    const capped=wire.req.who==='main'&&!summary&&transcript.includes('OWNED_CAPPED_TOOLS')
+    const tool=capped&&!transcript.includes('toolu_owned_capped_read')?{type:'tool_use',id:'toolu_owned_capped_read',name:'Read',input:{file_path:${JSON.stringify(readFixture)}}}:capped&&!transcript.includes('toolu_owned_capped_agent')?{type:'tool_use',id:'toolu_owned_capped_agent',name:'Agent',input:{description:'Owned capped Agent',prompt:'Report that approval remains pending.',subagent_type:'general-purpose'}}:launch?{type:'tool_use',id:'toolu_owned_projection',name:'Agent',input:{description:'Owned tracked Agent',prompt:'Owned synthetic child',subagent_type:'general-purpose',run_in_background:true}}:undefined
+    const events=tool?[tool,{type:'stop',reason:'tool_use'}]:[{type:'text',text},{type:'usage',in:10000,out:20,cacheRead:0,cacheWrite:0},{type:'stop',reason:'end_turn'}]
     for (const event of events) yield {stream:'stdout',text:JSON.stringify(event)+'\\n'}
     return {value:{code:0,signal:null}}
   })
@@ -121,7 +125,27 @@ try {
     return output
   }
   const manual = randomUUID()
-  await run('manual-seed', manual, ['--session-id', manual], 'Preserve /repo/task.ts. Publication requires my approval.')
+  await run('manual-seed', manual, ['--session-id', manual], 'OWNED_CAPPED_TOOLS: Preserve /repo/task.ts. Publication requires my approval.', 'Read,Agent')
+  // Exercise the native 4096-row read bound without thousands of provider turns.
+  // Only this exited, private fixture's transcript is seeded; production reads it.
+  const manualPaths = readdirSync(join(config, 'projects'), { recursive: true }).filter(path => typeof path === 'string' && path.endsWith(manual + '.jsonl'))
+  assert.equal(manualPaths.length, 1)
+  const manualFile = join(config, 'projects', manualPaths[0])
+  const manualRows = readFileSync(manualFile, 'utf8').trim().split('\n').map(JSON.parse)
+  const seedUser = manualRows.find(row => row.type === 'user'), seedAssistant = manualRows.findLast(row => row.type === 'assistant')
+  assert.ok(seedUser && seedAssistant)
+  const nativeTools = manualRows.filter(row => row.type === 'assistant').flatMap(row => row.message.content).filter(block => block.type === 'tool_use')
+  assert.deepEqual(nativeTools.map(block => block.name), ['Read', 'Agent'], 'ordinary native tools ran before seeding the capped fixture')
+  assert.equal(manualRows.filter(row => row.type === 'user' && Array.isArray(row.message.content) && row.message.content.some(block => block.type === 'tool_result')).length, 2, 'both native tool results were persisted')
+  let parentUuid = seedAssistant.uuid
+  for (let i = 0; i < 4096; i++) {
+    const row = structuredClone(i % 2 ? seedAssistant : seedUser)
+    row.uuid = randomUUID(); row.parentUuid = parentUuid; parentUuid = row.uuid
+    if (i % 2) { row.message.id = randomUUID(); row.message.content = [{ type: 'text', text: `Owned capped answer ${i}` }] }
+    else row.message.content = `Owned capped question ${i}`
+    manualRows.push(row)
+  }
+  writeFileSync(manualFile, manualRows.map(row => JSON.stringify(row)).join('\n') + '\n')
   await run('manual-compact', manual, ['--resume', manual], '/compact Retain the publication approval gate')
   const manualReceipts = JSON.parse(readFileSync(lifecycle, 'utf8')).flatMap(row => row.entries).filter(row => row.session === manual)
   console.log(JSON.stringify({ manualCompactionReceipts: manualReceipts }))
@@ -131,12 +155,14 @@ try {
   const summary = afterCompact.find(row => row.summary)
   assert.equal(summary?.target, 'codex/owned-public')
   // The request is the engine's own: the conversation as real messages, then its prompt with the person's instructions in its slot.
-  assert.ok(summary.messages >= 2, 'the conversation is sent as messages, not as one JSON document')
-  assert.ok(summary.prompt.includes('/repo/task.ts'), 'the conversation reaches the summarizer')
+  assert.ok(summary.messages > 4096, 'the capped native source is recovered as complete messages, not as one JSON document')
+  assert.ok(summary.prompt.includes('/repo/task.ts') && summary.prompt.includes('Publication requires my approval.'), 'the approval-bearing prefix outside the public API cap reaches the summarizer')
+  assert.ok(summary.prompt.includes('toolu_owned_capped_read') && summary.prompt.includes('toolu_owned_capped_agent') && summary.prompt.includes('OWNED_CAPPED_READ_RESULT'), 'the native calls and results outside the cap reach the actual selected summary request')
   assert.ok(summary.last.includes('CRITICAL: Respond with TEXT ONLY'), 'the engine\'s own summary prompt is used')
   assert.ok(summary.last.includes('Additional Instructions:') && summary.last.includes('Retain the publication approval gate'), 'the /compact instructions go in the engine\'s slot')
   assert.ok(!summary.prompt.includes('continuationInstructions'), 'no mod-made JSON wrapper')
   assert.equal(summary.maxTokens, 32768, 'the summary may use the output bound the provider reported, not a mod-made cap')
+  assert.equal(readFileSync(manualFile, 'utf8').trim().split('\n').map(JSON.parse).filter(row => row.subtype === 'compact_boundary').length, 1, 'manual tool-history compaction persists one native boundary')
   await run('manual-resume', manual, ['--resume', manual], 'Continue the pending work.')
   const afterResume = JSON.parse(readFileSync(evidence, 'utf8'))
   const resumed = afterResume.at(-1).prompt
