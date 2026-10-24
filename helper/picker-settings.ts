@@ -108,6 +108,14 @@ export async function syncPicker(input: PickerSyncInput): Promise<PickerSyncResu
     const ownedSettings = object(ownership.modelSettings) ? ownership.modelSettings : {}
     const modelSettings: Json = { ...((settings.modelSettings ?? {}) as Json) }
     const nextOwnedSettings: Record<string, Json> = {}
+    // A per-model value replaces this file's own top-level one for that model, so provider data only ever lowers it.
+    const levels = ['low', 'medium', 'high', 'xhigh', 'max']
+    const belowOwn = (key: string, value: unknown): unknown => {
+      const own = settings[key]
+      if (value === undefined || own === undefined) return value
+      if (key === 'maxEffortLevel') return levels.includes(own as string) && levels.indexOf(own as string) <= levels.indexOf(value as string) ? undefined : value
+      return typeof own === 'number' && typeof value === 'number' && own <= value ? undefined : value
+    }
     for (const id of new Set([...Object.keys(ownedSettings), ...Object.keys(wanted)])) {
       const existing = modelSettings[id] === undefined ? {} : object(modelSettings[id]) ? { ...(modelSettings[id] as Json) } : undefined
       if (existing === undefined) continue
@@ -116,8 +124,9 @@ export async function syncPicker(input: PickerSyncInput): Promise<PickerSyncResu
       const mine: Json = {}
       for (const key of NATIVE_SETTING_KEYS) {
         if (existing[key] !== ours[key]) continue
-        if (want[key] === undefined) delete existing[key]
-        else { existing[key] = want[key]; mine[key] = want[key] }
+        const value = belowOwn(key, want[key])
+        if (value === undefined) delete existing[key]
+        else { existing[key] = value; mine[key] = value }
       }
       if (Object.keys(existing).length) modelSettings[id] = existing
       else delete modelSettings[id]

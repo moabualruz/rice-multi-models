@@ -8830,6 +8830,13 @@ async function syncPicker(input) {
     const ownedSettings = object2(ownership.modelSettings) ? ownership.modelSettings : {};
     const modelSettings = { ...settings.modelSettings ?? {} };
     const nextOwnedSettings = {};
+    const levels = ["low", "medium", "high", "xhigh", "max"];
+    const belowOwn = (key, value) => {
+      const own3 = settings[key];
+      if (value === void 0 || own3 === void 0) return value;
+      if (key === "maxEffortLevel") return levels.includes(own3) && levels.indexOf(own3) <= levels.indexOf(value) ? void 0 : value;
+      return typeof own3 === "number" && typeof value === "number" && own3 <= value ? void 0 : value;
+    };
     for (const id2 of /* @__PURE__ */ new Set([...Object.keys(ownedSettings), ...Object.keys(wanted)])) {
       const existing = modelSettings[id2] === void 0 ? {} : object2(modelSettings[id2]) ? { ...modelSettings[id2] } : void 0;
       if (existing === void 0) continue;
@@ -8838,10 +8845,11 @@ async function syncPicker(input) {
       const mine = {};
       for (const key of NATIVE_SETTING_KEYS) {
         if (existing[key] !== ours[key]) continue;
-        if (want[key] === void 0) delete existing[key];
+        const value = belowOwn(key, want[key]);
+        if (value === void 0) delete existing[key];
         else {
-          existing[key] = want[key];
-          mine[key] = want[key];
+          existing[key] = value;
+          mine[key] = value;
         }
       }
       if (Object.keys(existing).length) modelSettings[id2] = existing;

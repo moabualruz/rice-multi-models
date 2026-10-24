@@ -1104,17 +1104,19 @@ test('an automatic catalogue refresh gives Claude the new per-model settings wit
 })
 
 test('the environment\'s largest window waits for the per-model windows Claude loaded at launch', async () => {
-  for (const loaded of [false, true]) {
+  for (const launch of ['none', 'loaded', 'reset'] as const) {
     const f = contextFixture()
     const fresh = f.discovery.catalogue.models[0]!
     f.discovery.catalogue.models.push({ ...fresh, model: 'codex/small', label: 'Small model', metadata: { ...fresh.metadata, contextWindow: 128000 } })
-    // What Claude read from settings when it launched: nothing yet, or the windows an earlier launch's sync wrote.
-    const launched = { 'codex/fresh': { autoCompactWindow: 500000 }, 'Codex/Small': { autoCompactWindow: 128000 } }
-    f.host.settings = { read: async (args: any) => args?.key === undefined ? {} : args.key === 'modelSettings' && loaded ? launched : undefined }
+    // What Claude read from each settings source when it launched: nothing yet, the windows an earlier
+    // launch's sync wrote, or those windows under a project file whose own window replaces them.
+    const user = launch === 'none' ? {} : { modelSettings: { 'codex/fresh': { autoCompactWindow: 500000 }, 'Codex/Small': { autoCompactWindow: 128000 } } }
+    const project = launch === 'reset' ? { autoCompactWindow: 'auto' } : {}
+    f.host.settings = { read: async (args: any) => args?.source === 'user' ? user : args?.source === 'project' ? project : args?.key === undefined ? {} : undefined }
     await startContext(f)
     expect(f.syncs.at(-1).modelSettings).toEqual({ 'codex/fresh': { autoCompactWindow: 500000 }, 'codex/small': { autoCompactWindow: 128000 } })
     // Settings written now apply from Claude's next launch, so a model without its loaded window bounds the largest.
-    expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(loaded ? '500000' : '128000')
+    expect(f.env.get('CLAUDE_CODE_MAX_CONTEXT_TOKENS')).toBe(launch === 'loaded' ? '500000' : '128000')
   }
 })
 

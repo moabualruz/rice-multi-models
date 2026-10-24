@@ -3,7 +3,7 @@
 // transcript, system prompt and tools, the shipped Node helper (dist/helper.mjs) calls
 // the provider, and its stream comes back as the engine's own chunks. Claude models pass through untouched.
 import { atom, read, update } from 'claude-code'
-import type { AgentDisplay, AgentModelOwner, CompactionReceipt } from '../types'
+import type { AgentDisplay, AgentModelOwner, CompactionReceipt, LoadedWindows } from '../types'
 import type { EngineInterface, ModelCompleteResult, ModelUsage, Origin, Register, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
 import { AGENT_TOOL, CARRIER_VALUE, agentLabel, classifyCall, emptyCarrier, entryOf, exactModelIds, forgetEntry, markDescription, pickRequested, recordEntry, unmarkDescription, withDescriptionSuffix } from './agent-model'
@@ -32,7 +32,7 @@ import type { NativeCapture } from './native-tools'
 import { createMemory } from './memory'
 import { CATALOG_URL, kindCounts, liveIds, opencodeProvider, TIERS } from './opencode'
 import type { Tier } from './opencode'
-import { catalogueRows, nativeModelEnv, nativeModelSettings } from './picker'
+import { catalogueRows, loadedWindowsOf, nativeModelEnv, nativeModelSettings } from './picker'
 import { NATIVE_MODEL_LIMITATIONS, unknownMetadata } from './catalogue'
 import type { ModelCatalogue } from './catalogue'
 import { runtimeConfig } from './catalogue-runtime'
@@ -247,23 +247,21 @@ let nativeEnvSync = Promise.resolve()
  * The per-model compaction windows Claude loaded when this process launched (see readLoadedWindows): the
  * settings the mod writes apply from Claude's next launch, so the environment is sized against these.
  */
-let loadedWindows: Record<string, number> = {}
+let loadedWindows: LoadedWindows = { byModel: {} }
 
 /**
  * Claude's per-model windows as it loaded them, read once per process at the first `session.start` (before
- * the mod writes any) and kept in reload-surviving state, keyed in lower case as Claude keys them.
+ * the mod writes any) from each settings source as Claude folds them, and kept in reload-surviving state.
  */
-async function readLoadedWindows($: EngineInterface): Promise<Record<string, number>> {
+async function readLoadedWindows($: EngineInterface): Promise<LoadedWindows> {
   const ref = { plugin: 'rice-multi-models', key: 'loadedWindows' } as const
   const held = (await $.state.get(ref)).value
   if (held) return held
-  const windows: Record<string, number> = {}
+  let windows: LoadedWindows = { byModel: {} }
   try {
-    const settings = await $.settings.read({ key: 'modelSettings' })
-    for (const [id, entry] of Object.entries(typeof settings === 'object' && settings !== null ? settings : {})) {
-      const window = (entry as { autoCompactWindow?: unknown } | null)?.autoCompactWindow
-      if (typeof window === 'number' && Number.isSafeInteger(window)) windows[id.toLowerCase()] = window
-    }
+    const sources: unknown[] = []
+    for (const source of ['user', 'project', 'local', 'flag', 'policy'] as const) sources.push(await $.settings.read({ source }))
+    windows = loadedWindowsOf(sources)
   } catch { /* Unread settings load nothing: every model then bounds the largest window. */ }
   await $.state.set(ref, windows)
   return windows

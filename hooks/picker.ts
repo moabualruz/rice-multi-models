@@ -1,4 +1,5 @@
 import type { ModelCatalogue } from './catalogue'
+import type { LoadedWindows } from '../types'
 
 export type PickerRow = { model: string; label: string; description?: string; behavesAs?: string }
 
@@ -41,6 +42,29 @@ const namesClaudeModel = (id: string) => /claude-(?:opus|sonnet|haiku|fable|myth
 /** Whether Claude takes a window as a per-model `autoCompactWindow`. */
 const perModelWindow = (window: number) => window >= 100_000 && window <= 1_000_000
 
+/**
+ * The fold Claude makes over its settings sources, lowest precedence first, when it launches: a source's
+ * per-model windows join those below it, and a source with its own top-level `autoCompactWindow` replaces
+ * them and the default.
+ */
+export function loadedWindowsOf(sources: readonly unknown[]): LoadedWindows {
+  const windowSetting = (value: unknown) => value === 'auto' || (typeof value === 'number' && Number.isSafeInteger(value)) ? value as number | 'auto' : undefined
+  let loaded: LoadedWindows = { byModel: {} }
+  for (const source of sources) {
+    const settings = typeof source === 'object' && source !== null ? source as Record<string, unknown> : {}
+    const entries = typeof settings.modelSettings === 'object' && settings.modelSettings !== null ? Object.entries(settings.modelSettings) : []
+    const own: Record<string, number | 'auto'> = {}
+    for (const [id, entry] of entries) {
+      const window = windowSetting((entry as { autoCompactWindow?: unknown } | null)?.autoCompactWindow)
+      const key = id.toLowerCase()
+      if (window !== undefined && (id === key || !Object.hasOwn(own, key))) own[key] = window
+    }
+    const top = windowSetting(settings.autoCompactWindow)
+    loaded = top === undefined ? { ...loaded, byModel: { ...loaded.byModel, ...own } } : { byModel: own, default: top }
+  }
+  return loaded
+}
+
 /** Each model's real window as its compaction window (Claude's range is 100000 to 1000000), and its top effort when it caps below xhigh. */
 export function nativeModelSettings(catalogue: ModelCatalogue, aliases: AliasTargets = {}): Record<string, NativeModelSettings> {
   const settings: Record<string, NativeModelSettings> = {}
@@ -62,17 +86,18 @@ export function nativeModelSettings(catalogue: ModelCatalogue, aliases: AliasTar
  * to, which each model's own `autoCompactWindow` then lowers to its real size, and each id's effort levels in
  * Claude's capability syntax (matched to the exact id). Unknown data adds nothing, so Claude's native defaults stay.
  *
- * Claude loads per-model windows when it launches (`loaded`, keyed as Claude keys them), so one written later
- * applies from its next launch: until then a model without its loaded window bounds the largest window.
+ * Claude loads per-model windows when it launches (`loaded`, see loadedWindowsOf), so one written later
+ * applies from its next launch: until then a model without a loaded window at or below its own bounds the largest.
  */
-export function nativeModelEnv(catalogue: ModelCatalogue, aliases: AliasTargets = {}, loaded: Readonly<Record<string, number>> = {}): Record<string, string> {
+export function nativeModelEnv(catalogue: ModelCatalogue, aliases: AliasTargets = {}, loaded: LoadedWindows = { byModel: {} }): Record<string, string> {
   const ids = nativeIds(catalogue, aliases)
   const windows = ids.flatMap(([id, metadata]) => namesClaudeModel(id) ? [] : windowOf(metadata.contextWindow) ?? [])
   const unloaded = ids.flatMap(([id, metadata]) => {
     const window = windowOf(metadata.contextWindow)
     if (namesClaudeModel(id) || window === undefined || !perModelWindow(window)) return []
-    const own = loaded[id.toLowerCase()]
-    return own !== undefined && own <= window ? [] : [window]
+    const key = id.toLowerCase()
+    const own = Object.hasOwn(loaded.byModel, key) ? loaded.byModel[key] : loaded.default
+    return typeof own === 'number' && own <= window ? [] : [window]
   })
   const capabilities = ids.flatMap(([id, { reasoningEfforts: efforts }]) => {
     if (efforts === null) return []

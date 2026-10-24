@@ -7,6 +7,9 @@ export type ModelPrefs = {
 
 export type AgentModelOwner = { id: string; model: string; explicitNative: boolean; background?: boolean; effort?: string | number }
 
+/** Claude's per-model compaction windows as it loaded them at launch: by lower-case id, else the default. */
+export type LoadedWindows = { byModel: Readonly<Record<string, number | 'auto'>>; default?: number | 'auto' }
+
 /** Observed invocation display data only; never a substitute model identity or agent address. */
 export type AgentDisplay = { toolUseId: string; agentId?: string; model?: string; effort?: string | number }
 
@@ -30,8 +33,8 @@ declare module 'claude-code' {
       'agent-display': { entries: readonly AgentDisplay[] }
       /** Native environment variables the mod sets from model data, with the values it found and last set. */
       nativeEnv: Record<string, { original: string | null; applied: string | null; relinquished: boolean }>
-      /** The per-model compaction windows Claude loaded when this process launched, keyed in lower case. */
-      loadedWindows: Record<string, number>
+      /** The per-model compaction windows Claude loaded when this process launched. */
+      loadedWindows: LoadedWindows
       /** The main transcript's file, as the engine's classic hooks name it (a compaction summary cites it). */
       transcript: { path: string | null }
       /** Exact Agent model ids awaiting their agent.spawn, by tool_use_id (see hooks/agent-model.ts). */

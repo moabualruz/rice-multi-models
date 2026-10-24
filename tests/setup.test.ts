@@ -8,7 +8,7 @@ import { opencodeEntries, opencodeKey } from '../helper/opencode-auth'
 import { absoluteExecutable, commandText, detectRuntime, setupSummary, startupNotice } from '../hooks/setup'
 import { parseConfig } from '../hooks/config'
 import { unknownMetadata, type ModelCatalogue } from '../hooks/catalogue'
-import { nativeModelEnv, nativeModelSettings } from '../hooks/picker'
+import { loadedWindowsOf, nativeModelEnv, nativeModelSettings } from '../hooks/picker'
 
 test('displayed login commands preserve shell metacharacters and use PowerShell invocation on Windows', () => {
   expect(commandText(['C:\\Program Files\\nodejs\\node.exe', "C:\\User's files\\codex.js", 'login'], 'win32')).toBe("& 'C:\\Program Files\\nodejs\\node.exe' 'C:\\User''s files\\codex.js' 'login'")
@@ -60,6 +60,32 @@ test('native model settings fill only their own keys, keep the person\'s values 
   await syncPicker({ configDir, rows: [], modelSettings: {} })
   expect(JSON.parse(await readFile(file, 'utf8')).modelSettings).toEqual({ 'local/qwen': { effortLevel: 'low', autoCompactWindow: 200000 }, 'claude-opus-5-5': { maxEffortLevel: 'medium' } })
 }))
+
+test('provider data never raises a cap the settings file sets itself', async () => temporary(async configDir => {
+  const file = path.join(configDir, 'settings.json')
+  await writeFile(file, JSON.stringify({ maxEffortLevel: 'medium', autoCompactWindow: 200000 }))
+  // Claude lets a per-model value replace the file's own top-level one, so only a lower value is written.
+  const modelSettings = { 'local/big': { autoCompactWindow: 500000, maxEffortLevel: 'high' }, 'local/small': { autoCompactWindow: 128000, maxEffortLevel: 'low' } }
+  expect(await syncPicker({ configDir, rows, modelSettings })).toMatchObject({ ok: true })
+  const written = JSON.parse(await readFile(file, 'utf8'))
+  expect([written.maxEffortLevel, written.autoCompactWindow]).toEqual(['medium', 200000])
+  expect(written.modelSettings).toEqual({ 'local/small': { autoCompactWindow: 128000, maxEffortLevel: 'low' } })
+}))
+
+test('the windows Claude loaded fold its settings sources the way Claude does', () => {
+  const user = { modelSettings: { 'Local/A': { autoCompactWindow: 128000 }, 'local/b': { autoCompactWindow: 500000 }, 'local/c': { effortLevel: 'low' } } }
+  expect(loadedWindowsOf([user, {}, {}, {}, {}])).toEqual({ byModel: { 'local/a': 128000, 'local/b': 500000 } })
+  // A higher source's own top-level window replaces every per-model window below it.
+  expect(loadedWindowsOf([user, { autoCompactWindow: 'auto' }, { modelSettings: { 'local/b': { autoCompactWindow: 400000 } } }])).toEqual({ byModel: { 'local/b': 400000 }, default: 'auto' })
+  const model = (id: string, contextWindow: number) => ({ model: id, label: id, execution: 'native provider', source: 'fixture', observedAt: 1, metadata: { ...unknownMetadata(), contextWindow } })
+  const catalogue = { models: [model('local/a', 128000), model('local/b', 500000)], providers: [] } as ModelCatalogue
+  const largest = (sources: unknown[]) => nativeModelEnv(catalogue, {}, loadedWindowsOf(sources)).CLAUDE_CODE_MAX_CONTEXT_TOKENS
+  expect(largest([user])).toBe('500000')
+  expect(largest([user, { autoCompactWindow: 'auto' }])).toBe('128000')
+  // A loaded default covers each model it does not exceed.
+  expect(largest([{ autoCompactWindow: 300000 }])).toBe('128000')
+  expect(largest([{ autoCompactWindow: 100000 }])).toBe('500000')
+})
 
 test('catalogue data maps to Claude\'s native per-model fields and leaves unknown data to Claude', () => {
   const metadata = (contextWindow: number | null, reasoningEfforts: string[] | null) => ({ ...unknownMetadata(), contextWindow, reasoningEfforts })
