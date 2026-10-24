@@ -992,6 +992,52 @@ test('an inherited child is labelled with the model Claude resolves for it, in C
   } finally { host.session.model = sessionModel; host.session.cwd = oldCwd; environment.delete('CLAUDE_CODE_SUBAGENT_MODEL') }
 })
 
+test('a forced subagent model and a workflow model label rows in Claude\'s own order', async () => {
+  await reload({ local: provider('qwen') })
+  const sessionModel = host.session.model
+  host.session.model = async () => 'opus'
+  // A spawn with extra native fields (a workflow agent, a teammate); `ran` is the model the engine reports.
+  const spawnWith = async (extra: Record<string, unknown>, parentModel: string, model?: string, parentAgentId?: string, ran = 'sonnet') => {
+    let received: any
+    const id = `spawned-agent-${agents.length}`
+    await hook('agent.spawn')(host, { ...spawnInput(parentModel, 'general-purpose', model, parentAgentId), ...extra }, async (e: any) => { received = e; agents.push({ id, type: e.subagentType, description: e.description, status: 'running' }); return { model: ran, agentId: id } })
+    return { received, id }
+  }
+  const workflow = { workflow: { runId: 'wf_fixture', agentIndex: 1 } }
+  try {
+    // A forced CLAUDE_CODE_SUBAGENT_MODEL outranks the call's model and an agent's own; the call's model still reaches Claude.
+    environment.set('CLAUDE_CODE_SUBAGENT_MODEL_FORCE', 'true')
+    environment.set('CLAUDE_CODE_SUBAGENT_MODEL', 'haiku')
+    const forced = await spawn('opus', 'general-purpose', 'sonnet')
+    expect(forced.received.description).toBe('owned spawn (haiku)')
+    expect(forced.received.model).toBe('sonnet')
+    expect((await spawn('opus', 'statusline-setup')).received.description).toBe('owned spawn (haiku)')
+    // It outranks a workflow model too, which Claude keeps under it only from managed policy.
+    environment.set('CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL', 'sonnet')
+    expect((await spawnWith(workflow, 'opus', 'opus')).received.description).toBe('owned spawn (haiku)')
+    // Forced with no model set, the call's model is dropped and the child runs on its parent's.
+    environment.delete('CLAUDE_CODE_SUBAGENT_MODEL')
+    expect((await spawn('opus', 'general-purpose', 'sonnet')).received.description).toBe('owned spawn (opus)')
+    environment.set('CLAUDE_CODE_SUBAGENT_MODEL_FORCE', '0')
+    expect((await spawn('opus', 'general-purpose', 'haiku')).received.description).toBe('owned spawn (haiku)')
+    // A workflow agent takes the workflow model over the call's, and so does a non-teammate it starts.
+    const agent = await spawnWith(workflow, 'opus', 'haiku')
+    expect(agent.received.description).toBe('owned spawn (sonnet)')
+    expect(agent.received.model).toBe('haiku')
+    const nested = await spawn('sonnet', 'general-purpose', 'opus', agent.id)
+    expect(nested.received.description).toBe('owned spawn (sonnet)')
+    expect(nested.received.model).toBe('opus')
+    expect((await spawnWith({ isTeammate: true }, 'sonnet', 'opus', agent.id)).received.description).toBe('owned spawn (opus)')
+    // An agent outside a run keeps its call's model, and an "inherit" workflow model is no workflow model.
+    expect((await spawn('opus', 'general-purpose', 'haiku')).received.description).toBe('owned spawn (haiku)')
+    environment.set('CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL', 'Inherit')
+    expect((await spawnWith(workflow, 'opus', 'haiku')).received.description).toBe('owned spawn (haiku)')
+  } finally {
+    host.session.model = sessionModel
+    for (const name of ['CLAUDE_CODE_SUBAGENT_MODEL_FORCE', 'CLAUDE_CODE_SUBAGENT_MODEL', 'CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL']) environment.delete(name)
+  }
+})
+
 test('Claude aliases and an absent model behave as without the carrier, and an engine haiku is not a lost carrier', async () => {
   await reload({ local: provider('qwen') })
   for (const model of ['sonnet', 'opus', 'fable', 'haiku', undefined]) {
