@@ -9792,16 +9792,16 @@ function searchRecords(value, kind) {
       const url = new URL(row.url);
       if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) return [];
       const content2 = kind === "brave" ? row.description : row.content;
-      return [{ title: row.title.slice(0, 512), url: url.href, content: typeof content2 === "string" ? content2.slice(0, 4e3) : "" }];
+      return [{ title: row.title, url: url.href, content: typeof content2 === "string" ? content2 : "" }];
     } catch {
       return [];
     }
-  }).slice(0, 10);
+  });
   if (rows.length && !results.length) throw new SearchUnavailable("Search endpoint returned no valid source records.");
   return results;
 }
 async function endpointSearch(endpoint3, query, signal, request2 = fetch, environment = process.env, domains) {
-  if (!query.trim() || query.length > 2048) throw new SearchUnavailable("Invalid search query.");
+  if (!query.trim()) throw new SearchUnavailable("Invalid search query.");
   let key;
   if (endpoint3.auth) {
     if ("env" in endpoint3.auth) key = environment[endpoint3.auth.env];

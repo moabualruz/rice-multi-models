@@ -96,3 +96,14 @@ test('a service without native domain fields is skipped when domains are set, so
   await configuredSearch('owned', signal, [brave, searx], request, undefined, { allowed: [] })
   expect(attempts).toHaveLength(2)
 })
+
+test('a configured service result is mapped whole and a long query is sent as given', async () => {
+  const hits = Array.from({ length: 12 }, (_, index) => ({ title: `T${index}`.padEnd(600, 'x'), url: `https://source.example/${index}`, content: 'c'.repeat(5000) }))
+  const queries: string[] = []
+  const request = (async (input: URL | RequestInfo) => { queries.push(new URL(String(input)).searchParams.get('q') ?? ''); return Response.json({ results: hits }) }) as typeof fetch
+  const long = 'q'.repeat(3000)
+  const { results } = await endpointSearch({ name: 'owned', kind: 'searxng', url: 'https://searx.example/search', priority: 1 }, long, new AbortController().signal, request)
+  expect(queries).toEqual([long])
+  expect(results).toHaveLength(12)
+  expect(results[0]).toEqual({ title: hits[0]!.title, url: 'https://source.example/0', content: hits[0]!.content })
+})

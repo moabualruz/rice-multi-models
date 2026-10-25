@@ -60,9 +60,9 @@ export function searchRecords(value: unknown, kind: SearchEndpoint['kind']): Sea
       const url = new URL(row.url)
       if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return []
       const content = kind === 'brave' ? row.description : row.content
-      return [{ title: row.title.slice(0, 512), url: url.href, content: typeof content === 'string' ? content.slice(0, 4000) : '' }]
+      return [{ title: row.title, url: url.href, content: typeof content === 'string' ? content : '' }]
     } catch { return [] }
-  }).slice(0, 10)
+  })
   if (rows.length && !results.length) throw new SearchUnavailable('Search endpoint returned no valid source records.')
   return results
 }
@@ -72,7 +72,7 @@ export type SearchDomains = { allowed?: string[]; blocked?: string[] }
 
 /** Each service gets only its own credential; redirects never receive a search key. */
 export async function endpointSearch(endpoint: SearchEndpoint, query: string, signal: AbortSignal, request: typeof fetch = fetch, environment: NodeJS.ProcessEnv = process.env, domains?: SearchDomains): Promise<{ results: SearchResult[]; http: number }> {
-  if (!query.trim() || query.length > 2048) throw new SearchUnavailable('Invalid search query.')
+  if (!query.trim()) throw new SearchUnavailable('Invalid search query.')
   let key: string | undefined
   if (endpoint.auth) {
     if ('env' in endpoint.auth) key = environment[endpoint.auth.env]
