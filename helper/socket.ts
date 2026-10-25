@@ -7,12 +7,14 @@ import WebSocket from 'ws'
 
 const OPEN_MS = 15_000
 const MAX_SOCKET_AGE_MS = 55 * 60_000
+const TRANSIENT_SERVER_CLOSE_CODES = new Set([1006, 1011, 1012, 1013, 1014])
 const ENDS = new Set(['response.completed', 'response.done', 'response.failed', 'response.incomplete', 'error'])
 const encoder = new TextEncoder()
 
 export class SocketError extends ProviderFailure {
   constructor(message: string, event = 'websocket.error', closeCode?: number, status?: number) {
-    super(message, { event, code: 'websocket-error', closeCode, status, transient: closeCode === undefined && status === undefined })
+    const transient = closeCode === undefined ? status === undefined : TRANSIENT_SERVER_CLOSE_CODES.has(closeCode)
+    super(message, { event, code: 'websocket-error', closeCode, status, transient })
   }
 }
 

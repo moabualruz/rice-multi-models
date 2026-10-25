@@ -125,6 +125,32 @@ for (const transport of ['sse', 'ws']) {
   })
 }
 
+test('Codex WebSocket retries a transient 1011 close before committed output on a fresh socket', async () => {
+  const tool = { id: 'fc_retry', type: 'function_call', call_id: 'call_retry', name: 'echo', arguments: '{}' }
+  const completed = [created, { type: 'response.output_item.added', output_index: 0, item: tool }, { type: 'response.output_item.done', output_index: 0, item: tool }, { type: 'response.completed', response: { id: 'resp_node', status: 'completed', output: [tool], usage: { input_tokens: 2, output_tokens: 2 } } }]
+  const server = await fake([{ events: [created], close: 1011 }, { events: completed }])
+  try {
+    const events = await server.run('ws')
+    assert.equal(server.calls(), 2)
+    assert.equal(server.upgrades(), 2)
+    assert.equal(events.filter(event => event.type === 'tool_use').length, 1)
+    assert.equal(events.find(event => event.type === 'tool_use')?.id, 'call_retry')
+    assert.ok(!events.some(event => event.type === 'error'))
+  } finally { await server.close() }
+})
+
+test('Codex WebSocket does not retry a transient close after a tool call is committed', async () => {
+  const tool = { id: 'fc_committed', type: 'function_call', call_id: 'call_committed', name: 'echo', arguments: '{}' }
+  const server = await fake([{ events: [created, { type: 'response.output_item.added', output_index: 0, item: tool }, { type: 'response.output_item.done', output_index: 0, item: tool }], close: 1011 }])
+  try {
+    const events = await server.run('ws')
+    assert.equal(server.calls(), 1)
+    assert.equal(server.upgrades(), 1)
+    assert.equal(events.filter(event => event.type === 'tool_use').length, 1)
+    assert.ok(events.some(event => event.type === 'error'))
+  } finally { await server.close() }
+})
+
 test('compiled HTTP stream cancellation closes the provider connection without replay', async () => {
   let calls = 0
   let acknowledge

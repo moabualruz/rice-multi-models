@@ -45,6 +45,8 @@ limit: credential-dependent gateway routing can run Explore on opus for fable or
 while the label shows the parent's model.
 Release 0.17.4 leaves every permission decision to Claude Code, auto mode included; Claude Code's
 auto-mode classifier calls its own Claude model directly.
+Release 0.17.4 retries Codex WebSocket closes 1006, 1011, 1012, 1013 and 1014 on a fresh
+socket only before output is committed; every other close code stays permanent.
 It retires Codex Responses WebSockets before the 60-minute provider limit and retries a rejected uncommitted step once without replaying tool calls.
 The manual-seed fixture records wire observations per request and merges them only after each child exits.
 Earlier owner/model, capacity, streaming, failure and fork repairs remain.
