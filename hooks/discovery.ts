@@ -19,7 +19,7 @@ export function discoveryGuidance(families: readonly FamilyLine[]): string {
   })
   return [
     'Model families in this session (rice-multi-models):',
-    '- Each conversation stays on its own provider family. Subagents, forked skills, skill model aliases and background work (compaction, titles, permission judgments, web search and fetch, evaluators) use the family of the conversation that owns them.',
+    '- Each conversation stays on its own provider family. Subagents, forked skills, skill model aliases and background work (compaction, titles, web search and fetch, evaluators) use the family of the conversation that owns them. Claude Code decides permissions in every mode, including auto.',
     "- The Agent tool accepts every exact provider/model id in this session's catalogue, preserving the real model name and version. Claude tier aliases are optional selection metadata inside the current family, never an external model's identity. Leave model out to inherit the owning conversation unless instructions configured a default.",
     '- Use another provider only when the user or session instructions ask for it, by passing the exact provider/model id to the native Agent tool. Project agent files belong to the project and Claude applies them as written; a model they name, from a provider here or Claude, runs the same way. This mod ships none.',
     ...lines,

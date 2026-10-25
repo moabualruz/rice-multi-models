@@ -1,10 +1,10 @@
 import { expect, test } from 'bun:test'
 import { createToolGate, type ToolGateTicket } from '../hooks/tool-gate'
-import type { PermissionVerdict } from '../hooks/permission'
+import type { NativeToolVerdict } from '../hooks/tool-gate'
 
 const call = { tool: 'WebFetch', tool_use_id: 'toolu_owned', agentId: 'owned-agent' }
 const checked = { ...call, input: { url: 'https://rewritten.example/page', prompt: 'Use the rewritten prompt' } }
-const errorFor = (verdict: PermissionVerdict) => ({ isError: true, text: `Permission denied by plugin: ${verdict.reason}` })
+const errorFor = (verdict: NativeToolVerdict) => ({ isError: true, text: `Permission denied by plugin: ${verdict.reason}` })
 const neverAsk = async () => { throw new Error('must not ask') }
 
 test('native allow is stopped then replaced with exactly the checked post-classic input', async () => {

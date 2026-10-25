@@ -43,9 +43,9 @@ const server = createServer(async (request, response) => {
     return json(response, { url: body?.url, content: '<h1>OWNED_REWRITTEN_FETCH</h1><p>Owned page evidence.</p>', contentType: 'text/html' })
   }
   if (path === '/selected/v1/responses') {
-    const classifier = raw.includes('pendingAction'), search = body?.tools?.some(tool => tool.type === 'web_search') === true
-    requests.push({ phase, method: request.method, path, model: body?.model, classifier, search, searchQueryMarkers: ['OWNED_REWRITTEN_SEARCH', 'OWNED_ONE_TIME_SEARCH', 'OWNED_ONE_TIME_DENIED', 'OWNED_MODEL_CHANGE_SEARCH'].filter(marker => raw.includes(marker)), rewrittenSearch: raw.includes('OWNED_REWRITTEN_SEARCH'), rewrittenFetch: raw.includes('OWNED_REWRITTEN_FETCH'), completeInstructions: raw.includes('OWNED_LONG_INSTRUCTIONS_START') && raw.includes('OWNED_LONG_INSTRUCTIONS_END'), noTools: !body?.tools?.length, strictSchema: body?.text?.format?.type === 'json_schema', credentialFree: !request.headers.authorization && !request.headers['x-api-key'] })
-    return responseEvents(response, classifier ? JSON.stringify({ decision: 'allow', reason: 'Only the owned requested marker is printed.' }) : search ? 'Owned search answer.' : 'OWNED_SELECTED_EXTRACTION', search)
+    const search = body?.tools?.some(tool => tool.type === 'web_search') === true
+    requests.push({ phase, method: request.method, path, model: body?.model, search, searchQueryMarkers: ['OWNED_REWRITTEN_SEARCH', 'OWNED_ONE_TIME_SEARCH', 'OWNED_ONE_TIME_DENIED', 'OWNED_MODEL_CHANGE_SEARCH'].filter(marker => raw.includes(marker)), rewrittenSearch: raw.includes('OWNED_REWRITTEN_SEARCH'), rewrittenFetch: raw.includes('OWNED_REWRITTEN_FETCH'), credentialFree: !request.headers.authorization && !request.headers['x-api-key'] })
+    return responseEvents(response, search ? 'Owned search answer.' : 'OWNED_SELECTED_EXTRACTION', search)
   }
   requests.push({ phase, method: request.method, path, native: path.startsWith('/native/'), ...(body ? { model: body.model, maxTokens: body.max_tokens, nativeNaming: JSON.stringify(body.system)?.includes('You are naming a coding session') === true, systemPrefix: JSON.stringify(body.system)?.slice(0, 500), messagePrefix: JSON.stringify(body.messages)?.slice(0, 800) } : {}) })
   json(response, { type: 'error', error: { type: 'rate_limit_error', message: 'Owned exhausted native subscription' } }, 429)
@@ -65,8 +65,7 @@ try {
   const base = `http://127.0.0.1:${server.address().port}`, rewrittenPage = 'https://93.184.216.34/rewritten'
   mkdirSync(plugin); mkdirSync(config); mkdirSync(join(plugin, 'scripts')); mkdirSync(join(config, 'rice-multi-models'))
   for (const directory of ['.claude-plugin', 'hooks', 'types', 'dist']) cpSync(join(root, directory), join(plugin, directory), { recursive: true })
-  cpSync(join(root, 'scripts/permission-context.mjs'), join(plugin, 'scripts/permission-context.mjs'))
-  for (const path of ['hooks/register.ts', 'hooks/permission.ts', 'hooks/permission-context.ts', 'hooks/tool-gate.ts', 'hooks/hooks.json', 'scripts/permission-context.mjs', 'dist/helper.mjs', 'dist/helper.meta.json']) sourceHashes[path] = hash(readFileSync(join(root, path)))
+  for (const path of ['hooks/register.ts', 'hooks/tool-gate.ts', 'hooks/hooks.json', 'dist/helper.mjs', 'dist/helper.meta.json']) sourceHashes[path] = hash(readFileSync(join(root, path)))
   const nativeProfile = { hasCompletedOnboarding: true, theme: 'dark', projects: { [fixture]: { hasTrustDialogAccepted: true } } }
   writeFileSync(join(fixture, '.claude.json'), JSON.stringify(nativeProfile))
   writeFileSync(join(config, '.claude.json'), JSON.stringify(nativeProfile))
@@ -84,7 +83,7 @@ try {
   await new Promise(resolve => pages.listen(0, '127.0.0.1', resolve))
   const page = `https://127.0.0.1:${pages.address().port}/rewritten`
   // Only catalogue discovery, the provider consent store and helper preference are fixture inputs.
-  // The production classifier, tool.check, tool.call and classic context handlers are unchanged.
+  // The production tool.check and tool.call web replacement flow is unchanged.
   const registerFile = join(plugin, 'hooks/register.ts')
   let source = readFileSync(registerFile, 'utf8')
   source = source.replaceAll('await loadProviders($)', 'await loadProviders($); for (const provider of Object.values(loaded.config.providers)) await $.store.set(TRUST_PREFIX + fingerprint(provider), true)')
@@ -117,11 +116,7 @@ try {
     const checked = spawnSync(native, ['plugin', 'validate', '--strict', folder], { cwd: fixture, env, encoding: 'utf8', timeout: 10000 })
     assert.equal(checked.status, 0, (checked.stdout + checked.stderr).slice(-2000))
   }
-  const bash = { tool: 'Bash', command: "/bin/sh -c 'printf OWNED_CLASSIFIER_MARKER'", description: 'Print the requested owned marker' }
   const headlessTests = [
-    { name: 'auto-classifier', mode: 'auto', call: bash, permissions: {}, classifier: 1, approved: true },
-    { name: 'native-deny', mode: 'auto', call: bash, permissions: { deny: ['Bash'] }, classifier: 0, approved: false },
-    { name: 'forced-ask', mode: 'auto', call: bash, permissions: { ask: ['Bash'] }, classifier: 0, approved: false },
     { name: 'search-allowed-rewritten', mode: 'default', call: { tool: 'WebSearch', query: 'OWNED_ORIGINAL_SEARCH' }, permissions: { allow: ['WebSearch'] }, rewrite: true, approved: true },
     { name: 'search-one-time-approved', mode: 'default', call: { tool: 'WebSearch', query: 'OWNED_ONE_TIME_SEARCH' }, permissions: { ask: ['WebSearch'] }, askAnswer: 'Allow once', approved: true },
     { name: 'search-one-time-denied', mode: 'default', call: { tool: 'WebSearch', query: 'OWNED_ONE_TIME_DENIED' }, permissions: { ask: ['WebSearch'] }, askAnswer: 'Deny', approved: false },
@@ -156,12 +151,9 @@ try {
     assert.equal(timedOut, false, phase + ' bounded native deadline')
     if (!interactive) assert.equal(code, 0, phase + ': ' + (stdout + stderr).slice(-2000))
     assert.ok(result, phase + ' reaches fixture driver')
-    assert.equal(selected.filter(row => row.classifier).length, test.classifier ?? 0, phase + ' selected classifier count')
-    if (test.classifier) assert.ok(selected.filter(row => row.classifier).every(row => row.completeInstructions), 'complete project instructions longer than 32k reach the classifier')
     if (test.approved) {
       assert.equal(result.deny, undefined, phase + ' permitted by native path')
       assert.notEqual(result.isError, true, phase + ' successful typed tool result')
-      if (test.call.tool === 'Bash') assert.ok(result.result?.stdout?.includes('OWNED_CLASSIFIER_MARKER'), 'real Bash prints selected-classifier marker')
       if (test.call.tool === 'WebSearch') {
         const expectedQuery = test.rewrite ? 'OWNED_REWRITTEN_SEARCH' : test.call.query
         assert.equal(result.result?.query, expectedQuery, phase + ' returns the replacement result, not the native stopped result')
@@ -183,16 +175,16 @@ try {
       assert.equal(selected.length, 0, phase + ' sends no selected-provider request')
       assert.equal(requests.slice(start).some(row => row.page), false, phase + ' retrieves no page')
     }
-    assert.equal(requests.slice(start).some(row => row.native && row.method === 'POST' && !row.nativeNaming), false, phase + ' permission and web-tool native SDK receives no POST')
+    assert.equal(requests.slice(start).some(row => row.native && row.method === 'POST' && !row.nativeNaming), false, phase + ' web-tool native SDK receives no POST')
     const namingPosts = requests.slice(start).filter(row => row.native && row.method === 'POST' && row.nativeNaming).length
-    console.log(JSON.stringify({ phase, passed: true, selectedRequests: selected.length, permissionNativePostCount: 0, nativeNamingPosts: namingPosts }))
+    console.log(JSON.stringify({ phase, passed: true, selectedRequests: selected.length, nativeNamingPosts: namingPosts }))
   }
   assert.ok(requests.filter(row => row.path === '/selected/v1/responses' || row.configuredFetch || row.page).every(row => row.credentialFree), 'synthetic provider, configured fetch service and page never receive account credentials')
   const nativeNamingPosts = requests.filter(row => row.native && row.method === 'POST' && row.nativeNaming).length
-  console.log(JSON.stringify({ publicPermissions: true, productionHelper: true, interactive, cases: runs.length, nativeNamingPosts, noObservedNativeInference: nativeNamingPosts === 0, coverage: 'exercised permission and web calls only', fixture, sourceHashes }))
+  console.log(JSON.stringify({ publicWebTools: true, productionHelper: true, interactive, cases: runs.length, nativeNamingPosts, noObservedNativeInference: nativeNamingPosts === 0, coverage: 'exercised routed web calls only', fixture, sourceHashes }))
 } catch (error) {
   failure = { phase, name: error?.name || 'Error', message: String(error?.message || error).slice(0, 4000) }
-  console.error(JSON.stringify({ publicPermissions: false, fixture, failure }))
+  console.error(JSON.stringify({ publicWebTools: false, fixture, failure }))
   process.exitCode = 1
 } finally {
   terminate()

@@ -77,7 +77,7 @@ try {
   mkdirSync(plugin)
   for (const directory of ['.claude-plugin', 'hooks', 'types', 'dist']) cpSync(join(root, directory), join(plugin, directory), { recursive: true })
   mkdirSync(join(plugin, 'scripts'))
-  for (const file of ['permission-context.mjs', 'evaluator-wait.mjs']) cpSync(join(root, 'scripts', file), join(plugin, 'scripts', file))
+  cpSync(join(root, 'scripts', 'evaluator-wait.mjs'), join(plugin, 'scripts', 'evaluator-wait.mjs'))
   for (const path of ['hooks/register.ts', 'hooks/titles.ts', 'hooks/backend.ts', 'hooks/hooks.json', 'dist/helper.mjs', 'dist/helper.meta.json']) sourceHashes[path] = hash(readFileSync(join(root, path)))
   // Fixture-only provider consent and empty discovery avoid external catalogue
   // calls. Production title generation and the main routed turn stay unchanged.

@@ -1,4 +1,12 @@
-import type { PermissionVerdict } from './permission'
+export type NativeToolVerdict = {
+  decision: 'allow' | 'ask' | 'deny'
+  reason?: string
+  rule?: string
+  hook?: string
+  setting?: string
+  ceiling?: 'allow' | 'ask' | 'deny'
+  decider?: string
+}
 
 export type ToolGateCall = { tool: string; tool_use_id: string; agentId?: string }
 export type ToolGateTicket = Readonly<ToolGateCall & { nonce: string }>
@@ -8,7 +16,7 @@ export type ToolGateAsk = (question: string, options: readonly string[]) => Prom
 
 type Held = {
   ticket: ToolGateTicket
-  checked?: { verdict: PermissionVerdict; input: unknown; serializable: boolean }
+  checked?: { verdict: NativeToolVerdict; input: unknown; serializable: boolean }
   repeated: boolean
   refused: boolean
 }
@@ -49,7 +57,7 @@ export function createToolGate() {
       return ticket
     },
 
-    check<T extends PermissionVerdict>(call: ToolGateCheck, verdict: T): T | { decision: 'deny'; reason: string } {
+    check<T extends NativeToolVerdict>(call: ToolGateCheck, verdict: T): T | { decision: 'deny'; reason: string } {
       if (!call.tool_use_id) return verdict
       const held = active.get(keyOf(call))
       if (!held) return verdict
