@@ -7,8 +7,8 @@ and current verification limits are listed below; unverified native text is not 
 ## Required outcome
 
 The main conversation and each subagent own their selected model and provider.
-Ordinary turns and the auxiliary work they cause (compaction, titles, permission
-judgments, web search and fetch, evaluators, forked skills) use that
+Ordinary turns and the auxiliary work they cause (compaction, titles,
+web search and fetch, evaluators, forked skills) use that
 conversation's provider family. A conversation stays in its family by default; a
 different family is used only when the user or session instructions ask for it.
 
@@ -48,22 +48,9 @@ agent frontmatter. It contains no tool instructions.
 | `agent.spawn` | Resolves native aliases inside the parent's family and honors routed ids in readable custom agent frontmatter before the engine resolves the model. Exact ids in the Agent tool argument are rejected by the host before hooks; the mod registers no provider-family or Claude wrapper types. |
 | `session.compact` | Selected-provider summary with a bounded verbatim tail of recent engine messages split at an exchange boundary (tool pairs and pending calls kept whole). The summary request is fitted to the model's input bound by shortening tool outputs, then long texts, then leaving out the middle of the oldest history; failures keep the original transcript. |
 | `tool.call` / `tool.check` for WebSearch and WebFetch | Native rules and classic PreToolUse run first; the checked input is then served by the selected provider, configured search services, then native search with the session's account (search only). WebFetch still uses the mod-authored extraction instruction. |
-| `tool.check` (auto mode) | Unresolved asks for routed conversations are judged by the owner's provider with the effective auto-mode policy and mod-authored request. SubagentHandback is never judged here. |
-| Classic PreToolUse command hook | Reports the native per-call permission mode (`scripts/permission-context.mjs`). |
 | `classic.UserPromptSubmit` | Returns `sessionTitle` from the selected provider using the mod-authored title request, with a local fallback. |
 | Classic Stop and SubagentStop | Prompt-type evaluators use the mod-authored evaluator request and are answered by the selected provider when every hook source of the event is visible to the mod. |
 | `model.complete`, `model.classify`, `model.fork` | Routed through the main conversation's family (these public events carry no caller identity). |
-
-### Permission judgments
-
-A judgment is invalidated when policy or loaded instructions change
-(`classic.ConfigChange`, `prompt.context`) or when the main permission mode
-changes. Mode changes are detected by comparing core's own verdicts for harmless
-`$.tool.check` queries (Bash, Write, Edit, Agent) taken before and after the
-judgment. The native auto-mode defaults come from `claude auto-mode defaults`, run
-once per Claude Code version in a mod-owned configuration folder so the user's
-settings are never migrated, and cached per version so a background CLI update
-does not break a running session.
 
 ### Input budget
 

@@ -3,6 +3,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
+import { waitForNativeProofCapacity } from './native-proof-load.mjs'
+
+if (!(await waitForNativeProofCapacity())) process.exit(1)
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const fixture = mkdtempSync(join(tmpdir(), 'rice-native-'))

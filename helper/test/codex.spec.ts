@@ -176,3 +176,67 @@ test('a pooled connection answers the next step of the same conversation without
   pool.closeAll()
   expect(pool.size).toBe(0)
 })
+
+test('a pooled socket is retired at 55 minutes rather than reused', async () => {
+  seen = []
+  replay = fixture('text')
+  let now = Date.now()
+  const pool = new SocketPool(5 * 60_000, () => now)
+  const first = await run('ws', undefined, pool)
+  now += 55 * 60_000
+  const second = await run('ws', undefined, pool)
+  expect(first.at(-1)).toMatchObject({ type: 'stats', transport: 'ws' })
+  expect(second.at(-1)).toMatchObject({ type: 'stats', transport: 'ws' })
+  expect(seen).toHaveLength(2)
+  expect(pool.size).toBe(1)
+  now += 55 * 60_000
+  pool.sweep()
+  expect(pool.size).toBe(0)
+  pool.closeAll()
+})
+
+test('rotating an aged busy socket preserves its active response and retires it afterward', async () => {
+  let now = Date.now()
+  let releaseFirst: (() => void) | undefined
+  let sendFirstCompletion: (() => void) | undefined
+  const firstMessage = new Promise<void>(resolve => { releaseFirst = resolve })
+  const server = Bun.serve({
+    port: 0,
+    fetch(request, srv) {
+      if (srv.upgrade(request)) return undefined
+
+      return new Response('upgrade failed', { status: 400 })
+    },
+    websocket: {
+      message(socket) {
+        sendFirstCompletion ??= () => socket.send(JSON.stringify({ type: 'response.completed' }))
+        releaseFirst?.()
+        releaseFirst = undefined
+      },
+    },
+  })
+  const pool = new SocketPool(5 * 60_000, () => now)
+  const url = `ws://127.0.0.1:${server.port}/ws`
+  try {
+    const first = await pool.take('active', url, {})
+    const iterator = first.socket.response({}, new AbortController().signal, () => null, () => {})[Symbol.asyncIterator]()
+    const firstEvent = iterator.next()
+    await firstMessage
+    now += 55 * 60_000
+    const second = await pool.take('active', url, {})
+    expect(first.socket.closed).toBe(false)
+    expect(second.reused).toBe(false)
+    expect(second.socket).not.toBe(first.socket)
+    expect(pool.holds(second.socket)).toBe(false)
+    expect(pool.size).toBe(1)
+    sendFirstCompletion?.()
+    expect((await firstEvent).done).toBe(false)
+    expect((await iterator.next()).done).toBe(true)
+    expect(first.socket.closed).toBe(true)
+    expect(pool.size).toBe(0)
+    second.socket.close()
+  } finally {
+    pool.closeAll()
+    server.stop(true)
+  }
+})

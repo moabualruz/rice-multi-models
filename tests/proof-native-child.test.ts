@@ -58,3 +58,20 @@ test('a failed native spawn rejects rather than waiting for its deadline', async
   const processHandle = spawn('owned-nonexistent-native-executable', [], { stdio: ['ignore', 'pipe', 'pipe'] })
   await expect(captureNativeChild(processHandle, 1000, () => processHandle.kill('SIGTERM'))).rejects.toMatchObject({ code: 'ENOENT' })
 })
+
+test('a child that exits 0 while a descendant holds stdout open resolves within the drain grace', async () => {
+  const processHandle = child(`
+    const { spawn } = require('node:child_process')
+    const holder = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 4000)'], { stdio: ['ignore', 1, 'ignore'] })
+    holder.unref()
+    process.stdout.write(JSON.stringify({ result: 'OWNED_INVENTORY' }))
+  `)
+  let terminations = 0
+  const started = performance.now()
+  const result = await captureNativeChild(processHandle, 10000, () => { terminations++; processHandle.kill('SIGTERM') }, 300)
+  expect(performance.now() - started).toBeLessThan(2500)
+  expect(result.code).toBe(0)
+  expect(JSON.parse(result.stdout).result).toBe('OWNED_INVENTORY')
+  expect(result.timedOut).toBe(false)
+  expect(terminations).toBe(0)
+})

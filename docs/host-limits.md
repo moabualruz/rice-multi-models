@@ -2,6 +2,8 @@
 
 This document lists public Claude Code plugin API gaps that prevent a mod from closing specific compatibility gaps itself. Each request names the missing host hook or API, the current mod behavior, and the host change that would let plugins integrate without reproducing private engine behavior. These are requests for upstream API changes, not claims about implementation plans.
 
+Release 0.17.4 leaves every permission decision to Claude Code, auto mode included; Claude Code's auto-mode classifier calls its own Claude model directly.
+
 ## MCP input schemas
 
 **Missing host API:** The public tool metadata available to the mod does not include an MCP tool's input schema.
@@ -86,21 +88,15 @@ An isolated Claude Code 2.1.309 `/goal` fixture retained the native objective an
 
 **Current mod behavior:** Explicit completion/classification models are honored, including native models. The host's `next.origin` plugin/tier scopes mod-owned completion/classification cache identity where available. It identifies the calling plugin, not an auxiliary call's loop or agent, and is never joined to the nearest active turn by timing. Omitted classification model keeps the documented native default, rather than borrowing main ownership. Native classification does not traverse `model.complete` on 2.1.308. The adapter captures its actual system/prompt contract from an isolated native invocation. Visible Stop and SubagentStop prompt evaluators likewise capture the version/event-specific native wrapper and output schema, then receive the observed owner's transcript and real condition/event. Internal inference is replaced; provider cache marks, reasoning budgets and error bookkeeping are not stock-equivalent. Hidden and agent evaluator sources run natively, never silently skipped.
 
-Routed `model.fork` uses the immutable last dispatched main request prefix, including a request whose provider later fails, preserving its model/system and omitting tools. An unsent budget refusal does not replace the snapshot. It does not rebuild current context. No verified snapshot after reload, clear or resume means `nothing-to-fork`. This is a tool-free native-like completion, not a promise of native cache-hit identity or hidden iterative fork behavior. Titles retain the documented mod-written short-title request and deterministic fallback. Auto-permission prompts remain mod-written; native rules, forced approvals, managed ceilings and handback classification are not bypassed. Security-monitor and other hidden inference remains native or unverified, not claimed selected-provider traffic.
+Routed `model.fork` uses the immutable last dispatched main request prefix, including a request whose provider later fails, preserving its model/system and omitting tools. An unsent budget refusal does not replace the snapshot. It does not rebuild current context. No verified snapshot after reload, clear or resume means `nothing-to-fork`. This is a tool-free native-like completion, not a promise of native cache-hit identity or hidden iterative fork behavior. Titles retain the documented mod-written short-title request and deterministic fallback. Claude Code decides permissions in every mode; its native rules, forced approvals, managed ceilings and handback classification remain in control. Security-monitor and other hidden inference remains native or unverified, not claimed selected-provider traffic.
 
 **Requested host change:** Add explicit owner/model provenance, exported immutable request snapshots, and normalized native prompt/output contracts for auxiliary operations. Expose hidden inference purposes separately without weakening safety or forcing a provider substitution.
-
-## Child permission modes
-
-**Verified on Claude Code 2.1.306:** A child created with explicit `permissionMode: 'auto'` under a plan-mode parent resolves to effective `plan`. This is the engine's effective-mode behavior, not a routing override or an unexplained permission-proof failure. The permission proof is version aware and asserts the effective mode.
-
-**Current mod behavior:** The permission gate uses native `PreToolUse` permission-mode evidence. It does not infer a child's effective mode from registration settings or bypass the host's permission checks.
 
 ## Pinned teammate models
 
 **Missing host API:** There is no public API to persist an explicit model assignment for a stable team teammate and retain it across later work or respawn.
 
-**Current mod behavior:** Fresh workflow and teammate spawns follow the same explicit-id/alias resolution as native Agent dispatch. Native resume is not rewritten; its returned model is observed for subsequent requests, compaction and permission helpers. Observed child model, native-route and background facts survive mod reload in native session state. An unowned ambiguous alias is refused rather than assigned the main model from its list row; exact native requests remain native. Event-shape fixtures are not proof that a remote workflow or teammate in another process runs inside this mod. No in-process hook can route a loop the host never exposes. A respawned teammate is a new observed assignment, not a promised persistent pin.
+**Current mod behavior:** Fresh workflow and teammate spawns follow the same explicit-id/alias resolution as native Agent dispatch. Native resume is not rewritten; its returned model is observed for subsequent requests and compaction. Observed child model, native-route and background facts survive mod reload in native session state. An unowned ambiguous alias is refused rather than assigned the main model from its list row; exact native requests remain native. Event-shape fixtures are not proof that a remote workflow or teammate in another process runs inside this mod. No in-process hook can route a loop the host never exposes. A respawned teammate is a new observed assignment, not a promised persistent pin.
 
 **Requested host change:** Give plugins a stable teammate identity and a supported per-teammate model assignment that survives the teammate lifecycle. Expose assignment changes and the resolved model to plugins, and preserve native policy checks when a teammate is resumed or respawned.
 

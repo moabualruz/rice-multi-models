@@ -324,6 +324,8 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
     for (const credential of credentials) if (credential) text = text.replaceAll(credential, '[REDACTED]')
     return `codex: ${text}`
   }
+  let attemptSocket: CodexSocket | undefined
+  const currentAttemptSocket = (): CodexSocket | undefined => attemptSocket
   const openSocket = async (): Promise<AsyncIterable<Uint8Array>> => {
     const auth = await readCodexAuth(authFile)
     onAuth(auth)
@@ -333,12 +335,14 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
     if (options.pool) {
       const account = createHash('sha256').update(auth['chatgpt-account-id']).digest('hex')
       const taken = await options.pool.take(`${account}:${sessionId}`, url, headers, attemptSignal)
+      attemptSocket = taken.socket
       transport = taken.reused ? 'ws reused' : 'ws'
       const stream = taken.socket.response(body, attemptSignal, limitsOf, onLimits)
 
       return options.pool.holds(taken.socket) ? stream : closeAfter(stream, taken.socket)
     }
     const socket = await CodexSocket.open(url, headers, attemptSignal)
+    attemptSocket = socket
     transport = 'ws'
 
     return closeAfter(socket.response(body, attemptSignal, limitsOf, onLimits), socket)
@@ -368,6 +372,7 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
       release = await codexAccounts.acquire(accountKey, limit, signal)
       for (let attempt = 1; attempt <= OVERLOAD_MAX_ATTEMPTS; attempt++) {
         attempts = attempt
+        attemptSocket = undefined
         let pending: StepEvent[] = []
         const continuationCalls: { id: string; name: string; input: Record<string, unknown> }[] = []
         const output = scope ? continuationOutput() : undefined
@@ -430,6 +435,7 @@ export async function* codexStep(req: StepRequest, model: string, signal: AbortS
             error instanceof CodexAuthError ? error.message : signal.aborted ? 'step aborted' : oneLine(error instanceof Error ? error.message : String(error)),
             { event: signal.aborted ? 'request.aborted' : error instanceof CodexAuthError ? 'auth.error' : 'response.decode', code: error instanceof CodexAuthError ? 'codex-auth' : 'stream-error' },
           )
+          if (failure.connectionLimit) currentAttemptSocket()?.close(true)
           const delay = retryDelay(failure, attempt)
           if (!signal.aborted && failure.transient && !committed && attempt < maxAttempts(failure) && delay !== null) {
             await waitForRetry(delay, signal)

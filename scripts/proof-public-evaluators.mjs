@@ -50,7 +50,7 @@ try {
   mkdirSync(plugin); mkdirSync(config)
   // The build reads an immutable owned source copy, never shared generated dist.
   for (const directory of ['.claude-plugin', 'hooks', 'types', 'scripts', 'helper']) cpSync(join(root, directory), join(plugin, directory), { recursive: true })
-  const maintainedInputHashes = Object.fromEntries(['hooks/register.ts', 'hooks/evaluator-runtime.ts', 'hooks/evaluators.ts', 'scripts/evaluator-wait.mjs', 'scripts/permission-context.mjs', 'scripts/proof-public-evaluators.mjs'].map(name => [name, createHash('sha256').update(readFileSync(join(plugin, name))).digest('hex')]))
+  const maintainedInputHashes = Object.fromEntries(['hooks/register.ts', 'hooks/evaluator-runtime.ts', 'hooks/evaluators.ts', 'scripts/evaluator-wait.mjs', 'scripts/proof-public-evaluators.mjs'].map(name => [name, createHash('sha256').update(readFileSync(join(plugin, name))).digest('hex')]))
   mkdirSync(join(plugin, 'dist'))
   await build({ absWorkingDir: plugin, nodePaths: [join(root, 'node_modules')], tsconfig: join(plugin, 'helper/tsconfig.node.json'), entryPoints: ['helper/main.ts'], outfile: join(plugin, 'dist/helper.mjs'), bundle: true, platform: 'node', format: 'esm', target: 'node22', banner: { js: "import{createRequire as __createRequire}from'node:module';const require=__createRequire(import.meta.url);" }, define: { 'process.env.WS_NO_BUFFER_UTIL': '"1"', 'process.env.WS_NO_UTF_8_VALIDATE': '"1"' } })
   cpSync(join(plugin, 'helper/openai/instructions.md'), join(plugin, 'dist/instructions.md'))
@@ -63,7 +63,7 @@ try {
   writeFileSync(join(fixture, '.claude.json'), JSON.stringify({ hasCompletedOnboarding: true }))
   const file = join(plugin, 'hooks/register.ts')
   let source = readFileSync(file, 'utf8')
-  source = source.replace('permissionContextNonce = crypto.randomUUID()', `await $.store.set(${JSON.stringify('trust:' + fingerprint(parsed.config.providers.selected))},true);permissionContextNonce = crypto.randomUUID()`)
+  source = source.replace('interactiveSession = e.isInteractive\n    const started', `interactiveSession = e.isInteractive\n    await $.store.set(${JSON.stringify('trust:' + fingerprint(parsed.config.providers.selected))}, true)\n    const started`)
   const close = source.lastIndexOf('\n}'); assert.ok(close > 0)
   source = source.slice(0, close) + `
     on('state.get',{plugin:'rice-multi-models',key:'prefs'},()=>({value:{value:{effort:null,transport:'auto',helper:'once'},version:0}}))

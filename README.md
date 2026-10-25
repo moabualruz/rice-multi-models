@@ -39,6 +39,17 @@ Release 0.17.3 adds the two variables Claude resolves before that order: an agen
 run takes `CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL` in place of the call's and the definition's
 model, and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` outranks every other model, so its row shows
 `CLAUDE_CODE_SUBAGENT_MODEL`, or the parent's when that is unset.
+Release 0.17.4 skips description rewrites for first-party workflow `agent()` spawns, which
+Claude ignores, while nested agents remain labelled. It documents the native Explore label
+limit: credential-dependent gateway routing can run Explore on opus for fable or mythos parents
+while the label shows the parent's model.
+Release 0.17.4 leaves every permission decision to Claude Code, auto mode included; Claude Code's
+auto-mode classifier calls its own Claude model directly.
+Release 0.17.4 retries a Codex WebSocket that closes before completion with 1000, 1001, 1005, 1006, 1011, 1012,
+1013 or 1014 on a fresh socket, up to 3 attempts in all, and only before output is committed; every other close
+code stays permanent.
+It retires Codex Responses WebSockets before the 60-minute provider limit; a refused connection-limit step is retried on a fresh connection, 2 attempts in all, without replaying tool calls.
+The manual-seed fixture records wire observations per request and merges them only after each child exits.
 Earlier owner/model, capacity, streaming, failure and fork repairs remain.
 The mod registers no MCP tools and needs no launcher, proxy or gateway.
 
@@ -159,6 +170,10 @@ on the id.
   Transcripts can retain that visible note; the child task description does not. Upstream
   requests: let `tool.describe` override input-schema fields that are not pinned, or let
   `Agent.model` accept any string that `agent.spawn` resolves or denies.
+- **The native Explore label limit.** Claude Code runs built-in Explore on opus when a
+  first-party parent uses fable or mythos. The decision depends on gateway credential state
+  that `$.env.get` cannot read, so `agent.spawn` cannot know the resolved child model in that
+  case and the row may show the parent's model. Dispatch remains native.
 
 Map tiers to specific models per family in `rice-multi-models.json`:
 
@@ -181,7 +196,7 @@ parent's own model. Entries naming a model from another family are ignored.
 | Main and subagent turns | Selected provider, with Claude Code's tools and permissions; each built-in tool with the description and input schema the installed `claude` sends, and a subagent with the system prompt and tools the engine gives its agent type (see Known limits) |
 | `/compact` and automatic compaction | Claude Code's own summary prompt (with your `/compact` instructions in its slot) over the conversation as real messages, answered by the selected provider with its reported output bound; the engine's own summary message wording, citing the transcript file; a bounded tail of recent messages and their tool pairs kept verbatim; a failed or unreadable-prompt compaction keeps the original transcript |
 | Session titles | Selected provider, local fallback, manual names kept |
-| Auto-mode permission judgments | Selected provider receives your effective auto-mode policy; Claude Code's native classifier, rules, hooks and managed limits can still decide the action |
+| Permission decisions in every mode, including auto | Claude Code's native permission processing and classifier |
 | SubagentHandback admission classifier | Claude Code's native classifier; the public plugin API does not route this engine-owned decision |
 | WebFetch | Provider-native retrieval where supported, configured fetch services, then native Claude WebFetch LAST; no hidden retrieval after it |
 | WebSearch | Selected provider's own search, then your saved search services, then Claude's native search with the session's account |
@@ -207,7 +222,6 @@ These come from what Claude Code exposes to plugins today:
   - A headless foreground subagent is offered a few more tools than a background one, and an interactive session's subagents get the background set; the mod follows that.
 - **Auxiliary contracts.** Explicit classification and visible prompt Stop/SubagentStop evaluations use version-bound native request text captured against owned loopback stubs. Evaluators include the observed owner's transcript, not just the event JSON. The native internal inference itself is replaced by a tool-free selected-provider call; cache behavior and output capacity are provider-specific. Other auxiliary text remains native-like:
   - The title hook receives the host's title event/result, not the internal title-generation request. The isolated title proof verifies selected-provider generation, persisted titles, manual titles, and failure fallback, but cannot capture Claude's native title prompt.
-  - The permission hook receives the pending action and effective policy, not the host classifier's prompt. The isolated auto-mode proof verifies selected-provider judgments and actual native mode controls; it did not expose a stable native classifier prompt to the plugin.
   - Native evaluator event ids and transcript paths vary per invocation. The mod captures the stable system wrapper, condition prefix and JSON contract, then supplies the real owner transcript and event. Unavailable or mismatched captures stop replacement safely; hidden or agent-type sources are delegated natively, never skipped.
   - Configured-service WebFetch extraction uses a mod-written tool-free prompt. It is not Claude's internal extraction prompt. The helper's explicit direct-retrieval action is not a runtime fallback tier.
 
@@ -215,12 +229,6 @@ These come from what Claude Code exposes to plugins today:
 - **Transcript content.** Text, images, inline PDF and plain-text documents, tool calls and results are retained or translated by each supported codec. Unsupported reasoning, source shapes and provider-specific blocks produce visible omission notes. Chat Completions accepts plain-text documents as text but cannot accept PDF document blocks; image and document URL sources are not fetched by the adapter.
 - **Host API gaps.** MCP input schemas, engine-owned inference hooks, compaction lifecycle callbacks, full evaluator-source provenance, Agent model choices and pinned teammate models need host support. The current behavior and specific API requests are documented in [Host limits](docs/host-limits.md).
 - **A long step shows a stale label.** After a compaction or a subagent spawn the engine's spinner keeps reading "Running SessionStart hooks..." for the whole next routed step, which can take minutes on a large context. The session is working; the label is the engine's.
-- **Child permission modes.** On Claude Code 2.1.306, a child created with explicit
-  `permissionMode: 'auto'` under a plan-mode parent resolves to effective `plan`.
-  The version-aware proof checks the host's effective mode, and the permission gate
-  uses native `PreToolUse` mode evidence rather than inferring a child's mode from
-  its registration settings. The selected-provider judgment does not replace the
-  host classifier or bypass native permission checks.
 - **Auto-mode handoff review.** When a subagent finishes while its parent is in
   auto mode, Claude Code reviews the report with its own classifier, which uses
   Claude. If Claude is unavailable the report is still delivered, with a note.
@@ -240,13 +248,6 @@ These come from what Claude Code exposes to plugins today:
 - **Invalid configuration.** If `rice-multi-models.json` does not validate, its
   declared models are refused with the validation error until it is fixed and
   reloaded; they are never sent to Claude.
-- **Mode detection limits.** A switch from auto to plan mode during a pending
-  permission judgment is found by comparing the host's own answers for harmless
-  probes. It cannot be found in a session without file-edit tools, or in a working
-  directory the host flags as a suspicious Windows path (for example an 8.3 short
-  name such as `RUNNER~1`), where every path asks before the mode is checked.
-  Other mode changes are found in both cases.
-
 ## Web search
 
 WebSearch tries, in order:
@@ -500,10 +501,10 @@ says which. OpenCode's free Zen models answer only OpenCode itself.
    with the definitions the installed `claude` sends (the schema table generated
    from this build is the fallback), and the transcript is the engine's own. A step whose family cannot be resolved is refused
    visibly; it is never sent to Claude instead.
-3. `session.compact`, the WebSearch and WebFetch tools, `tool.check` (auto-mode
-   judgments), the title hook, Stop and SubagentStop prompt hooks and the plugin
-   `model.*` events are answered the same way for routed conversations. Native
-   permission rules and hooks always run first.
+3. `session.compact`, the WebSearch and WebFetch tools, the title hook, Stop and
+   SubagentStop prompt hooks and the plugin `model.*` events are answered the same
+   way for routed conversations. Claude Code decides every permission, auto mode
+   included; its native rules and hooks remain in control.
 4. At activation the mod starts the bundled Node session helper
    (`dist/helper.mjs serve`) on a private Unix socket (macOS, Linux, WSL) or named
    pipe (Windows), authenticated with a random token. It keeps one Codex WebSocket
@@ -604,8 +605,7 @@ WSL is outside this mod's scope.
 - `npm run test:install` copies only the shipped payload into an empty home with
   spaces in its path and runs a local provider through both helper modes.
 - The `test:routing`, `test:phases`, `test:protocols`, `test:compaction`, `test:tools`,
-  `test:permissions`, `test:permission-mode`, `test:search`, `test:evaluators` and
-  `test:titles` proofs start the real `claude` with `--plugin-dir`, local stand-in
+  `test:web-tools`, `test:search`, `test:evaluators` and `test:titles` proofs start the real `claude` with `--plugin-dir`, local stand-in
   providers and an Anthropic endpoint that refuses everything, and fail if any
   routed request reaches it. `test:tools` checks installed and target engine versions,
   compares shared tool input schemas and captured agent prompts with an independent

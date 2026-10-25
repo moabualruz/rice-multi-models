@@ -14,7 +14,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
 
-const PHASES = ['children', 'family', 'builtins', 'compact', 'classifier', 'skills', 'budget', 'failure', 'evaluators', 'protocols', 'auto', 'step-throw']
+const PHASES = ['children', 'family', 'builtins', 'compact', 'skills', 'budget', 'failure', 'evaluators', 'protocols', 'auto', 'step-throw']
 const OPT_IN = []
 const flags = process.argv.slice(2).filter(arg => arg.startsWith('--'))
 const unknownFlags = flags.filter(flag => flag !== '--public-hooks')
@@ -77,10 +77,10 @@ const provider = createServer(async (request, response) => {
   const familyChild = !serialized.includes(FAMILY_PROMPT) ? userText.match(/OWNED_FAMILY_([A-Z]+)/)?.[1] : undefined
   const child = !serialized.includes(CHILDREN_PROMPT) ? userText.match(/OWNED_CHILD_([AB])/)?.[1] : undefined
   const entry = { phase, kind: 'provider', family, model: body.model, unreadableTask: serialized.includes('is not readable by plugins'), ...(auxiliary ? { auxiliary } : {}), ...(fork ? { fork } : {}), ...(child && phase === 'children' ? { child } : {}), ...(familyChild && phase === 'family' ? { familyChild } : {}), classify: userText.includes('Owned classification fixture'), compaction,
-    evaluator: serialized.includes('OWNED_EVALUATOR'), formatKeys: Object.keys(body.response_format?.json_schema?.schema?.properties ?? {}), commandRan: (body.messages ?? []).some(message => message.role === 'tool' && JSON.stringify(message.content).includes('OWNED_CLASSIFIER_OK')), started: performance.now() }
+    evaluator: serialized.includes('OWNED_EVALUATOR'), started: performance.now() }
   observations.push(entry)
   let content = 'Owned provider answer', calls
-  if (auxiliary) { await new Promise(resolve => setTimeout(resolve, 100)); content = 'OWNED_AUX_OK' }
+  if (auxiliary) { await new Promise(resolve => setTimeout(resolve, 600)); content = 'OWNED_AUX_OK' }
   else if (fork) content = 'OWNED_FORK_OK'
   else if (phase.startsWith('children') && body.model === 'main' && mainCalls++ === 0) calls = [
     { id: 'call_child_a', type: 'function', function: { name: 'Agent', arguments: JSON.stringify({ description: 'Owned child A', prompt: 'Return OWNED_CHILD_A without tools.', subagent_type: 'owned-a', name: 'owned-a-peer' }) } },
@@ -90,14 +90,11 @@ const provider = createServer(async (request, response) => {
     { id: 'call_family_explore', type: 'function', function: { name: 'Agent', arguments: JSON.stringify({ description: 'Owned family explore', prompt: 'Return OWNED_FAMILY_EXPLORE without tools.', subagent_type: 'Explore', model: 'haiku', run_in_background: false }) } },
     { id: 'call_family_general', type: 'function', function: { name: 'Agent', arguments: JSON.stringify({ description: 'Owned family general', prompt: 'Return OWNED_FAMILY_GENERAL without tools.', subagent_type: 'general-purpose', run_in_background: false }) } },
   ]
-  else if (phase === 'classifier' && body.model === 'main' && body.tools?.length && mainCalls++ === 0) calls = [{ id: 'call_classifier', type: 'function', function: { name: 'Bash', arguments: JSON.stringify({ command: "/bin/sh -c 'printf OWNED_CLASSIFIER_OK'", description: 'Print the owned classifier marker' }) } }]
   else if (phase === 'builtins' && body.tools?.some(tool => tool.function?.name === 'web_search')) {
     const hasResult = body.messages?.some(message => message.role === 'tool')
     if (!hasResult) calls = [{ id: 'call_search', type: 'function', function: { name: 'web_search', arguments: JSON.stringify({ query: 'Claude Code native mod docs' }) } }]
     else content = 'Owned cited source: https://code.claude.com/docs/en/plugins/mods'
-  // The routed permission judgment is a tool-less request whose answer must
-  // match its { decision, reason } JSON schema (hooks/permission.ts).
-  } else if (body.response_format?.json_schema) content = JSON.stringify(schemaValue(body.response_format.json_schema.schema))
+  }
   else if (userText.includes('Owned classification fixture')) content = 'owned'
   entry.ended = performance.now()
   if (phase === 'request-failure') { response.writeHead(429, { 'content-type': 'application/json', 'x-should-retry': 'false' }); response.end('{"error":{"message":"Owned quota rejection"}}'); return }
@@ -109,17 +106,6 @@ const provider = createServer(async (request, response) => {
   send({ choices: [{ index: 0, delta: {}, finish_reason: calls ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: phase.startsWith('auto') ? 10000 : 20, completion_tokens: 10 } })
   response.end('data: [DONE]\n\n')
 })
-function schemaValue(schema) {
-  if (schema.const !== undefined) return schema.const
-  if (schema.enum) return schema.enum.find(value => ['allow', 'safe', 'safe_to_run'].includes(value)) ?? schema.enum[0]
-  if (schema.anyOf) return schemaValue(schema.anyOf[0])
-  if (schema.type === 'object' || schema.properties) return Object.fromEntries(Object.entries(schema.properties ?? {}).map(([key, value]) => [key, schemaValue(value)]))
-  if (schema.type === 'array') return []
-  if (schema.type === 'boolean') return true
-  if (schema.type === 'integer' || schema.type === 'number') return 0
-  if (schema.type === 'null') return null
-  return 'Owned classifier rationale'
-}
 // The production hooks change while this proof stays fixed: a missing anchor
 // must fail loudly instead of silently dropping a fixture prelude.
 function inject(source, anchor, replacement, all = false) {
@@ -271,13 +257,6 @@ try {
     await run('compact', ['--resume', session], '/compact')
     assert.ok(observations.some(event => event.phase === 'compact' && event.family === 'a' && event.model === 'main' && event.compaction), 'manual compaction sends the routed compaction request to the conversation provider')
     assert.ok(compactBoundaries(session).some(event => event.compactMetadata?.trigger === 'manual'), 'manual compaction completes native transcript bookkeeping')
-  }
-  if (wants('classifier')) {
-    await run('classifier', ['--no-session-persistence', '--settings', JSON.stringify({ autoMode: { classifyAllShell: true } })], 'Print the owned classifier marker using Bash.', { permission: 'auto' })
-    const judgments = observations.filter(event => event.phase === 'classifier' && event.formatKeys.join() === 'decision,reason')
-    assert.ok(judgments.length >= 1, 'the auto-mode permission judgment reached a direct provider with its decision/reason schema')
-    assert.ok(judgments.every(event => event.family === 'a' && event.model === 'main'), 'the permission judgment uses the conversation provider')
-    assert.ok(observations.some(event => event.phase === 'classifier' && event.commandRan), 'the allowed readonly command ran')
   }
   if (wants('skills')) {
     await run('skill-temp', ['--no-session-persistence'], '/owned-temp')

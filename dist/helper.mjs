@@ -4798,6 +4798,8 @@ var TRANSIENT = /* @__PURE__ */ new Set(["server_error", "internal_server_error"
 var PERMANENT = /* @__PURE__ */ new Set(["authentication_error", "invalid_api_key", "unauthorized", "permission_denied", "permission_error", "invalid_request_error", "invalid_request", "insufficient_quota", "billing_hard_limit_reached", "content_policy_violation", "model_not_found"]);
 var TRANSIENT_CLOSE = /* @__PURE__ */ new Set([1e3, 1001, 1005, 1006, 1011, 1012, 1013, 1014]);
 var OVERLOAD = /overload|capacity|unavailable/i;
+var CONNECTION_LIMIT_CODE = "websocket_connection_limit_reached";
+var CONNECTION_LIMIT_MESSAGE = /connection limit reached/i;
 var record = (value) => typeof value === "object" && value !== null ? value : {};
 var string = (value) => typeof value === "string" ? value : "";
 function retryAfterMs(value, now = Date.now()) {
@@ -4816,11 +4818,13 @@ var ProviderFailure = class _ProviderFailure extends Error {
     super(oneLine(message, 300));
     this.info = info;
     const labels = [info.code, info.type].filter((value) => !!value);
+    this.connectionLimit = info.code === CONNECTION_LIMIT_CODE || info.status === 400 && CONNECTION_LIMIT_MESSAGE.test(this.message);
     this.overloaded = info.cause !== "context_overflow" && !labels.some((label) => PERMANENT.has(label)) && (labels.some((label) => OVERLOAD.test(label)) || info.status === 503 || info.status === 529 || OVERLOAD.test(message));
-    this.transient = info.cause === "context_overflow" || labels.some((label) => PERMANENT.has(label)) ? false : this.overloaded ? true : info.status !== void 0 ? info.status === 408 || info.status === 429 || info.status >= 500 && info.status <= 599 : info.closeCode !== void 0 ? TRANSIENT_CLOSE.has(info.closeCode) : labels.some((label) => TRANSIENT.has(label)) || labels.length === 0 && (info.event === "response.failed" || info.event === "error") || info.transient === true;
+    this.transient = this.connectionLimit ? true : info.cause === "context_overflow" || labels.some((label) => PERMANENT.has(label)) ? false : this.overloaded ? true : info.status !== void 0 ? info.status === 408 || info.status === 429 || info.status >= 500 && info.status <= 599 : info.closeCode !== void 0 ? TRANSIENT_CLOSE.has(info.closeCode) : labels.some((label) => TRANSIENT.has(label)) || labels.length === 0 && (info.event === "response.failed" || info.event === "error") || info.transient === true;
   }
   transient;
   overloaded;
+  connectionLimit;
   static event(event) {
     const outer = record(event);
     const response = record(outer.response);
@@ -4849,6 +4853,7 @@ var MAX_ATTEMPTS = 3;
 var OVERLOAD_MAX_ATTEMPTS = 6;
 var MAX_RETRY_WAIT_MS = 3e4;
 function maxAttempts(failure) {
+  if (failure.connectionLimit) return 2;
   return failure.overloaded ? OVERLOAD_MAX_ATTEMPTS : MAX_ATTEMPTS;
 }
 function retryDelay(failure, attempt, random = Math.random) {
@@ -6181,16 +6186,21 @@ var wrapper_default = import_websocket.default;
 
 // helper/socket.ts
 var OPEN_MS = 15e3;
+var MAX_SOCKET_AGE_MS = 55 * 6e4;
 var ENDS = /* @__PURE__ */ new Set(["response.completed", "response.done", "response.failed", "response.incomplete", "error"]);
 var encoder = new TextEncoder();
 var SocketError = class extends ProviderFailure {
   constructor(message, event = "websocket.error", closeCode, status) {
-    super(message, { event, code: "websocket-error", closeCode, status, transient: closeCode === void 0 && status === void 0 });
+    const transient = closeCode === void 0 ? status === void 0 : TRANSIENT_CLOSE.has(closeCode);
+    super(message, { event, code: "websocket-error", closeCode, status, transient });
   }
 };
 var CodexSocket = class _CodexSocket {
-  constructor(socket) {
+  constructor(socket, openedAt, now) {
     this.socket = socket;
+    this.openedAt = openedAt;
+    this.now = now;
+    this.lastUsed = openedAt;
     socket.addEventListener("message", (event) => {
       const text2 = typeof event.data === "string" ? event.data : new TextDecoder().decode(event.data);
       let parsed;
@@ -6210,11 +6220,12 @@ var CodexSocket = class _CodexSocket {
   }
   busy = false;
   closed = false;
-  lastUsed = Date.now();
+  lastUsed;
+  retireOnIdle = false;
   route;
   drop;
   /** A connection once the handshake is done; headers carry the login, which the backend checks here. */
-  static open(url, headers2, signal) {
+  static open(url, headers2, signal, now = Date.now) {
     signal?.throwIfAborted();
     const socket = new wrapper_default(url, { headers: headers2, followRedirects: false });
     socket.on("error", () => {
@@ -6235,7 +6246,7 @@ var CodexSocket = class _CodexSocket {
       const abort = () => fail(signal?.reason);
       const opened = () => {
         cleanup();
-        resolve3(new _CodexSocket(socket));
+        resolve3(new _CodexSocket(socket, now(), now));
       };
       const refused = (event) => {
         const message = "message" in event && typeof event.message === "string" ? event.message : "";
@@ -6258,6 +6269,10 @@ var CodexSocket = class _CodexSocket {
     this.closed = true;
     if (immediate) this.socket.terminate();
     else if (this.socket.readyState === wrapper_default.OPEN || this.socket.readyState === wrapper_default.CONNECTING) this.socket.close(1e3);
+  }
+  retire() {
+    if (this.busy) this.retireOnIdle = true;
+    else this.close(true);
   }
   /**
    * Sends one `response.create` and yields its events as server-sent-event frames for the decoder, the
@@ -6326,32 +6341,39 @@ var CodexSocket = class _CodexSocket {
             self.close(true);
           }
           self.busy = false;
-          self.lastUsed = Date.now();
+          self.lastUsed = self.now();
+          if (self.retireOnIdle) self.close();
         }
       }
     };
   }
 };
 var SocketPool = class {
-  constructor(idleMs = 5 * 6e4) {
+  constructor(idleMs = 5 * 6e4, now = Date.now) {
     this.idleMs = idleMs;
+    this.now = now;
   }
   sockets = /* @__PURE__ */ new Map();
   /** The conversation's open, idle connection, or a new one (kept for next time unless the old one is busy). */
   async take(key, url, headers2, signal) {
     const kept = this.sockets.get(key);
-    if (kept?.isUsable) return { socket: kept, reused: true };
-    const socket = await CodexSocket.open(url, headers2, signal);
-    if (!kept || kept.closed) this.sockets.set(key, socket);
+    const ageExpired = kept !== void 0 && this.now() - kept.openedAt >= MAX_SOCKET_AGE_MS;
+    if (kept?.isUsable && !ageExpired) return { socket: kept, reused: true };
+    if (kept && ageExpired) {
+      kept.retire();
+      if (!kept.busy) this.sockets.delete(key);
+    }
+    const socket = await CodexSocket.open(url, headers2, signal, this.now);
+    if (!kept || kept.closed || !this.sockets.has(key)) this.sockets.set(key, socket);
     return { socket, reused: false };
   }
   /** Whether `socket` belongs to the pool (a spare opened beside a busy one does not). */
   holds(socket) {
     return [...this.sockets.values()].includes(socket);
   }
-  sweep(now = Date.now()) {
+  sweep(now = this.now()) {
     for (const [key, socket] of this.sockets) {
-      if (socket.closed || !socket.busy && now - socket.lastUsed > this.idleMs) {
+      if (socket.closed || !socket.busy && (now - socket.lastUsed > this.idleMs || now - socket.openedAt >= MAX_SOCKET_AGE_MS)) {
         socket.close();
         this.sockets.delete(key);
       }
@@ -6726,6 +6748,8 @@ async function* codexStep(req, model2, signal, options = {}) {
     for (const credential of credentials) if (credential) text2 = text2.replaceAll(credential, "[REDACTED]");
     return `codex: ${text2}`;
   };
+  let attemptSocket;
+  const currentAttemptSocket = () => attemptSocket;
   const openSocket = async () => {
     const auth2 = await readCodexAuth(authFile);
     onAuth(auth2);
@@ -6735,11 +6759,13 @@ async function* codexStep(req, model2, signal, options = {}) {
     if (options.pool) {
       const account = createHash4("sha256").update(auth2["chatgpt-account-id"]).digest("hex");
       const taken = await options.pool.take(`${account}:${sessionId}`, url, headers2, attemptSignal);
+      attemptSocket = taken.socket;
       transport = taken.reused ? "ws reused" : "ws";
       const stream = taken.socket.response(body3, attemptSignal, limitsOf, onLimits);
       return options.pool.holds(taken.socket) ? stream : closeAfter(stream, taken.socket);
     }
     const socket = await CodexSocket.open(url, headers2, attemptSignal);
+    attemptSocket = socket;
     transport = "ws";
     return closeAfter(socket.response(body3, attemptSignal, limitsOf, onLimits), socket);
   };
@@ -6767,6 +6793,7 @@ async function* codexStep(req, model2, signal, options = {}) {
       release = await codexAccounts.acquire(accountKey, limit, signal);
       for (let attempt = 1; attempt <= OVERLOAD_MAX_ATTEMPTS; attempt++) {
         attempts = attempt;
+        attemptSocket = void 0;
         let pending = [];
         const continuationCalls = [];
         const output = scope ? continuationOutput() : void 0;
@@ -6829,6 +6856,7 @@ async function* codexStep(req, model2, signal, options = {}) {
             error instanceof CodexAuthError ? error.message : signal.aborted ? "step aborted" : oneLine(error instanceof Error ? error.message : String(error)),
             { event: signal.aborted ? "request.aborted" : error instanceof CodexAuthError ? "auth.error" : "response.decode", code: error instanceof CodexAuthError ? "codex-auth" : "stream-error" }
           );
+          if (failure.connectionLimit) currentAttemptSocket()?.close(true);
           const delay2 = retryDelay(failure, attempt);
           if (!signal.aborted && failure.transient && !committed && attempt < maxAttempts(failure) && delay2 !== null) {
             await waitForRetry(delay2, signal);

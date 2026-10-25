@@ -1,19 +1,39 @@
 // Production lifecycle hooks in ordinary Claude. Only provider I/O is an owned fixture.
 import assert from 'node:assert/strict'
 import { cpSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { loadavg, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { spawn, spawnSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { waitForNativeProofCapacity } from './native-proof-load.mjs'
+import { captureNativeChild } from './proof-native-child.mjs'
+
+if (!(await waitForNativeProofCapacity())) process.exit(1)
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const fixture = mkdtempSync(join(tmpdir(), 'rice-public-compact-'))
-const plugin = join(fixture, 'plugin'), config = join(fixture, '.claude'), evidence = join(fixture, 'wires.json'), lifecycle = join(fixture, 'lifecycle.json'), agentProjection = join(fixture, 'agent-projection.json')
+const plugin = join(fixture, 'plugin'), config = join(fixture, '.claude'), evidence = join(fixture, 'wires.json'), wireDirectory = join(fixture, 'wire-records'), lifecycle = join(fixture, 'lifecycle.json'), agentProjection = join(fixture, 'agent-projection.json')
 const native = process.env.RICE_CLAUDE_EXECUTABLE || 'claude'
+const wireRows = []
+const mergedWireFiles = new Set()
+function mergeWireRecords() {
+  for (const name of readdirSync(wireDirectory).filter(name => name.endsWith('.json')).sort()) {
+    if (mergedWireFiles.has(name)) continue
+    wireRows.push(JSON.parse(readFileSync(join(wireDirectory, name), 'utf8')))
+    mergedWireFiles.add(name)
+  }
+  writeFileSync(evidence, JSON.stringify(wireRows))
+}
 let child
+let succeeded = false
+let activeRun
+const tail = value => String(value ?? '').slice(-2000)
+const reportDeadline = (phase, startedAt, stdout, stderr) => {
+  process.stderr.write(`${JSON.stringify({ deadline: phase, elapsedMs: Math.round(performance.now() - startedAt), loadAverage1m: loadavg()[0], stdoutTail: tail(stdout), stderrTail: tail(stderr) })}\n`)
+}
 try {
-  mkdirSync(plugin); mkdirSync(config)
+  mkdirSync(plugin); mkdirSync(config); mkdirSync(wireDirectory)
   const readFixture = join(fixture, 'owned.txt')
   writeFileSync(readFixture, 'OWNED_CAPPED_READ_RESULT: approval remains pending.')
   for (const directory of ['.claude-plugin', 'hooks', 'types', 'dist', 'scripts', 'README.md']) cpSync(join(root, directory), join(plugin, directory), { recursive: true })
@@ -41,12 +61,11 @@ try {
   on('process.spawn', async function* ($, e, next) {
     if (!e.argv.includes('once')) return yield* next(e)
     const wire=JSON.parse(e.input || '{}')
-    const rows=await $.fs.exists(${JSON.stringify(evidence)})?JSON.parse(await $.fs.read(${JSON.stringify(evidence)})):[]
-    // The engine's own summary prompt asks for the two blocks its answer is read by.
+    // Main and background child sessions can report concurrently, so each owns its wire file.
     const last=JSON.stringify(wire.req.transcript.at(-1))
     const summary=last.includes('<analysis>')&&last.includes('<summary>')
-    rows.push({target:wire.req.target,who:wire.req.who,summary,prompt:JSON.stringify(wire.req.transcript),messages:wire.req.transcript.length,last,system:wire.req.system.slice(0,200),maxTokens:wire.req.native?.maxTokens})
-    await $.fs.write(${JSON.stringify(evidence)},JSON.stringify(rows))
+    const row={target:wire.req.target,who:wire.req.who,summary,prompt:JSON.stringify(wire.req.transcript),messages:wire.req.transcript.length,last,system:wire.req.system.slice(0,200),maxTokens:wire.req.native?.maxTokens}
+    await $.fs.write(${JSON.stringify(wireDirectory)} + '/' + crypto.randomUUID() + '.json',JSON.stringify(row))
     const text=summary?'<analysis>owned analysis</analysis>\\n<summary>\\nOWNED_PRODUCT_SUMMARY: Preserve /repo/task.ts; approval remains pending.\\n</summary>':'OWNED_PRODUCT_ANSWER'
     const transcript=JSON.stringify(wire.req.transcript)
     const launch=wire.req.who==='main'&&!summary&&transcript.includes('OWNED_TRACKED_AGENT')&&!transcript.includes('toolu_owned_projection')
@@ -84,13 +103,20 @@ try {
   writeFileSync(file, source)
   const env = Object.fromEntries(['PATH', 'PATHEXT', 'SystemRoot', 'SystemDrive', 'WINDIR', 'ComSpec', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'ProgramFiles', 'ProgramFiles(x86)', 'CLAUDE_CODE_GIT_BASH_PATH'].filter(name => process.env[name] !== undefined).map(name => [name, process.env[name]]))
   Object.assign(env, { HOME: fixture, USERPROFILE: fixture, CLAUDE_CONFIG_DIR: config, CODEX_HOME: join(fixture, '.codex'), ANTHROPIC_API_KEY: 'owned-no-network', ANTHROPIC_BASE_URL: 'http://127.0.0.1:1', DISABLE_AUTOUPDATER: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' })
-  const checked = spawnSync(native, ['plugin', 'validate', '--strict', plugin], { cwd: fixture, env, encoding: 'utf8', timeout: 10000 })
-  if (checked.status !== 0) process.stderr.write(checked.stdout + checked.stderr)
-  assert.equal(checked.status, 0, (checked.stdout + checked.stderr).slice(-2000))
+  const validationStarted = performance.now()
+  const validationChild = spawn(native, ['plugin', 'validate', '--strict', plugin], { cwd: fixture, env, stdio: ['ignore', 'pipe', 'pipe'] })
+  const { code: validationCode, timedOut: validationExpired, stdout: validationStdout, stderr: validationStderr } = await captureNativeChild(validationChild, 10000, ({ stdout, stderr }) => {
+    reportDeadline('plugin validate', validationStarted, stdout, stderr)
+    validationChild.kill('SIGTERM')
+  })
+  if (validationCode !== 0) process.stderr.write(validationStdout + validationStderr)
+  assert.equal(validationExpired, false, 'plugin validate deadline')
+  assert.equal(validationCode, 0, (validationStdout + validationStderr).slice(-2000))
   async function run(label, session, args, prompt, tools = '') {
     // Native Windows limits a command line to 32767 characters; claude -p reads a long prompt from stdin.
     const script = Array.isArray(prompt) ? prompt : undefined
     const viaStdin = script !== undefined || prompt.length > 8000
+    const startedAt = performance.now()
     child = spawn(native, ['-p', '--model', 'codex/owned-public', '--plugin-dir', plugin, '--setting-sources', 'user', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--tools', tools, ...(tools ? ['--permission-mode', 'bypassPermissions'] : []), '--output-format', script ? 'stream-json' : 'json', ...(script ? ['--input-format', 'stream-json', '--verbose'] : []), ...args, ...(viaStdin ? [] : [prompt])], { cwd: fixture, env, detached: process.platform !== 'win32', stdio: [viaStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'] })
     let pending = '', results = 0
     const outputs = []
@@ -112,8 +138,16 @@ try {
     console.log(JSON.stringify({ phase: label, ownedPid: child.pid, session, preload: false }))
     let stdout = '', stderr = '', expired = false
     child.stdout.on('data', bytes => stdout += bytes); child.stderr.on('data', bytes => stderr += bytes)
-    const timer = setTimeout(() => { expired = true; terminate() }, 30000)
+    const diagnostics = { label, startedAt, output: () => ({ stdout, stderr }) }
+    activeRun = diagnostics
+    const timer = setTimeout(() => {
+      expired = true
+      reportDeadline(label, startedAt, stdout, stderr)
+      terminate(diagnostics)
+    }, 30000)
     const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve) }); clearTimeout(timer)
+    mergeWireRecords()
+    if (activeRun === diagnostics) activeRun = undefined
     assert.equal(expired, false, label + ' deadline')
     assert.equal(code, 0, label + ': ' + (stdout + stderr).slice(-2000))
     if (script) {
@@ -205,12 +239,27 @@ try {
   assert.ok(wires.filter(row => row.summary).length >= 2)
   assert.ok(wires.every(row => row.target === 'codex/owned-public'), 'no native or other provider fallback')
   console.log(JSON.stringify({ publicCompaction: true, manualSavedAndResumed: true, automaticSaved: true, providerOwnedRequests: wires.length, summaryRequests: wires.filter(row => row.summary).length }))
+  succeeded = true
 } finally {
-  terminate()
-  rmSync(fixture, { recursive: true, force: true })
+  terminate(activeRun)
+  if (succeeded) rmSync(fixture, { recursive: true, force: true })
+  else process.stderr.write(`Failure artifact retained at ${fixture}\n`)
 }
-function terminate() {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return
-  if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', timeout: 10000 })
-  else try { process.kill(-child.pid, 'SIGTERM') } catch (error) { if (error.code !== 'ESRCH') throw error }
+function terminate(diagnostics) {
+  const target = child
+  if (!target || target.exitCode !== null || target.signalCode !== null) return
+  if (process.platform === 'win32') {
+    const killStarted = performance.now()
+    const killer = spawn('taskkill', ['/PID', String(target.pid), '/T', '/F'], { stdio: 'ignore' })
+    let finished = false
+    const timer = setTimeout(() => {
+      if (finished) return
+      const output = diagnostics?.output() ?? { stdout: '', stderr: '' }
+      reportDeadline(`${diagnostics?.label ?? 'claude -p'} taskkill`, killStarted, output.stdout, output.stderr)
+      killer.kill()
+    }, 10000)
+    const settle = () => { finished = true; clearTimeout(timer) }
+    killer.once('close', settle)
+    killer.once('error', settle)
+  } else try { process.kill(-target.pid, 'SIGTERM') } catch (error) { if (error.code !== 'ESRCH') throw error }
 }

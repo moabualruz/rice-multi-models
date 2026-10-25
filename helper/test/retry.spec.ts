@@ -5,6 +5,7 @@ import { join } from 'node:path'
 
 import type { StepEvent, StepRequest } from '../../hooks/protocol.ts'
 import { codexStep, streamIdleMs } from '../codex.ts'
+import { SocketPool } from '../socket.ts'
 import { MAX_ATTEMPTS, MAX_RETRY_WAIT_MS, maxAttempts, OVERLOAD_MAX_ATTEMPTS, ProviderFailure, retryAfterMs, retryDelay, waitForRetry } from '../core/provider-failure.ts'
 
 const req: StepRequest = { target: 'codex/test', system: 'Test', tools: [{ name: 'echo', description: 'Echo', schema: { type: 'object' } }], transcript: [{ role: 'user', content: 'Hi' }], who: 'main', session: 'retry-test' }
@@ -12,11 +13,12 @@ const created = { type: 'response.created', response: { id: 'resp_test' } }
 const success = [created, { type: 'response.completed', response: { id: 'resp_test', status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: 'OK' }] }], usage: { input_tokens: 1, output_tokens: 1 } } }]
 type Reply = { status?: number; headers?: Record<string, string>; events?: unknown[]; close?: number; body?: unknown; rawSse?: string }
 
-async function fake(replies: Reply[], transport: 'sse' | 'ws' | 'auto' = 'sse') {
+async function fake(replies: Reply[], transport: 'sse' | 'ws' | 'auto' = 'sse', pool?: SocketPool) {
   const dir = mkdtempSync(join(tmpdir(), 'mm-retry-'))
   const authFile = join(dir, 'auth.json')
   writeFileSync(authFile, JSON.stringify({ auth_mode: 'chatgpt', tokens: { access_token: 'test-only', account_id: 'retry-test' } }))
   let calls = 0
+  let connections = 0
   const respond = () => replies[Math.min(calls++, replies.length - 1)]!
   const server = Bun.serve({
     port: 0,
@@ -26,7 +28,10 @@ async function fake(replies: Reply[], transport: 'sse' | 'ws' | 'auto' = 'sse') 
           const reply = respond()
           return new Response(JSON.stringify(reply.body), { status: reply.status, headers: reply.headers })
         }
-        if (server.upgrade(request)) return
+        if (server.upgrade(request)) {
+          connections++
+          return
+        }
         return new Response(null, { status: 400 })
       }
       await request.json()
@@ -43,8 +48,8 @@ async function fake(replies: Reply[], transport: 'sse' | 'ws' | 'auto' = 'sse') 
   })
   try {
     const events: StepEvent[] = []
-    for await (const event of codexStep({ ...req, transport }, 'test', new AbortController().signal, { authFile, httpUrl: `http://127.0.0.1:${server.port}/responses`, wsUrl: `ws://127.0.0.1:${server.port}/ws` })) events.push(event)
-    return { events, calls }
+    for await (const event of codexStep({ ...req, transport }, 'test', new AbortController().signal, { authFile, pool, httpUrl: `http://127.0.0.1:${server.port}/responses`, wsUrl: `ws://127.0.0.1:${server.port}/ws` })) events.push(event)
+    return { events, calls, connections }
   } finally {
     server.stop(true)
     rmSync(dir, { recursive: true, force: true })
@@ -64,6 +69,32 @@ test('WebSocket close 1000 before completion retries on a new connection', async
   const result = await fake([{ events: [created], close: 1000 }, {}], 'ws')
   expect(result.calls).toBe(2)
   expect(result.events.some(event => event.type === 'stop')).toBe(true)
+})
+
+test('repeated transient 1011 closes exhaust three attempts, report the count and emit no tool_use', async () => {
+  const result = await fake([{ events: [created], close: 1011 }], 'ws')
+  expect(result.calls).toBe(3)
+  expect(result.events.filter(event => event.type === 'tool_use')).toHaveLength(0)
+  const error = result.events.find(event => event.type === 'error')
+  if (error?.type !== 'error') throw new Error('missing error')
+  expect(error.text).toContain('close=1011')
+  expect(error.text).toContain('3 attempts')
+})
+
+test('a 60-minute WebSocket refusal retries once on a fresh pooled connection without duplicating tool_use', async () => {
+  const tool = { type: 'function_call', call_id: 'call_once', name: 'echo', arguments: '{}' }
+  const completed = [created,
+    { type: 'response.output_item.added', output_index: 0, item: tool },
+    { type: 'response.output_item.done', output_index: 0, item: tool },
+    { type: 'response.completed', response: { id: 'resp_test', status: 'completed', output: [tool], usage: { input_tokens: 1, output_tokens: 1 } } },
+  ]
+  const refused = { type: 'error', code: 'websocket_connection_limit_reached', message: 'Responses websocket connection limit reached (60 minutes). Create a new websocket connection to continue.' }
+  const result = await fake([{ events: [refused] }, { events: completed }], 'ws', new SocketPool())
+  expect(result.calls).toBe(2)
+  expect(result.connections).toBe(2)
+  expect(result.events.filter(event => event.type === 'tool_use')).toHaveLength(1)
+  expect(result.events.find(event => event.type === 'stop')).toEqual({ type: 'stop', reason: 'tool_use' })
+  expect(result.events.some(event => event.type === 'error')).toBe(false)
 })
 
 test('HTTP 429 honors Retry-After and retries', async () => {
@@ -285,6 +316,10 @@ test('provider overload is transient with a longer, capped schedule', () => {
   const ordinary = new ProviderFailure('', { event: 'error', code: 'rate_limit_exceeded' })
   expect(ordinary.overloaded).toBe(false)
   expect(maxAttempts(ordinary)).toBe(MAX_ATTEMPTS)
+  const connectionLimit = ProviderFailure.event({ type: 'error', code: 'websocket_connection_limit_reached', message: 'Responses websocket connection limit reached (60 minutes). Create a new websocket connection to continue.' })
+  expect(connectionLimit.transient).toBe(true)
+  expect(connectionLimit.overloaded).toBe(false)
+  expect(maxAttempts(connectionLimit)).toBe(2)
   const permanent = new ProviderFailure('model unavailable for this account', { event: 'error', code: 'model_not_found' })
   expect(permanent.overloaded).toBe(false)
   expect(permanent.transient).toBe(false)

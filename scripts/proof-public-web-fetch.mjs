@@ -180,6 +180,5 @@ try {
 
 function copyFixtureInstructions(pluginRoot, sourceRoot) {
   mkdirSync(join(pluginRoot, 'scripts'), { recursive: true })
-  cpSync(join(sourceRoot, 'scripts/permission-context.mjs'), join(pluginRoot, 'scripts/permission-context.mjs'))
   cpSync(join(sourceRoot, 'helper/openai/instructions.md'), join(pluginRoot, 'dist/instructions.md'))
 }

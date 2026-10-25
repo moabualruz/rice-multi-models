@@ -3,9 +3,11 @@ import type { StepFailureCause } from '../../hooks/protocol.ts'
 
 const TRANSIENT = new Set(['server_error', 'internal_server_error', 'internal_error', 'rate_limit_exceeded', 'rate_limit_error', 'too_many_requests', 'concurrency_limit_exceeded', 'concurrent_request_limit_exceeded', 'overloaded_error', 'service_unavailable', 'temporarily_unavailable', 'timeout', 'request_timeout'])
 const PERMANENT = new Set(['authentication_error', 'invalid_api_key', 'unauthorized', 'permission_denied', 'permission_error', 'invalid_request_error', 'invalid_request', 'insufficient_quota', 'billing_hard_limit_reached', 'content_policy_violation', 'model_not_found'])
-const TRANSIENT_CLOSE = new Set([1000, 1001, 1005, 1006, 1011, 1012, 1013, 1014])
+export const TRANSIENT_CLOSE = new Set([1000, 1001, 1005, 1006, 1011, 1012, 1013, 1014])
 // Provider-side saturation ("server_is_overloaded", "model at capacity", 503/529): recovers in minutes, not seconds.
 const OVERLOAD = /overload|capacity|unavailable/i
+const CONNECTION_LIMIT_CODE = 'websocket_connection_limit_reached'
+const CONNECTION_LIMIT_MESSAGE = /connection limit reached/i
 const record = (value: unknown): Record<string, unknown> => typeof value === 'object' && value !== null ? value as Record<string, unknown> : {}
 const string = (value: unknown): string => typeof value === 'string' ? value : ''
 
@@ -26,12 +28,15 @@ export type FailureInfo = { event: string; code?: string; type?: string; status?
 export class ProviderFailure extends Error {
   readonly transient: boolean
   readonly overloaded: boolean
+  readonly connectionLimit: boolean
   constructor(message: string, readonly info: FailureInfo) {
     super(oneLine(message, 300))
     const labels = [info.code, info.type].filter((value): value is string => !!value)
+    this.connectionLimit = info.code === CONNECTION_LIMIT_CODE || info.status === 400 && CONNECTION_LIMIT_MESSAGE.test(this.message)
     this.overloaded = info.cause !== 'context_overflow' && !labels.some(label => PERMANENT.has(label))
       && (labels.some(label => OVERLOAD.test(label)) || info.status === 503 || info.status === 529 || OVERLOAD.test(message))
-    this.transient = info.cause === 'context_overflow' || labels.some(label => PERMANENT.has(label)) ? false
+    this.transient = this.connectionLimit ? true
+      : info.cause === 'context_overflow' || labels.some(label => PERMANENT.has(label)) ? false
       : this.overloaded ? true
       : info.status !== undefined
         ? info.status === 408 || info.status === 429 || (info.status >= 500 && info.status <= 599)
@@ -72,6 +77,8 @@ export const OVERLOAD_MAX_ATTEMPTS = 6
 export const MAX_RETRY_WAIT_MS = 30_000
 
 export function maxAttempts(failure: ProviderFailure): number {
+  // A rejected WebSocket needs one fresh connection, not the generic retry allowance.
+  if (failure.connectionLimit) return 2
   return failure.overloaded ? OVERLOAD_MAX_ATTEMPTS : MAX_ATTEMPTS
 }
 

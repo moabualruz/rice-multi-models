@@ -1014,7 +1014,7 @@ test('a forced subagent model and a workflow model label rows in Claude\'s own o
     expect((await spawn('opus', 'statusline-setup')).received.description).toBe('owned spawn (haiku)')
     // It outranks a workflow model too, which Claude keeps under it only from managed policy.
     environment.set('CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL', 'sonnet')
-    expect((await spawnWith(workflow, 'opus', 'opus')).received.description).toBe('owned spawn (haiku)')
+    expect((await spawnWith(workflow, 'opus', 'opus')).received.description).toBe('owned spawn')
     // Forced with no model set, the call's model is dropped and the child runs on its parent's.
     environment.delete('CLAUDE_CODE_SUBAGENT_MODEL')
     expect((await spawn('opus', 'general-purpose', 'sonnet')).received.description).toBe('owned spawn (opus)')
@@ -1022,7 +1022,7 @@ test('a forced subagent model and a workflow model label rows in Claude\'s own o
     expect((await spawn('opus', 'general-purpose', 'haiku')).received.description).toBe('owned spawn (haiku)')
     // A workflow agent takes the workflow model over the call's, and so does a non-teammate it starts.
     const agent = await spawnWith(workflow, 'opus', 'haiku')
-    expect(agent.received.description).toBe('owned spawn (sonnet)')
+    expect(agent.received.description).toBe('owned spawn')
     expect(agent.received.model).toBe('haiku')
     const nested = await spawn('sonnet', 'general-purpose', 'opus', agent.id)
     expect(nested.received.description).toBe('owned spawn (sonnet)')
@@ -1031,10 +1031,31 @@ test('a forced subagent model and a workflow model label rows in Claude\'s own o
     // An agent outside a run keeps its call's model, and an "inherit" workflow model is no workflow model.
     expect((await spawn('opus', 'general-purpose', 'haiku')).received.description).toBe('owned spawn (haiku)')
     environment.set('CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL', 'Inherit')
-    expect((await spawnWith(workflow, 'opus', 'haiku')).received.description).toBe('owned spawn (haiku)')
+    expect((await spawnWith(workflow, 'opus', 'haiku')).received.description).toBe('owned spawn')
   } finally {
     host.session.model = sessionModel
     for (const name of ['CLAUDE_CODE_SUBAGENT_MODEL_FORCE', 'CLAUDE_CODE_SUBAGENT_MODEL', 'CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL']) environment.delete(name)
+  }
+})
+
+test('workflow agent descriptions stay native while nested agents remain labelled', async () => {
+  await reload({})
+  const sessionModel = host.session.model
+  host.session.model = async () => 'opus'
+  const workflow = { workflow: { runId: 'wf_native_label_fixture', agentIndex: 0 } }
+  const id = `spawned-agent-${agents.length}`
+  let received: any
+  try {
+    await hook('agent.spawn')(host, { ...spawnInput('opus', 'general-purpose'), ...workflow }, async (event: any) => {
+      received = event
+      agents.push({ id, type: event.subagentType, description: event.description, status: 'running' })
+      return { model: 'sonnet', agentId: id }
+    })
+    expect(received.description).toBe('owned spawn')
+    const nested = await spawn('sonnet', 'general-purpose', 'haiku', id)
+    expect(nested.received.description).toBe('owned spawn (haiku)')
+  } finally {
+    host.session.model = sessionModel
   }
 })
 

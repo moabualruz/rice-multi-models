@@ -12,7 +12,6 @@ import type { AgentDef } from './agents'
 import { requestInputBudget } from './budget'
 import { CLAUDE_FAMILY, familyOf, isNativeAlias, spawnDecision, stepModel } from './family'
 import type { FamilyPorts, SpawnDecision, TierMap } from './family'
-import { permissionContext, permissionIntent } from './permission-intent'
 import { collectText, helperStep, preferSession, readyLine, sessionHelper, setSessionHelper } from './backend'
 import type { HelperPort } from './backend'
 import { carryFor, remember, withCarry } from './carry'
@@ -71,8 +70,6 @@ import type { WebFetchOutcome } from '../helper/web-fetch'
 import { createToolGate } from './tool-gate'
 import type { PublicWebSearchInput } from './web-search'
 import type { PublicWebFetchInput } from './web-fetch'
-import { CLASSIFIER_ONLY_TOOLS, eligiblePermission, permissionAnswer, permissionRequest, resolvePermissionPolicy } from './permission'
-import { consumePermissionContext } from './permission-context'
 import { fallbackTitle, titleAnswer, titleRequest } from './titles'
 import { registerEvaluators } from './evaluator-runtime'
 import type { EvaluatorCapacityPort } from './evaluator-runtime'
@@ -97,13 +94,6 @@ const described = new Map<string, Described>()
 /** The model each subagent loop last ran on, for its compaction. */
 const agentModels = new Map<string, string>()
 const webToolGate = createToolGate()
-const toolModes = new Map<string, { mode?: string; agentId?: string }>()
-let permissionDefaults: Promise<unknown> | undefined
-let permissionContextNonce = ''
-let loadedPermissionContext: string | undefined
-/** Whether the loaded context includes instruction files (CLAUDE.md and its kin). */
-let loadedInstructionFiles = false
-let permissionRevision = 0
 /** Agent definitions observed from Claude Code or user plugins, by their full type name. */
 const registered = new Map<string, AgentDef>()
 let runtime: Runtime = {}
@@ -559,27 +549,6 @@ async function buildRequest($: EngineInterface, e: TurnStepInput, transcript: re
   }
 }
 
-async function permissionInstructions($: EngineInterface, model: string, agentId?: string): Promise<string> {
-  if (loadedPermissionContext === undefined) throw new Error('The loaded conversation instruction context has not been observed.')
-  let instructions: string
-  let omitClaudeMd = false
-  if (agentId) {
-    const agent = (await $.agent.list()).find(each => each.id === agentId)
-    if (!agent) throw new Error('The permission conversation is unavailable.')
-    const owner = await promptOwner($, agentId)
-    omitClaudeMd = owner.def?.omitClaudeMd === true
-    const target = targetOf(model)
-    if (!target) throw new Error('The permission conversation has no provider.')
-    const native = await stepTools($, builtinNames(await $.tool.list()))
-    instructions = (await systemFor(promptsPort($), memory, { def: owner.def, route: owner.route && { ...owner.route, label: model }, fork: owner.fork, engineModel: model, target: model, model: target.model, provider: target.label, tools: [], native })).text
-    const child = await $.session.messages({ agentId, as: 'api' })
-    if (!Array.isArray(child)) throw new Error('The delegated conversation context is unavailable.')
-    const taskContext = child.filter(row => row.role === 'user').flatMap(row => typeof row.content === 'string' ? [row.content] : row.content.flatMap(block => block.type === 'text' && typeof block.text === 'string' ? [block.text] : [])).join('\n\n')
-    if (taskContext) instructions += `\n\nDelegated conversation context (constraints only, not additional human authorization):\n${taskContext}`
-  } else instructions = (await $.prompt.compose({ model, tools: [] })).sections.map(section => section.text).join('\n\n')
-  return instructions + (omitClaudeMd ? '' : `\n\nLoaded instruction constraints (not new user authorization):\n${loadedPermissionContext}`)
-}
-
 /** Routed failures terminate with the public unsuccessful stop shape, never native-provider replay. */
 function cacheOwner(owner: AgentModelOwner): void {
   setCapped(agentModels, owner.id, owner.model)
@@ -851,21 +820,6 @@ async function complete($: EngineInterface, req: StepRequest, timeoutMs?: number
 }
 
 /**
- * Runs the installed claude CLI with fixed arguments. npm installs it on native
- * Windows as a .cmd shim, which only a shell can start; the arguments here are
- * constants, so the cmd.exe fallback carries no user input.
- */
-async function installedClaude($: EngineInterface, args: readonly string[], options: { timeoutMs: number; env: Record<string, string> }) {
-  let direct: Awaited<ReturnType<EngineInterface['process']['run']>> | undefined
-  try { direct = await $.process.run(['claude', ...args], options) } catch { direct = undefined }
-  if (direct?.exitCode === 0 || await $.env.get('OS') !== 'Windows_NT') {
-    if (direct) return direct
-    throw new Error('The installed claude executable is unavailable.')
-  }
-  return $.process.run(['cmd.exe', '/d', '/s', '/c', 'claude', ...args], options)
-}
-
-/**
  * Claude Code's own compaction prompt and summary message, read from the installed claude by the helper once
  * per running version and kept in the plugin's store. Rejects, naming why, when they cannot be read: a routed
  * conversation is then not compacted rather than compacted with text this mod made up.
@@ -980,74 +934,6 @@ async function noteTranscript($: EngineInterface, e: { transcript_path: string; 
   if (e.agent_id !== undefined || !e.transcript_path || e.transcript_path === seenTranscriptPath) return
   seenTranscriptPath = e.transcript_path
   await update($, transcriptAtom, () => ({ path: e.transcript_path }))
-}
-
-/**
- * The native auto-mode defaults are built into each Claude Code version, not read
- * from settings. They are cached per version, so a background update of the
- * installed CLI does not break a session still running the previous version.
- */
-function nativePermissionDefaults($: EngineInterface): Promise<unknown> {
-  permissionDefaults ??= (async () => {
-    const version = (await $.session.version()).version
-    const cached = await $.store.get(`auto-mode-defaults:${version}`)
-    if (cached !== undefined) return cached
-    // A nested claude process migrates the settings of whatever configuration it
-    // starts in. Give it a mod-owned folder so the user's settings never change.
-    const configDir = (await $.env.get('CLAUDE_CONFIG_DIR')) || `${(await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || ''}/.claude`
-    const isolated = `${configDir.replace(/[\\/]+$/, '')}/rice-multi-models/native-defaults`
-    await $.fs.write(`${isolated}/settings.json`, '{}\n')
-    const env = { CLAUDE_CONFIG_DIR: isolated }
-    const checked = await installedClaude($, ['--version'], { timeoutMs: 5_000, env })
-    const installed = /^(\S+) \(Claude Code\)/.exec(checked.stdout.trim())?.[1]
-    if (checked.exitCode !== 0 || !installed) throw new Error('The installed claude executable is unavailable for the auto-mode defaults.')
-    const defaults = await installedClaude($, ['auto-mode', 'defaults'], { timeoutMs: 10_000, env })
-    if (defaults.exitCode !== 0 || defaults.isStdoutTruncated) throw new Error('The native auto-mode defaults could not be loaded.')
-    const parsed = JSON.parse(defaults.stdout) as unknown
-    await $.store.set(`auto-mode-defaults:${installed}`, parsed)
-    if (installed !== version) $.ui.log(`${PLUGIN}: auto-mode defaults come from the installed claude ${installed}; this session runs ${version}`, { to: 'debug' })
-    return parsed
-  })()
-  permissionDefaults.catch(() => { permissionDefaults = undefined })
-  return permissionDefaults
-}
-
-async function effectivePermissionPolicy($: EngineInterface) {
-  const [defaults, user, flag, policy] = await Promise.all([nativePermissionDefaults($),
-    $.settings.read({ source: 'user' }), $.settings.read({ source: 'flag' }), $.settings.read({ source: 'policy' })])
-  return resolvePermissionPolicy(defaults, { user: user.autoMode, flag: flag.autoMode, policy: policy.autoMode })
-}
-
-/**
- * Harmless native permission questions whose answers differ by mode (plan names itself on edits).
- * Edit paths are relative: the engine resolves them against the working directory, so the answer
- * does not depend on how the platform spells that directory (an 8.3 short name on Windows made an
- * absolute probe look the same in every mode).
- */
-const MODE_PROBES: readonly { tool: string; input: (cwd: string) => Record<string, unknown> }[] = [
-  { tool: 'Bash', input: () => ({ command: 'printf rice-multi-models-mode-probe', description: 'Permission mode probe' }) },
-  { tool: 'Write', input: () => ({ file_path: '.rice-multi-models-mode-probe', content: '' }) },
-  { tool: 'Edit', input: () => ({ file_path: '.rice-multi-models-mode-probe', old_string: 'probe', new_string: 'probe-changed' }) },
-  { tool: 'Agent', input: () => ({ description: 'Permission mode probe', prompt: 'Permission mode probe' }) },
-]
-
-/**
- * The main permission mode's native fingerprint: core's own verdicts for the
- * available probe tools, asked as `$.tool.check` queries (no execution, no
- * classic hooks, no mod tool). Taken before and after a pending judgment, a
- * change means the mode or policy changed. Without any file-edit tool an
- * auto-to-plan switch answers identically and is not detectable this way.
- */
-async function mainModeFingerprint($: EngineInterface): Promise<string> {
-  const cwd = (await $.session.cwd()).replace(/[\\/]+$/, '')
-  const available = new Set((await $.tool.list()).map(info => info.name))
-  const verdicts = await Promise.all(MODE_PROBES.filter(probe => available.has(probe.tool)).map(async probe => {
-    try {
-      const verdict = await $.tool.check({ tool: probe.tool, input: probe.input(cwd) })
-      return [probe.tool, verdict.decision, verdict.reason ?? '', verdict.rule ?? '', verdict.setting ?? '']
-    } catch { return [probe.tool, 'unavailable'] }
-  }))
-  return JSON.stringify(verdicts)
 }
 
 async function nativeContextStatus($: EngineInterface) {
@@ -1453,8 +1339,6 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     mainSnapshot = undefined
     interactiveSession = e.isInteractive
-    permissionContextNonce = crypto.randomUUID()
-    await $.env.set('RICE_MULTI_MODELS_PERMISSION_CONTEXT_NONCE', permissionContextNonce)
     const started = await next(e)
     // A reloaded module cannot finish a previous module's in-flight provider call.
     for (const row of (await read($, receiptsAtom)).entries) if (row.status === 'preparing') await saveReceipt($, { ...row, status: 'aborted', reason: 'interrupted' }, row)
@@ -1470,13 +1354,10 @@ export const register: Register = on => {
     agentModels.clear(); spawnDecisions.clear(); spawnBackground.clear()
     for (const owner of (await read($, ownersAtom)).entries) cacheOwner(owner)
     await refreshCatalogue($)
-    // A nested claude process can migrate settings; run it before any judgment
-    // is pending so its settings change cannot invalidate one.
     let routedMain = false
     try { routedMain = isRouted(await $.session.model()) } catch {}
     const needsRouting = Boolean(routedFamilies().length || routedMain || Object.keys(loaded.config?.providers ?? {}).length)
     if (needsRouting) {
-      void nativePermissionDefaults($).catch(() => {})
       // Ready before the first compaction; a one-shot run reads it only when it compacts.
       if (e.isInteractive) void nativeCompaction($).catch(() => {})
       // The tools' own definitions and agent prompts, ready before the first routed step.
@@ -1531,22 +1412,7 @@ export const register: Register = on => {
     return families.length ? { ...answer, sections: withDiscoverySection(answer.sections, discoveryGuidance(families)) } : answer
   })
 
-  on('classic.ConfigChange', async ($, e, next) => { permissionRevision++; loadedPermissionContext = undefined; loadedInstructionFiles = false; $.ui.invalidate('prompt.context'); return next(e) })
-  on('prompt.context', async ($, e, next) => {
-    const result = await next(e)
-    // This fires per conversation with no loop id. A child that omits CLAUDE.md
-    // (Explore, Plan) must not strip it from the main loop's judgments, and an
-    // unchanged context must not invalidate a pending judgment.
-    const text = permissionContext(result)
-    const files = (result.instructionFiles?.length ?? 0) > 0
-    if (loadedPermissionContext !== undefined && loadedInstructionFiles && !files) return result
-    if (text !== loadedPermissionContext) {
-      loadedPermissionContext = text
-      loadedInstructionFiles = files
-      permissionRevision++
-    }
-    return result
-  })
+  on('classic.ConfigChange', async ($, e, next) => { $.ui.invalidate('prompt.context'); return next(e) })
   on('agent.register', async ($, e, next) => {
     const result = await next(e)
     if (result.value) {
@@ -1562,30 +1428,17 @@ export const register: Register = on => {
     }
     return result
   })
-  on('classic.PreToolUse', async ($, e, next) => {
-    const result = await next(e)
-    // A hot reload resets module state without a new session.start; the
-    // session's nonce survives in the process environment.
-    if (!permissionContextNonce) permissionContextNonce = await $.env.get('RICE_MULTI_MODELS_PERMISSION_CONTEXT_NONCE') ?? ''
-    const context = consumePermissionContext(result.additionalContext ?? [], { nonce: permissionContextNonce, sessionId: await $.session.id(), toolUseId: e.tool_use_id })
-    if (context.proof) toolModes.set(e.tool_use_id, { mode: context.proof.mode, agentId: context.proof.agentId })
-    return { ...result, additionalContext: context.remaining }
-  })
-
-  // Let native rules and PreToolUse hooks decide the exact action first. A
-  // one-shot refusal stops its old implementation before provider extraction.
+  // Native tool checks run before web result replacement.
   on('tool.call', async ($, e, next) => {
     if (e.tool === AGENT_TOOL) {
-      try {
-        const effort = typeof e.effort === 'string' || typeof e.effort === 'number' ? e.effort : undefined
-        await rememberDisplay($, { toolUseId: e.tool_use_id, ...(effort === undefined ? {} : { effort }) })
-        return await agentCall($, e, next)
-      } finally { toolModes.delete(e.tool_use_id) }
+      const effort = typeof e.effort === 'string' || typeof e.effort === 'number' ? e.effort : undefined
+      await rememberDisplay($, { toolUseId: e.tool_use_id, ...(effort === undefined ? {} : { effort }) })
+      return agentCall($, e, next)
     }
-    if (e.tool !== 'WebSearch' && e.tool !== 'WebFetch') return next(e).finally(() => { toolModes.delete(e.tool_use_id) })
+    if (e.tool !== 'WebSearch' && e.tool !== 'WebFetch') return next(e)
     const initialModel = e.agentId === undefined ? await $.session.model() : agentModels.get(e.agentId)
     if (initialModel === undefined) return { deny: `${PLUGIN}: web tool conversation model is unknown; retry after its next observed turn` }
-    if (!isRouted(initialModel)) return next(e).finally(() => { toolModes.delete(e.tool_use_id) })
+    if (!isRouted(initialModel)) return next(e)
     const ticket = webToolGate.begin(e)
     try {
       const nativeResult = await next(e)
@@ -1637,47 +1490,14 @@ export const register: Register = on => {
       const result = await runNativeSearch(outcome.request, { authorize: () => $.session.authorize(), fetch: (url, init) => $.http.fetch(url, init) }, next.signal)
       $.ui.log(`${PLUGIN}: WebSearch answered via ${outcome.stage}`, { to: 'debug' })
       return { result }
-    } finally { webToolGate.end(ticket); toolModes.delete(e.tool_use_id) }
+    } finally { webToolGate.end(ticket) }
   }).catch((_host, e, next) => ({ deny: e.tool === AGENT_TOOL ? next.called ? `${PLUGIN}: the Agent call failed after native dispatch; it may have started, and was not replayed. Existing transcript retained.` : `${PLUGIN}: the Agent model could not be resolved; no subagent was started` : `${PLUGIN}: the web tool failed; no action was approved or replayed automatically` }))
 
   on('tool.check', async ($, e, next) => {
-    let verdict = await next(e)
-    // SubagentHandback's ask is the native classifier's alone; the engine turns
-    // any other allow into a deny and the child's report would be withheld.
-    if (CLASSIFIER_ONLY_TOOLS.has(e.tool)) return verdict
-    const context = e.tool_use_id ? toolModes.get(e.tool_use_id) : undefined
-    const model = e.agentId === undefined ? await $.session.model() : agentModels.get(e.agentId)
-    if (isRouted(model) && e.tool_use_id && verdict.decision === 'ask' && (!context || context.agentId !== e.agentId)) return { decision: 'deny', reason: `${PLUGIN}: native permission-mode metadata is unavailable; the action was not approved. Check /rice-models setup repair` }
-    if (eligiblePermission(verdict, { realToolId: e.tool_use_id, actualMode: context?.mode, modelRouted: isRouted(model), tool: e.tool })) {
-      if (!model || context?.agentId !== e.agentId) return { decision: 'deny', reason: `${PLUGIN}: the permission request has no verified conversation owner` }
-      next.signal.throwIfAborted()
-      const revision = permissionRevision
-      // Child raw transcripts may have no opening user row. Human authority
-      // belongs to the owning main conversation; the child's prompt and task
-      // remain separately labeled constraints, never fabricated user intent.
-      const transcript = await $.session.messages()
-      if (!Array.isArray(transcript)) return { decision: 'deny', reason: `${PLUGIN}: the permission request has no readable user context` }
-      const modeBefore = await mainModeFingerprint($)
-      const request = permissionRequest({ target: model, who: e.agentId ?? 'main', session: await $.session.id(), tool: e.tool, input: e.input,
-        transcript: permissionIntent(transcript), policy: await effectivePermissionPolicy($), workingDirectory: await $.session.cwd(),
-        instructions: await permissionInstructions($, model, e.agentId),
-      })
-      const judged = await complete($, request, 30_000, true)
-      next.signal.throwIfAborted()
-      if (revision !== permissionRevision) return { decision: 'deny', reason: `${PLUGIN}: permission policy or loaded constraints changed during the judgment; retry the action` }
-      const currentModel = e.agentId === undefined ? await $.session.model() : agentModels.get(e.agentId)
-      if (currentModel !== model) return { decision: 'deny', reason: `${PLUGIN}: the conversation model changed during the permission judgment; retry the action` }
-      if (await mainModeFingerprint($) !== modeBefore) return { decision: 'deny', reason: `${PLUGIN}: the permission mode changed during the judgment; retry the action` }
-      next.signal.throwIfAborted()
-      if (revision !== permissionRevision) return { decision: 'deny', reason: `${PLUGIN}: permission policy or loaded constraints changed during the judgment; retry the action` }
-      verdict = permissionAnswer(judged)
-    }
+    const verdict = await next(e)
     const checked = webToolGate.check(e, verdict)
     const carried = e.tool === AGENT_TOOL && e.tool_use_id && checked.decision === 'ask' ? entryOf(await read($, carrierAtom), e.tool_use_id) : undefined
     return carried ? { ...checked, reason: `${checked.reason ? `${checked.reason} ` : ''}${PLUGIN}: this Agent will run on exact model ${JSON.stringify(carried.id)}; ${CARRIER_VALUE} is validation only.` } : checked
-  }).catch(($, _e, next) => {
-    $.ui.log(`${PLUGIN}: permission judgment ${next.error.kind}: ${(next.error.message ?? 'no message').slice(0, 300)}`, { to: 'debug' })
-    return { decision: 'deny', reason: `${PLUGIN}: the selected-provider permission judgment failed; the action was not approved` }
   })
 
   on('agent.spawn', async ($, e, next) => {
@@ -1734,7 +1554,7 @@ export const register: Register = on => {
     const chosen = e.fork ? undefined : call ?? declared ?? workflowModel ?? ((await $.env.get('CLAUDE_CODE_SUBAGENT_MODEL'))?.trim() || undefined)
     const resolved = chosen === undefined || chosen === 'inherit' ? parentModel : chosen
     const effort = e.fork ? parentEffort : resolved && isRouted(resolved) ? (routedEffort(resolved, pending?.effort ?? definition?.effort, (await read($, prefsAtom)).effort) ?? parentEffort) : pending?.effort ?? definition?.effort ?? parentEffort
-    const restored = { ...e, description: resolved === undefined ? description.text : agentLabel(description.text, resolved, effort) }
+    const restored = { ...e, description: resolved === undefined || e.workflow?.runId !== undefined ? description.text : agentLabel(description.text, resolved, effort) }
     const result = await next(decision.model !== undefined && decision.model !== e.model ? { ...restored, model: decision.model } : restored)
     if (picked.exact !== undefined && result.model !== picked.exact) $.ui.log(`${PLUGIN}: Agent model ${picked.exact} was requested but the subagent started on ${result.model}`, { to: 'transcript' })
     if (result.agentId) {
