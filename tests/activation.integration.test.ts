@@ -357,27 +357,60 @@ test('routed main and child tool checks preserve every native verdict in every p
   expect(f.calls.some(argv => argv[0] === 'claude')).toBe(false)
 })
 
-test('real compaction callback prepares each trigger, retains original tail handles, and confirms only observed core context', async () => {
-  for (const trigger of ['manual', 'auto', 'plugin', 'precompute']) {
-    const f = await compactFixture()
-    const result = await callbacks.get('session.compact')!(f.host, { trigger, messages: f.rows }, f.next)
-    expect(result.messages?.slice(1)).toEqual(f.rows.slice(2))
-    expect(result.messages?.[1]).toBe(f.rows[2])
-    expect(result.usage).toBeUndefined()
-    expect(f.requests).toHaveLength(1)
-    expect(f.state.get('compaction-receipts')).toMatchObject({ entries: [{ trigger, status: 'prepared', usage: { input_tokens: 123, output_tokens: 7 } }] })
-    expect(f.receipts.map(row => row.message.type)).toEqual(['system', 'system'])
-    await callbacks.get('turn.start')!(f.host, { text: '', turnId: 'not-installed' }, async () => ({}))
-    expect(f.state.get('compaction-receipts')).toMatchObject({ entries: [{ status: 'prepared' }] })
-    f.active.rows = result.messages
-    await callbacks.get('turn.start')!(f.host, { text: '', turnId: 'observed-installation' }, async () => ({}))
-    expect(f.state.get('compaction-receipts')).toMatchObject({ entries: [{ status: 'installed', observedAt: 'persisted-history' }] })
-    expect(f.receipts.at(-1).message.content[0].text).toContain('installed-observed')
-    expect(JSON.stringify(f.requests)).not.toContain('mod-owned compaction')
-  }
+test.each(['manual', 'auto', 'plugin', 'precompute'] as const)('compaction maps the summary call for the %s trigger and hands Claude its own summary message', async trigger => {
+  const f = await compactFixture()
+  const result = await callbacks.get('session.compact')!(f.host, { trigger, messages: f.rows, instructions: 'keep the approval gate' }, f.next)
+  expect(result.messages).toHaveLength(1)
+  expect(result.messages[0]).toMatchObject({ role: 'user', toolUses: [] })
+  expect(result.messages[0].text).toContain('owned safe summary')
+  expect(result.usage).toMatchObject({ input_tokens: 123, output_tokens: 7, cache_read_input_tokens: 2 })
+  expect(f.requests).toHaveLength(1)
+  const request = f.requests[0]
+  expect(request.target).toBe('codex/fresh')
+  expect(request.tools).toEqual([])
+  // Claude's conversation goes whole, with Claude's captured prompt (and the /compact instructions) as its last user text.
+  expect(request.transcript.slice(0, -1).map((row: any) => row.content)).toEqual(f.rows.slice(0, -1).map(row => row.text))
+  expect(JSON.stringify(request.transcript.at(-1))).toContain('Summarize.')
+  expect(JSON.stringify(request.transcript.at(-1))).toContain('keep the approval gate')
+  expect(f.state.get('compaction-receipts')).toBeUndefined()
+  expect(f.receipts).toEqual([])
 })
 
-test.each(['stable', 'appended-during', 'api-meta-during', 'cancelled', 'missing', 'conflicting', 'unsupported', 'changed-source'] as const)('capped compaction uses UUID-anchored persisted context and keeps native lifetime guards: %s', async boundary => {
+test('the whole conversation is summarized and no tail is chosen by the mod', async () => {
+  const f = await compactFixture()
+  const result = await callbacks.get('session.compact')!(f.host, { trigger: 'auto', messages: f.rows }, f.next)
+  expect(result.messages).toHaveLength(1)
+  expect(f.rows.every(row => !result.messages.includes(row))).toBe(true)
+})
+
+test('a long request is sent as Claude holds it, never clipped or trimmed by the mod', async () => {
+  const f = await compactFixture()
+  f.active.rows = [{ role: 'user', text: 'x'.repeat(2_000_000), toolUses: [], handle: 'big' }, ...f.rows.slice(1)]
+  await callbacks.get('session.compact')!(f.host, { trigger: 'auto', messages: f.active.rows }, f.next)
+  expect(f.requests).toHaveLength(1)
+  expect(f.requests[0].transcript[0].content).toBe('x'.repeat(2_000_000))
+})
+
+test('an unknown or unrouted compaction model runs Claude\'s own summarizer untouched', async () => {
+  const f = await compactFixture()
+  const native = { messages: [], tokensBefore: 1 }
+  let called = 0
+  const next = Object.assign(async () => { called++; return native }, { signal: f.controller.signal })
+  expect(await callbacks.get('session.compact')!(f.host, { trigger: 'auto', messages: f.rows, agentId: 'unobserved-child' }, next)).toBe(native)
+  f.selection.model = 'sonnet'
+  expect(await callbacks.get('session.compact')!(f.host, { trigger: 'manual', messages: f.rows }, next)).toBe(native)
+  expect(called).toBe(2)
+  expect(f.requests).toEqual([])
+})
+
+test('configured PreCompact policy is Claude\'s to apply and does not stop the mapped summary', async () => {
+  const f = await compactFixture()
+  f.host.settings.read = async () => { throw new Error('the mapping never reads compaction policy') }
+  const result = await callbacks.get('session.compact')!(f.host, { trigger: 'auto', messages: f.rows }, f.next)
+  expect(result.messages?.[0].text).toContain('owned safe summary')
+})
+
+test.each(['stable', 'missing', 'conflicting', 'unsupported', 'changed-source'] as const)('a conversation over the 4096-entry public read is recovered from the transcript by the event\'s own ids: %s', async boundary => {
   const f = await compactFixture()
   const path = `/owned/capped-${boundary}.jsonl`
   const rows = Array.from({ length: 4098 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', text: i === 0 ? 'Publication requires owner approval.' : `owned history ${i}`, toolUses: [], handle: `owned-${i}` }))
@@ -391,32 +424,21 @@ test.each(['stable', 'appended-during', 'api-meta-during', 'cancelled', 'missing
   f.files.set(path, [...persisted].reverse().map(row => JSON.stringify(row)).join('\n') + '\n')
   await callbacks.get('classic.SessionStart')!(f.host, { source: 'startup', transcript_path: path }, async () => ({}))
   const messages = f.host.session.messages
-  let metaAppended = false
-  f.host.session.messages = async (args: any = {}) => {
-    const history = await messages(args)
-    if (args.as === 'api' && metaAppended) history.push({ role: 'user', content: [{ type: 'text', text: 'New API-only approval constraint' }] })
-    return history.slice(-4096)
-  }
-  f.active.afterProvider = () => {
-    if (boundary === 'api-meta-during') metaAppended = true
-    if (boundary === 'appended-during') f.active.rows.push({ role: 'user', text: 'New approval constraint while summarizing', toolUses: [], handle: 'new' })
-    if (boundary === 'cancelled') f.controller.abort()
-  }
+  f.host.session.messages = async (args: any = {}) => (await messages(args)).slice(-4096)
   const result = await callbacks.get('session.compact')!(f.host, { trigger: 'manual', messages: rows }, f.next)
   if (boundary === 'stable') {
     expect(result.skip).toBeUndefined()
-    expect(result.messages?.[0].text).toContain('owned safe summary')
-    expect(result.messages?.at(-1)).toBe(rows.at(-1))
+    expect(result.messages).toHaveLength(1)
+    expect(result.messages[0].text).toContain('owned safe summary')
     expect(JSON.stringify(f.requests[0].transcript)).toContain('Publication requires owner approval.')
-    expect(f.state.get('compaction-receipts')).toMatchObject({ entries: [{ status: 'prepared' }] })
   } else {
     expect(result.messages).toBeUndefined()
     expect(result.skip).toContain('original transcript retained')
-    expect(f.requests).toHaveLength(['appended-during', 'api-meta-during', 'cancelled'].includes(boundary) ? 1 : 0)
+    expect(f.requests).toHaveLength(0)
   }
 })
 
-test.each(['isMeta', 'isVirtual'] as const)('real compaction refuses an unprojected %s prefix constraint before requesting a summary', async flag => {
+test.each(['isMeta', 'isVirtual'] as const)('a capped conversation with an unprojected %s prefix constraint is not summarized from partial context', async flag => {
   const f = await compactFixture()
   const path = `/owned/hidden-${flag}.jsonl`
   const rows = Array.from({ length: 4098 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', text: `owned ${i}`, toolUses: [], handle: `visible-${i}` }))
@@ -428,108 +450,38 @@ test.each(['isMeta', 'isVirtual'] as const)('real compaction refuses an unprojec
   await callbacks.get('classic.SessionStart')!(f.host, { source: 'startup', transcript_path: path }, async () => ({}))
   f.active.rows = rows
   f.host.session.messages = async (args: any = {}) => args.as === 'api' ? api : rows.slice(-4096).map(({ handle, ...row }) => row)
-  expect(persisted).toHaveLength(4099)
-  expect(JSON.stringify(persisted)).toContain('HIDDEN_APPROVAL')
-  expect(JSON.stringify(rows)).not.toContain('HIDDEN_APPROVAL')
-  expect(JSON.stringify(api)).not.toContain('HIDDEN_APPROVAL')
-  const snapshot = JSON.stringify(persisted)
   const result = await callbacks.get('session.compact')!(f.host, { trigger: 'manual', messages: rows }, f.next)
   expect(result.messages).toBeUndefined()
   expect(result.skip).toContain('unsupported meta or virtual context; original transcript retained')
   expect(f.requests).toHaveLength(0)
-  expect(JSON.stringify(persisted)).toBe(snapshot)
 })
 
-test('repeat compaction compares the public history snapshot with the same public scope', async () => {
-  for (const changed of [false, true]) {
-    const f = await compactFixture()
-    const archived = { role: 'user', text: 'archived before the native compact boundary', toolUses: [] }
-    f.active.rows = [archived, ...f.rows]
-    if (changed) f.active.afterProvider = () => { f.active.rows.push({ role: 'user', text: 'new goal or work while summarizing', toolUses: [] }) }
-    const result = await callbacks.get('session.compact')!(f.host, { trigger: 'manual', messages: f.rows }, f.next)
-    if (changed) {
-      expect(result.messages).toBeUndefined()
-      expect(result.skip).toContain('stale result discarded')
-    } else {
-      expect(result.messages?.[0].text).toContain('owned safe summary')
-      expect(result.messages?.slice(1)).toEqual(f.rows.slice(2))
-      expect(f.state.get('compaction-receipts')).toMatchObject({ entries: [{ status: 'prepared' }] })
-    }
-  }
-})
-
-test.each(['lookup-only', 'changed-before', 'changed-during', 'cancelled', 'model-changed'] as const)('Agent lookup enrichment does not mask compaction invalidation: %s', async boundary => {
+test('a stale-looking public snapshot no longer blocks the summary (no digest comparison remains)', async () => {
   const f = await compactFixture()
-  const call = { tool_use_id: 'owned-agent-call', tool: 'Agent', input: { description: 'owned task' } }
-  const eventRows = f.rows.map((row, i) => ({ ...row, toolUses: i === 3 ? [call] : [] }))
-  let changed = boundary === 'changed-before'
-  let tracked = true
-  const messages = f.host.session.messages
-  f.host.session.messages = async (args: any = {}) => args.as === 'api' ? messages(args) : eventRows.map(({ handle, ...row }) => ({ ...row, toolUses: row.toolUses.map(tool => ({ ...tool, ...(tracked ? { agentId: 'tracked-child' } : {}), ...(changed ? { input: { description: 'new task' } } : {}) })) }))
-  f.active.afterProvider = () => {
-    tracked = false
-    if (boundary === 'changed-during') changed = true
-    if (boundary === 'cancelled') f.controller.abort()
-    if (boundary === 'model-changed') f.selection.model = 'codex/other'
-  }
-  const result = await callbacks.get('session.compact')!(f.host, { trigger: 'manual', messages: eventRows }, f.next)
-  if (boundary === 'lookup-only') {
-    expect(result.messages?.[0].text).toContain('owned safe summary')
-    expect(result.messages?.at(-1)).toBe(eventRows[3])
-    expect(f.state.get('compaction-receipts')).toMatchObject({ entries: [{ status: 'prepared' }] })
-  } else {
-    expect(result.messages).toBeUndefined()
-    expect(result.skip).toContain('original transcript retained')
-    expect(f.requests).toHaveLength(boundary === 'changed-before' ? 0 : 1)
-    if (boundary !== 'changed-before') expect(f.state.get('compaction-receipts')).toMatchObject({ entries: [{ status: 'aborted', reason: boundary === 'cancelled' ? 'cancelled' : 'stale-context' }] })
-  }
+  // Archived history before the native boundary and a longer public read than the event used to read as a changed context.
+  f.active.rows = [{ role: 'user', text: 'archived before the native compact boundary', toolUses: [] }, ...f.rows]
+  const result = await callbacks.get('session.compact')!(f.host, { trigger: 'manual', messages: f.rows }, f.next)
+  expect(result.messages?.[0].text).toContain('owned safe summary')
+  expect(f.requests).toHaveLength(1)
 })
 
-test('a compact event already superseded before the public snapshot is read is refused', async () => {
+test('cancellation keeps the old history', async () => {
   const f = await compactFixture()
-  f.active.rows = [...f.rows, { role: 'user', text: 'new goal before preparation', toolUses: [] }]
+  f.active.afterProvider = () => f.controller.abort()
   const result = await callbacks.get('session.compact')!(f.host, { trigger: 'manual', messages: f.rows }, f.next)
   expect(result.messages).toBeUndefined()
-  expect(result.skip).toContain('original transcript retained')
-  expect(f.requests).toEqual([])
+  expect(f.rows[0].text).toBe('old task')
 })
 
-test('compaction cancellation and changed active history discard prepared output and keep old history', async () => {
-  for (const cancel of [true, false]) {
-    const f = await compactFixture()
-    f.active.afterProvider = () => { if (cancel) f.controller.abort(); else f.active.rows = [...f.rows, { role: 'user', text: 'new steer', toolUses: [], handle: 'new' }] }
-    const result = await callbacks.get('session.compact')!(f.host, { trigger: 'manual', messages: f.rows }, f.next)
-    expect(result.messages).toBeUndefined()
-    expect(result.skip).toContain('original transcript retained')
-    expect(f.state.get('compaction-receipts')).toMatchObject({ entries: [{ status: 'aborted', reason: cancel ? 'cancelled' : 'stale-context' }] })
-    expect(f.rows[0].text).toBe('old task')
-  }
-})
-
-test('configured PreCompact blockers are neither bypassed nor manually executed', async () => {
-  const f = await compactFixture()
-  f.host.settings.read = async () => ({ hooks: { PreCompact: [{ hooks: [{ type: 'command', command: 'owned-never-execute' }] }] } })
-  const result = await callbacks.get('session.compact')!(f.host, { trigger: 'auto', messages: f.rows }, f.next)
-  expect(result.skip).toContain('no hook was bypassed or manually run')
-  expect(f.requests).toEqual([])
-  expect(f.calls.some(call => call.includes('owned-never-execute'))).toBe(false)
-  expect(f.state.get('compaction-receipts')).toMatchObject({ entries: [{ status: 'aborted', reason: 'configured-policy' }] })
-})
-
-test('parallel main and child compactions keep owner receipts independent', async () => {
+test('parallel main and child compactions each map their own loop', async () => {
   const f = await compactFixture()
   await callbacks.get('agent.spawn')!(f.host, { tool_use_id: 'owned-compact-child', prompt: 'owned', description: 'owned child', subagentType: 'general-purpose', provider: { plugin: 'engine', tier: 'core' }, parentModel: 'codex/fresh', model: 'codex/fresh', background: false, fork: false }, async (input: any) => ({ model: input.model, agentId: 'compact-child' }))
   const results = await Promise.all([undefined, 'compact-child'].map(agentId => callbacks.get('session.compact')!(f.host, { trigger: 'auto', messages: f.rows, ...(agentId ? { agentId } : {}) }, f.next)))
   expect(f.requests.map(row => row.who).sort()).toEqual(['compact-child', 'main'])
-  expect((f.state.get('compaction-receipts') as any).entries.map(({ owner, status }: any) => ({ owner, status })).sort((a: any, b: any) => a.owner.localeCompare(b.owner))).toEqual([{ owner: 'agent:compact-child', status: 'prepared' }, { owner: 'main', status: 'prepared' }])
-  f.active.rows = results[1].messages
-  await callbacks.get('turn.start')!(f.host, { agentId: 'compact-child', text: '', turnId: 'child-observed' }, async () => ({}))
-  const entries = (f.state.get('compaction-receipts') as any).entries
-  expect(entries.find((row: any) => row.owner === 'main').status).toBe('prepared')
-  expect(entries.find((row: any) => row.owner === 'agent:compact-child').status).toBe('installed')
+  expect(results.every(result => result.messages?.length === 1)).toBe(true)
 })
 
-test('provider failure preserves actual summary usage in an aborted receipt without installing partial text', async () => {
+test('provider failure installs no partial text and keeps the history', async () => {
   const f = await compactFixture()
   f.host.process.spawn = async function* () {
     for (const event of [{ type: 'text', text: 'partial only' }, { type: 'usage', in: 91, out: 3, cacheRead: 0, cacheWrite: 0 }, { type: 'error', kind: 'response', text: 'owned failure' }]) yield { stream: 'stdout', text: JSON.stringify(event) + '\n' }
@@ -537,22 +489,8 @@ test('provider failure preserves actual summary usage in an aborted receipt with
   }
   const result = await callbacks.get('session.compact')!(f.host, { trigger: 'manual', messages: f.rows }, f.next)
   expect(result.messages).toBeUndefined()
-  expect(f.state.get('compaction-receipts')).toMatchObject({ entries: [{ status: 'aborted', usage: { input_tokens: 91, output_tokens: 3 } }] })
-  expect(f.receipts.every(row => row.message.type === 'system')).toBe(true)
-  expect(JSON.stringify(f.receipts)).not.toContain('partial only')
-})
-
-test('prepared receipts survive module reload without false installation and clear aborts outstanding precompute', async () => {
-  const f = await compactFixture()
-  await callbacks.get('session.compact')!(f.host, { trigger: 'precompute', messages: f.rows }, f.next)
-  const fresh = await import('../hooks/register.ts?receipt-reload')
-  const reloaded = new Map<string, (...args: any[]) => any>()
-  fresh.register(((event: string, match: any, callback: any) => { reloaded.set(event, callback ?? match); return { catch: () => undefined } }) as any)
-  await reloaded.get('session.start')!(f.host, { isInteractive: false }, async () => ({}))
-  await reloaded.get('turn.start')!(f.host, { text: '', turnId: 'reload-no-install' }, async () => ({}))
-  expect(f.state.get('compaction-receipts')).toMatchObject({ entries: [{ status: 'prepared' }] })
-  await reloaded.get('session.end')!(f.host, { reason: 'clear' }, async () => ({}))
-  expect(f.state.get('compaction-receipts')).toMatchObject({ entries: [{ status: 'aborted', reason: 'clear' }] })
+  expect(result.skip).toContain('original transcript retained')
+  expect(JSON.stringify(result)).not.toContain('partial only')
 })
 
 test('explicit routed completions honor the caller model without changing native calls', async () => {
