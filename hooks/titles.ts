@@ -13,7 +13,3 @@ export function titleAnswer(text: string): string | undefined {
   return title
 }
 
-/** A provider failure still supplies a local title, so the host need not infer one. */
-export function fallbackTitle(prompt: string): string {
-  return prompt.replace(/[\u0000-\u001f\u007f\s]+/g, ' ').trim().slice(0, 80) || 'Coding session'
-}

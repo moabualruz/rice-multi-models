@@ -69,7 +69,7 @@ import type { WebFetchOutcome } from '../helper/web-fetch'
 import { createToolGate } from './tool-gate'
 import type { PublicWebSearchInput } from './web-search'
 import type { PublicWebFetchInput } from './web-fetch'
-import { fallbackTitle, titleAnswer, titleRequest } from './titles'
+import { titleAnswer, titleRequest } from './titles'
 import { registerEvaluators } from './evaluator-runtime'
 import type { EvaluatorCapacityPort } from './evaluator-runtime'
 import { createEvaluatorSources, registerEvaluatorSources } from './evaluator-sources'
@@ -1310,25 +1310,19 @@ export const register: Register = on => {
     if (result.block || result.preventContinuation || e.session_title || result.sessionTitle || e.source && e.source !== 'user' && e.source !== 'sdk') return result
     const model = await $.session.model()
     if (!isRouted(model)) return result
-    let title = fallbackTitle(e.prompt)
-    if (['1', 'true'].includes((await $.env.get('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC') ?? '').toLowerCase())) return { ...result, sessionTitle: title }
+    // Claude's setting for nonessential traffic and Claude's own naming stay in charge wherever this mapping gives no title.
+    if (['1', 'true'].includes((await $.env.get('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC') ?? '').toLowerCase())) return result
     try {
       const answer = await complete($, titleRequest(model, await $.session.id(), e.prompt), 10_000, true)
       next.signal.throwIfAborted()
-      if (answer.isAnswered) title = titleAnswer(answer.text) ?? title
+      const title = answer.isAnswered ? titleAnswer(answer.text) : undefined
+      if (title) return { ...result, sessionTitle: title }
     } catch {
       next.signal.throwIfAborted()
-      $.ui.log(`${PLUGIN}: session naming used the local prompt title after the selected provider did not return a valid title`, { to: 'debug' })
+      $.ui.log(`${PLUGIN}: the selected provider did not return a valid session title`, { to: 'debug' })
     }
-    return { ...result, sessionTitle: title }
-  }).catch(async ($, e, next) => {
-    // A failed hook is skipped and the host names the session with its own Claude request.
-    let routed = false
-    try { routed = isRouted(await $.session.model()) } catch { routed = false }
-    if (!routed) return next.called ? {} : next(e)
-    const result = next.called ? {} : await next(e)
-    return e.session_title || result.sessionTitle ? result : { ...result, sessionTitle: fallbackTitle(e.prompt) }
-  })
+    return result
+  }).catch(($, e, next) => next.called ? {} : next(e))
   // Startup, resume and every compaction name the transcript file; observe only.
   on('classic.SessionStart', async ($, e, next) => {
     if (e.source !== 'compact') mainSnapshot = undefined
@@ -1734,7 +1728,6 @@ export const register: Register = on => {
   on('model.classify', async ($, e, next) => {
     // Omitted model means the documented native small-model default, not guessed ownership.
     const model = e.options?.model
-    if (model && claimedRefusal(model)) return { deny: `${PLUGIN}: the explicit classifier model is unavailable; no native fallback` }
     if (!isRouted(model)) return next(e)
     if (e.labels.length === 0) return { value: undefined }
     const contract = classifierRequest(await nativeClassifier($), e.text, e.labels)
