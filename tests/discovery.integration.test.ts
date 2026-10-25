@@ -411,7 +411,7 @@ test('compaction is refused, visibly and with the transcript kept, when the engi
   } finally { captureFails = false; host.session.model = sessionModel }
 })
 
-test('routed compaction uses its selected provider for every native trigger and retains recent handles', async () => {
+test('routed compaction uses its selected provider for every native trigger and returns only the summary message', async () => {
   const sessionModel = host.session.model
   host.session.model = async () => 'codex/gpt-6.1-sol'
   const transcript = [{ role: 'user', text: 'Original goal and constraints', toolUses: [], handle: 'old-user' }, { role: 'assistant', text: 'Verified pending work', toolUses: [], handle: 'old-assistant' }, { role: 'user', text: 'Continue now', toolUses: [], handle: 'recent-user' }]
@@ -422,7 +422,7 @@ test('routed compaction uses its selected provider for every native trigger and 
       const before = wires.length
       const result = await hook('session.compact')(host, { trigger, instructions: 'retain constraints', messages: transcript }, async () => { nativeCalls++; throw new Error('unsafe native fallback') })
       expect(result.messages[0].text).toContain('fixture response')
-      expect(result.messages[1]).toBe(transcript[2])
+      expect(result.messages).toHaveLength(1)
       expect(wires.length).toBe(before + 1)
       expect(wires.at(-1).req).toMatchObject({ target: 'codex/gpt-6.1-sol', tools: [], who: 'main' })
       // The request is the conversation as the engine holds it, then the engine's own prompt with the instructions in its slot.
