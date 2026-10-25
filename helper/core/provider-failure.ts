@@ -3,7 +3,7 @@ import type { StepFailureCause } from '../../hooks/protocol.ts'
 
 const TRANSIENT = new Set(['server_error', 'internal_server_error', 'internal_error', 'rate_limit_exceeded', 'rate_limit_error', 'too_many_requests', 'concurrency_limit_exceeded', 'concurrent_request_limit_exceeded', 'overloaded_error', 'service_unavailable', 'temporarily_unavailable', 'timeout', 'request_timeout'])
 const PERMANENT = new Set(['authentication_error', 'invalid_api_key', 'unauthorized', 'permission_denied', 'permission_error', 'invalid_request_error', 'invalid_request', 'insufficient_quota', 'billing_hard_limit_reached', 'content_policy_violation', 'model_not_found'])
-const TRANSIENT_CLOSE = new Set([1000, 1001, 1005, 1006, 1011, 1012, 1013, 1014])
+export const TRANSIENT_CLOSE = new Set([1000, 1001, 1005, 1006, 1011, 1012, 1013, 1014])
 // Provider-side saturation ("server_is_overloaded", "model at capacity", 503/529): recovers in minutes, not seconds.
 const OVERLOAD = /overload|capacity|unavailable/i
 const CONNECTION_LIMIT_CODE = 'websocket_connection_limit_reached'

@@ -6187,12 +6187,11 @@ var wrapper_default = import_websocket.default;
 // helper/socket.ts
 var OPEN_MS = 15e3;
 var MAX_SOCKET_AGE_MS = 55 * 6e4;
-var TRANSIENT_SERVER_CLOSE_CODES = /* @__PURE__ */ new Set([1006, 1011, 1012, 1013, 1014]);
 var ENDS = /* @__PURE__ */ new Set(["response.completed", "response.done", "response.failed", "response.incomplete", "error"]);
 var encoder = new TextEncoder();
 var SocketError = class extends ProviderFailure {
   constructor(message, event = "websocket.error", closeCode, status) {
-    const transient = closeCode === void 0 ? status === void 0 : TRANSIENT_SERVER_CLOSE_CODES.has(closeCode);
+    const transient = closeCode === void 0 ? status === void 0 : TRANSIENT_CLOSE.has(closeCode);
     super(message, { event, code: "websocket-error", closeCode, status, transient });
   }
 };
