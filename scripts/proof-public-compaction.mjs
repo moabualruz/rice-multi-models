@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { waitForNativeProofCapacity } from './native-proof-load.mjs'
+import { captureNativeChild } from './proof-native-child.mjs'
 
 if (!(await waitForNativeProofCapacity())) process.exit(1)
 
@@ -104,26 +105,10 @@ try {
   Object.assign(env, { HOME: fixture, USERPROFILE: fixture, CLAUDE_CONFIG_DIR: config, CODEX_HOME: join(fixture, '.codex'), ANTHROPIC_API_KEY: 'owned-no-network', ANTHROPIC_BASE_URL: 'http://127.0.0.1:1', DISABLE_AUTOUPDATER: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' })
   const validationStarted = performance.now()
   const validationChild = spawn(native, ['plugin', 'validate', '--strict', plugin], { cwd: fixture, env, stdio: ['ignore', 'pipe', 'pipe'] })
-  let validationStdout = '', validationStderr = '', validationExpired = false
-  validationChild.stdout.on('data', bytes => validationStdout += bytes)
-  validationChild.stderr.on('data', bytes => validationStderr += bytes)
-  const validationTimer = setTimeout(() => {
-    // Exit and pipe close are separate events: a child that already exited has not missed its deadline.
-    if (validationChild.exitCode !== null || validationChild.signalCode !== null) return
-    validationExpired = true
-    reportDeadline('plugin validate', validationStarted, validationStdout, validationStderr)
+  const { code: validationCode, timedOut: validationExpired, stdout: validationStdout, stderr: validationStderr } = await captureNativeChild(validationChild, 10000, ({ stdout, stderr }) => {
+    reportDeadline('plugin validate', validationStarted, stdout, stderr)
     validationChild.kill('SIGTERM')
-  }, 10000)
-  validationChild.once('exit', () => clearTimeout(validationTimer))
-  let validationCode
-  try {
-    validationCode = await new Promise((resolve, reject) => {
-      validationChild.once('error', reject)
-      validationChild.once('close', resolve)
-    })
-  } finally {
-    clearTimeout(validationTimer)
-  }
+  })
   if (validationCode !== 0) process.stderr.write(validationStdout + validationStderr)
   assert.equal(validationExpired, false, 'plugin validate deadline')
   assert.equal(validationCode, 0, (validationStdout + validationStderr).slice(-2000))
