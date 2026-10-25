@@ -4,6 +4,7 @@
 // The fixture only observes: its hooks log what Claude and the mod's production hooks do, and decide nothing.
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
+import { createServer } from 'node:http'
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -44,7 +45,11 @@ export async function runChildCase({ label, native, seeded = true, background = 
   // Observation only: a hook that records the compaction entry and what the production hook below it answered.
   on('session.compact', {trigger:/[\\s\\S]+/}, async ($, e, next) => {
     ${record('compact-entry', '{trigger:e.trigger,agentId:e.agentId,messages:e.messages.length}')}
-    const result = await next(e)
+    let result
+    try { result = await next(e) } catch (error) {
+      ${record('compact-result', '{agentId:e.agentId,rejected:String(error&&error.message||error)}')}
+      throw error
+    }
     ${record('compact-result', '{agentId:e.agentId,skip:result.skip,messages:result.messages&&result.messages.length,usage:result.usage}')}
     return result
   })
@@ -85,13 +90,25 @@ export async function runChildCase({ label, native, seeded = true, background = 
   Object.assign(env, { HOME: home, USERPROFILE: home, CLAUDE_CONFIG_DIR: config, CODEX_HOME: join(home, '.codex'), ANTHROPIC_API_KEY: 'owned-no-network', ANTHROPIC_BASE_URL: 'http://127.0.0.1:1', DISABLE_AUTOUPDATER: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' })
   const validation = spawnSync(native, ['plugin', 'validate', '--strict', plugin], { cwd: home, env, encoding: 'utf8', timeout: 20_000 })
   assert.equal(validation.status, 0, (validation.stdout + validation.stderr).slice(-2000))
+  // Anything that reaches the Anthropic API is recorded (and refused): a routed child must send nothing there.
+  const anthropicPosts = []
+  const anthropic = createServer((request, response) => {
+    let raw = ''; request.on('data', bytes => raw += bytes)
+    request.on('end', () => {
+      try { anthropicPosts.push({ url: request.url, model: JSON.parse(raw).model }) } catch { anthropicPosts.push({ url: request.url }) }
+      response.writeHead(404, { 'content-type': 'application/json', 'x-should-retry': 'false' })
+      response.end('{"type":"error","error":{"type":"not_found_error","message":"owned fixture"}}')
+    })
+  })
+  await new Promise(resolve => anthropic.listen(0, '127.0.0.1', resolve))
+  env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${anthropic.address().port}`
   const child = spawn(native, ['-p', '--model', PARENT, '--plugin-dir', plugin, '--setting-sources', 'user', '--permission-mode', 'bypassPermissions', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--tools', 'Agent,Read', '--debug-file', join(fixture, 'debug.log'), '--output-format', 'json', 'Start the owned compaction child, wait for it, then finish.'], { cwd: home, env, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] })
   console.log(JSON.stringify({ phase: 'child-compaction', label, ownedPid: child.pid, fixture, preload: false }))
   let stdout = '', stderr = '', timedOut = false
   child.stdout.on('data', bytes => stdout += bytes); child.stderr.on('data', bytes => stderr += bytes)
   const timer = setTimeout(() => { timedOut = true; try { process.kill(-child.pid, 'SIGTERM') } catch { /* already gone */ } }, deadlineMs)
   const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve) })
-  clearTimeout(timer)
+  clearTimeout(timer); anthropic.close()
   writeFileSync(join(fixture, 'stdout.json'), stdout); writeFileSync(join(fixture, 'stderr.txt'), stderr)
   const readJson = directory => readdirSync(directory).map(name => JSON.parse(readFileSync(join(directory, name), 'utf8')))
   const transcripts = readdirSync(join(config, 'projects'), { recursive: true }).filter(path => typeof path === 'string' && path.endsWith('.jsonl'))
@@ -103,7 +120,7 @@ export async function runChildCase({ label, native, seeded = true, background = 
   const compactEvents = readJson(events).sort((a, b) => a.at - b.at)
   const boundaries = childRows.filter(row => row.subtype === 'compact_boundary')
   return {
-    fixture, code, timedOut, label,
+    fixture, code, timedOut, label, anthropicPosts,
     childTranscripts: childFiles.length,
     childUsage: childRows.filter(row => row.type === 'assistant').map(row => ({ model: row.message.model, input: row.message.usage?.input_tokens, cacheRead: row.message.usage?.cache_read_input_tokens })),
     boundaries: boundaries.map(row => ({ trigger: row.compactMetadata?.trigger })),
@@ -128,6 +145,7 @@ export function assertChildCompacted(result, expectedInputs = DEFAULT_INPUTS.len
   assert.equal(result.timedOut, false, `${label}: native fixture deadline`)
   assert.equal(result.code, 0, `${label}: claude exits cleanly`)
   assert.equal(result.childTranscripts, 1, `${label}: exactly one child transcript`)
+  assert.deepEqual(result.anthropicPosts, [], `${label}: nothing reaches the Anthropic API`)
   assert.ok(result.childRequests.length >= expectedInputs, `${label}: the child ran its growing-usage steps`)
   assert.ok(result.autoBoundaries >= 1, `${label}: an automatic compact_boundary is in the CHILD transcript`)
   assert.equal(result.parentBoundaries, 0, `${label}: the 500000-token parent is not compacted`)
@@ -144,6 +162,7 @@ export function assertChildNotCompacted(result) {
   const label = result.label
   assert.equal(result.timedOut, false, `${label}: native fixture deadline`)
   assert.equal(result.code, 0, `${label}: claude exits cleanly`)
+  assert.deepEqual(result.anthropicPosts, [], `${label}: nothing reaches the Anthropic API`)
   assert.equal(result.autoBoundaries, 0, `${label}: no automatic compaction without launch-time data`)
   assert.equal(result.summaryRequests.length, 0, `${label}: no summary request`)
   assert.ok(!result.window.effective.includes(80000), `${label}: the child never sees the 100000 window`)

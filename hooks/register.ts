@@ -1374,7 +1374,7 @@ export const register: Register = on => {
       return agentCall($, e, next)
     }
     if (e.tool !== 'WebSearch' && e.tool !== 'WebFetch') return next(e)
-    // Where no mapping applies (no known or routed model, no helper, a provider not approved) Claude's own tool runs untouched.
+    // Where no mapping applies (a Claude or unrouted model, no helper, a provider not approved) Claude's own tool runs untouched.
     const model = e.agentId === undefined ? await $.session.model() : agentModels.get(e.agentId)
     if (model === undefined || !isRouted(model) || !runtime.executable || runtime.error) return next(e)
     const remote = targetOf(model)?.remote
@@ -1561,37 +1561,57 @@ export const register: Register = on => {
     if (model === undefined || !isRouted(model)) return next(e)
     const who = e.agentId ?? 'main'
     const loop = e.agentId === undefined ? {} : { agentId: e.agentId }
-    // Claude's summary request goes to the Anthropic API and reaches no hook (turn.step, model.complete and model.fork
-    // never see it), so the routed model's provider is asked here: Claude's own captured prompt over the conversation as
-    // Claude holds it, answered as Claude's own summary message.
-    const template = await nativeCompaction($)
-    next.signal.throwIfAborted()
-    const history = await $.session.messages({ as: 'api', ...loop })
-    if (!Array.isArray(history)) throw new Error(`the conversation of ${who} is unreadable (${history.deny})`)
-    const session = await $.session.id()
-    let api: readonly ApiMessage[] = history
-    // Public reads stop at the newest 4096 entries while the event carries them all: a longer main conversation is read
-    // whole from the transcript file, entry by entry under the event's own ids.
-    const snapshot = await $.session.messages(loop)
-    if (Array.isArray(snapshot) && snapshot.length < e.messages.length) {
-      const path = e.agentId === undefined ? await transcriptPath($) : undefined
-      if (!path) throw new Error('the capped conversation has no observed main-session transcript path')
-      api = persistedCompactSource(await $.fs.read(path), e.messages, session, api)
+    // Claude counts a compaction as failed only when its own summarizer rejects, and a skip is a deliberate non-attempt it
+    // does not count. A failed summary therefore lets that summarizer reject on a single message: one group is refused
+    // locally ("nothing to compact") before any request, so nothing reaches the Anthropic account, and the rejection
+    // reaches Claude's circuit breaker (three consecutive failures stop the attempts). A result is never taken from it.
+    const failed = async (reason: string) => {
+      await next({ ...e, messages: e.messages.slice(0, 1) })
+      return { skip: `${PLUGIN}: ${reason}; original transcript retained` }
     }
-    await ensureFreshCapacity($)
-    next.signal.throwIfAborted()
-    const effort = (await read($, prefsAtom)).effort ?? (model.startsWith('codex/') ? codexDefaults.effort : undefined)
-    const target = targetOf(model)
-    const system = rewriteMain((await $.prompt.compose({ model })).sections, identityLine(target?.model ?? model, target?.label ?? 'codex'))
-    const request: StepRequest = { target: model, system, tools: [], transcript: withUserText(api, compactionPrompt(template, e.instructions)), who, session, ...(effort === undefined ? {} : { effort }), native: { maxTokens: outputLimit(model) } }
-    const answer = await complete($, request, undefined, true, next.signal)
-    next.signal.throwIfAborted()
-    if (!answer.isAnswered) return { skip: `${PLUGIN}: ${model} compaction failed (${answer.reason}); original transcript retained` }
-    const body = summaryBody(answer.text)
-    if (body === undefined) return { skip: `${PLUGIN}: ${model} returned no summary; original transcript retained` }
-    const cite = e.agentId === undefined ? await transcriptPath($) : undefined
-    return { messages: [{ role: 'user' as const, text: summaryMessage(template, body, cite), toolUses: [] }], usage: answer.usage }
-  }).catch((_host, _e, next) => ({ skip: `${PLUGIN}: compaction ${next.signal.aborted ? 'cancelled' : `failed (${redact(String(next.error.message)).slice(0, 300)})`}; original transcript retained` }))
+    let failure: string
+    try {
+      // Claude's summary request goes to the Anthropic API and reaches no hook (turn.step, model.complete and model.fork
+      // never see it), so the routed model's provider is asked here: Claude's own captured prompt over the conversation
+      // as Claude holds it, answered as Claude's own summary message.
+      const template = await nativeCompaction($)
+      next.signal.throwIfAborted()
+      const history = await $.session.messages({ as: 'api', ...loop })
+      if (!Array.isArray(history)) throw new Error(`the conversation of ${who} is unreadable (${history.deny})`)
+      const session = await $.session.id()
+      let api: readonly ApiMessage[] = history
+      // Public reads stop at the newest 4096 entries while the event carries them all: a longer main conversation is read
+      // whole from the transcript file, entry by entry under the event's own ids.
+      const snapshot = await $.session.messages(loop)
+      if (Array.isArray(snapshot) && snapshot.length < e.messages.length) {
+        const path = e.agentId === undefined ? await transcriptPath($) : undefined
+        if (!path) throw new Error('the capped conversation has no observed main-session transcript path')
+        api = persistedCompactSource(await $.fs.read(path), e.messages, session, api)
+      }
+      await ensureFreshCapacity($)
+      next.signal.throwIfAborted()
+      const effort = (await read($, prefsAtom)).effort ?? (model.startsWith('codex/') ? codexDefaults.effort : undefined)
+      const target = targetOf(model)
+      const system = rewriteMain((await $.prompt.compose({ model })).sections, identityLine(target?.model ?? model, target?.label ?? 'codex'))
+      const request: StepRequest = { target: model, system, tools: [], transcript: withUserText(api, compactionPrompt(template, e.instructions)), who, session, ...(effort === undefined ? {} : { effort }), native: { maxTokens: outputLimit(model) } }
+      const answer = await complete($, request, undefined, true, next.signal)
+      next.signal.throwIfAborted()
+      const body = answer.isAnswered ? summaryBody(answer.text) : undefined
+      if (body !== undefined) {
+        const cite = e.agentId === undefined ? await transcriptPath($) : undefined
+        return { messages: [{ role: 'user' as const, text: summaryMessage(template, body, cite), toolUses: [] }], usage: answer.usage }
+      }
+      failure = answer.isAnswered ? `${model} returned no summary` : `${model} compaction failed (${answer.reason})`
+    } catch (error) {
+      if (next.signal.aborted) return { skip: `${PLUGIN}: compaction cancelled; original transcript retained` }
+      failure = `compaction failed (${redact(String(error instanceof Error ? error.message : error)).slice(0, 300)})`
+    }
+    return failed(failure)
+  }).catch((_host, _e, next) => {
+    // Claude's own summarizer rejected the single-message request above: pass the rejection up, which Claude counts as a failed compaction.
+    if (next.called) throw new Error(`${PLUGIN}: compaction failed; original transcript retained`)
+    return { skip: `${PLUGIN}: compaction ${next.signal.aborted ? 'cancelled' : 'could not start'}; original transcript retained` }
+  })
 
   on('model.complete', async ($, e, next) => {
     // This public contract names its model explicitly. It carries no loop provenance:

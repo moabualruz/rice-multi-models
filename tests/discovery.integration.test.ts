@@ -392,22 +392,22 @@ test('compaction is refused, visibly and with the transcript kept, when the engi
   const before = wires.length
   try {
     captureFails = true
-    const refused = await hook('session.compact')(host, { trigger: 'auto', messages: transcript }, async () => { nativeCalls++; return {} })
+    const refused = await hook('session.compact')(host, { trigger: 'auto', messages: transcript }, async (input: any) => { nativeCalls++; expect(input.messages.length).toBeLessThanOrEqual(1); return {} })
     expect(refused.messages).toBeUndefined()
     expect(refused.skip).toContain('fixture capture failure')
     expect(refused.skip).toContain('original transcript retained')
     expect(wires.length).toBe(before)
-    expect(nativeCalls).toBe(0)
+    expect(nativeCalls).toBe(1)
     // A failed capture is retried at the next compaction, then kept per Claude Code version.
     captureFails = false
     const used = captures
-    const first = await hook('session.compact')(host, { trigger: 'auto', messages: transcript }, async () => { nativeCalls++; return {} })
+    const first = await hook('session.compact')(host, { trigger: 'auto', messages: transcript }, async (input: any) => { nativeCalls++; expect(input.messages.length).toBeLessThanOrEqual(1); return {} })
     expect(first.messages[0].text).toContain('FIXTURE CONTINUED SESSION')
     expect(captures).toBe(used + 1)
     expect(store.get('native-compaction:2.1.296')).toEqual(fixtureTemplate)
-    await hook('session.compact')(host, { trigger: 'auto', messages: transcript }, async () => { nativeCalls++; return {} })
+    await hook('session.compact')(host, { trigger: 'auto', messages: transcript }, async (input: any) => { nativeCalls++; expect(input.messages.length).toBeLessThanOrEqual(1); return {} })
     expect(captures).toBe(used + 1)
-    expect(nativeCalls).toBe(0)
+    expect(nativeCalls).toBe(1)
   } finally { captureFails = false; host.session.model = sessionModel }
 })
 
@@ -466,12 +466,12 @@ test('truncated or refused compaction never replaces history or falls back to Cl
   try {
     for (const reason of ['max_tokens', 'refusal', 'tool_use']) {
       completionStop = reason
-      const result = await hook('session.compact')(host, { trigger: 'auto', messages: transcript }, async () => { nativeCalls++; return {} })
+      const result = await hook('session.compact')(host, { trigger: 'auto', messages: transcript }, async (input: any) => { nativeCalls++; expect(input.messages.length).toBeLessThanOrEqual(1); return {} })
       expect(result.messages).toBeUndefined()
       expect(result.skip).toContain('original transcript retained')
       expect(transcript[0].handle).toBe('original')
     }
-    expect(nativeCalls).toBe(0)
+    expect(nativeCalls).toBe(3)
   } finally { completionStop = 'end_turn' }
 })
 

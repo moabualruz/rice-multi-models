@@ -357,11 +357,14 @@ test('routed main and child tool checks preserve every native verdict in every p
   expect(f.calls.some(argv => argv[0] === 'claude')).toBe(false)
 })
 
-// A throwing hook is answered by its registered catch, as the host does.
+// The hook as the host runs it: a throwing hook is answered by its registered catch, and a catch that throws passes the
+// rejection up, which Claude counts as a failed compaction (result.rejected). nextCalls are the requests to Claude's own summarizer.
 async function compact(f: Awaited<ReturnType<typeof compactFixture>>, event: Record<string, unknown>) {
-  try { return await callbacks.get('session.compact')!(f.host, event, f.next) } catch (error) {
-    const failed = Object.assign(async () => { throw error }, { signal: f.controller.signal, called: false, error: { kind: 'error', message: error instanceof Error ? error.message : String(error) } })
-    return fallbacks.get('session.compact')!(f.host, event, failed)
+  const nextCalls: any[] = []
+  const next: any = Object.assign(async (input: any) => { nextCalls.push(input); return f.next(input) }, { signal: f.controller.signal })
+  try { return { ...(await callbacks.get('session.compact')!(f.host, event, next)), nextCalls } } catch (error) {
+    const failed = Object.assign(next, { called: nextCalls.length > 0, error: { kind: 'error', message: error instanceof Error ? error.message : String(error) } })
+    try { return { ...(await fallbacks.get('session.compact')!(f.host, event, failed)), nextCalls } } catch (rejected) { return { rejected: (rejected as Error).message, nextCalls } as any }
   }
 }
 
@@ -402,12 +405,25 @@ test('an unknown or unrouted compaction model runs Claude\'s own summarizer unto
   const f = await compactFixture()
   const native = { messages: [], tokensBefore: 1 }
   let called = 0
-  const next = Object.assign(async () => { called++; return native }, { signal: f.controller.signal })
+  const next: any = Object.assign(async () => { called++; return native }, { signal: f.controller.signal })
   expect(await callbacks.get('session.compact')!(f.host, { trigger: 'auto', messages: f.rows, agentId: 'unobserved-child' }, next)).toBe(native)
   f.selection.model = 'sonnet'
   expect(await callbacks.get('session.compact')!(f.host, { trigger: 'manual', messages: f.rows }, next)).toBe(native)
   expect(called).toBe(2)
   expect(f.requests).toEqual([])
+})
+
+test('an empty summary counts as a failed compaction without any provider text installed', async () => {
+  const f = await compactFixture()
+  f.host.process.spawn = async function* () {
+    for (const event of [{ type: 'text', text: '<analysis>only reasoning</analysis>' }, { type: 'usage', in: 5, out: 1, cacheRead: 0, cacheWrite: 0 }, { type: 'stop', reason: 'end_turn' }]) yield { stream: 'stdout', text: JSON.stringify(event) + '\n' }
+    return { code: 0 }
+  }
+  const result = await compact(f, { trigger: 'auto', messages: f.rows })
+  expect(result.messages).toBeUndefined()
+  expect(result.rejected).toContain('original transcript retained')
+  expect(result.nextCalls).toHaveLength(1)
+  expect(result.nextCalls[0].messages).toHaveLength(1)
 })
 
 test('configured PreCompact policy is Claude\'s to apply and does not stop the mapped summary', async () => {
@@ -439,8 +455,11 @@ test.each(['stable', 'missing', 'conflicting', 'unsupported', 'changed-source'] 
     expect(result.messages[0].text).toContain('owned safe summary')
     expect(JSON.stringify(f.requests[0].transcript)).toContain('Publication requires owner approval.')
   } else {
+    // Refused context counts as a failed compaction for Claude: its own summarizer is asked once, on one message, and no provider request is made.
     expect(result.messages).toBeUndefined()
-    expect(result.skip).toContain('original transcript retained')
+    expect(result.rejected).toContain('original transcript retained')
+    expect(result.nextCalls).toHaveLength(1)
+    expect(result.nextCalls[0].messages).toHaveLength(1)
     expect(f.requests).toHaveLength(0)
   }
 })
@@ -459,8 +478,8 @@ test.each(['isMeta', 'isVirtual'] as const)('a capped conversation with an unpro
   f.host.session.messages = async (args: any = {}) => args.as === 'api' ? api : rows.slice(-4096).map(({ handle, ...row }) => row)
   const result = await compact(f, { trigger: 'manual', messages: rows })
   expect(result.messages).toBeUndefined()
-  expect(result.skip).toContain('unsupported meta or virtual context')
-  expect(result.skip).toContain('original transcript retained')
+  expect(result.rejected).toContain('original transcript retained')
+  expect(result.nextCalls).toHaveLength(1)
   expect(f.requests).toHaveLength(0)
 })
 
@@ -473,11 +492,13 @@ test('a stale-looking public snapshot no longer blocks the summary (no digest co
   expect(f.requests).toHaveLength(1)
 })
 
-test('cancellation keeps the old history', async () => {
+test('cancellation keeps the old history and is not a failed compaction', async () => {
   const f = await compactFixture()
   f.active.afterProvider = () => f.controller.abort()
   const result = await compact(f, { trigger: 'manual', messages: f.rows })
   expect(result.messages).toBeUndefined()
+  expect(result.skip).toContain('cancelled')
+  expect(result.nextCalls).toEqual([])
   expect(f.rows[0].text).toBe('old task')
 })
 
@@ -489,7 +510,7 @@ test('parallel main and child compactions each map their own loop', async () => 
   expect(results.every(result => result.messages?.length === 1)).toBe(true)
 })
 
-test('provider failure installs no partial text and keeps the history', async () => {
+test('provider failure installs no partial text, keeps the history and counts as a failed compaction', async () => {
   const f = await compactFixture()
   f.host.process.spawn = async function* () {
     for (const event of [{ type: 'text', text: 'partial only' }, { type: 'usage', in: 91, out: 3, cacheRead: 0, cacheWrite: 0 }, { type: 'error', kind: 'response', text: 'owned failure' }]) yield { stream: 'stdout', text: JSON.stringify(event) + '\n' }
@@ -497,7 +518,9 @@ test('provider failure installs no partial text and keeps the history', async ()
   }
   const result = await compact(f, { trigger: 'manual', messages: f.rows })
   expect(result.messages).toBeUndefined()
-  expect(result.skip).toContain('original transcript retained')
+  expect(result.rejected).toContain('original transcript retained')
+  expect(result.nextCalls).toHaveLength(1)
+  expect(result.nextCalls[0].messages).toHaveLength(1)
   expect(JSON.stringify(result)).not.toContain('partial only')
 })
 
