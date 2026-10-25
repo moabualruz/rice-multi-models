@@ -401,14 +401,36 @@ test('a long request is sent as Claude holds it, never clipped or trimmed by the
   expect(f.requests[0].transcript[0].content).toBe('x'.repeat(2_000_000))
 })
 
-test('an unknown or unrouted compaction model runs Claude\'s own summarizer untouched', async () => {
+test('a loop whose model was not observed in a routed conversation is refused visibly, never sent to Claude silently', async () => {
   const f = await compactFixture()
   const native = { messages: [], tokensBefore: 1 }
   let called = 0
   const next: any = Object.assign(async () => { called++; return native }, { signal: f.controller.signal })
-  expect(await callbacks.get('session.compact')!(f.host, { trigger: 'auto', messages: f.rows, agentId: 'unobserved-child' }, next)).toBe(native)
+  // Compaction.
+  const refused = await callbacks.get('session.compact')!(f.host, { trigger: 'auto', messages: f.rows, agentId: 'unobserved-child' }, next)
+  expect(refused.messages).toBeUndefined()
+  expect(refused.skip).toContain('not observed in a routed conversation')
+  // Web tools.
+  for (const tool of ['WebSearch', 'WebFetch']) {
+    const denied = await callbacks.get('tool.call')!(f.host, { tool, tool_use_id: `toolu_unobserved_${tool}`, agentId: 'unobserved-child', query: 'q', url: 'https://example.com', prompt: 'p' }, next)
+    expect(denied.deny).toContain('not observed in a routed conversation')
+    expect(denied.deny).toContain('nothing was sent to the Anthropic account')
+  }
+  expect(called).toBe(0)
+  expect(f.requests).toEqual([])
+})
+
+test('everything else stays native: a Claude main model and an observed Claude loop reach Claude untouched', async () => {
+  const f = await compactFixture()
+  const native = { messages: [], tokensBefore: 1 }
+  let called = 0
+  const next: any = Object.assign(async () => { called++; return native }, { signal: f.controller.signal })
   f.selection.model = 'sonnet'
+  // No routed conversation: an unobserved loop and the Claude main model are both Claude's.
+  expect(await callbacks.get('session.compact')!(f.host, { trigger: 'auto', messages: f.rows, agentId: 'unobserved-child' }, next)).toBe(native)
   expect(await callbacks.get('session.compact')!(f.host, { trigger: 'manual', messages: f.rows }, next)).toBe(native)
+  const web = await callbacks.get('tool.call')!(f.host, { tool: 'WebSearch', tool_use_id: 'toolu_native_search', agentId: 'unobserved-child', query: 'q' }, async () => ({ result: 'native search' }))
+  expect(web).toEqual({ result: 'native search' })
   expect(called).toBe(2)
   expect(f.requests).toEqual([])
 })

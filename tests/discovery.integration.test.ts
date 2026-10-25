@@ -488,7 +488,7 @@ test('native Claude compaction passes the original request and result through', 
   } finally { host.session.model = sessionModel }
 })
 
-test('subagent compaction leaves unknown models to Claude and follows the last native or routed turn', async () => {
+test('subagent compaction refuses an unobserved loop visibly in a routed conversation and follows the last native or routed turn', async () => {
   const beforeWires = wires.length
   const unknownId = `unobserved-agent-${agents.length}`
   agents.push({ id: unknownId, type: 'general-purpose', description: 'unobserved after reload' })
@@ -496,8 +496,8 @@ test('subagent compaction leaves unknown models to Claude and follows the last n
   const native = { messages: [{ role: 'user', text: 'native summary', toolUses: [] }] }
   const next = async () => { nativeCalls++; return native }
   const unknown = await hook('session.compact')(host, { agentId: unknownId, trigger: 'auto', messages: [] }, next)
-  expect(unknown).toBe(native)
-  expect(nativeCalls).toBe(1)
+  expect(unknown.skip).toContain('not observed in a routed conversation')
+  expect(nativeCalls).toBe(0)
   expect(wires.length).toBe(beforeWires)
   const routed = await step('general-purpose', 'codex/gpt-6.1-sol')
   const input = { agentId: routed.id, trigger: 'auto', messages: [{ role: 'user', text: 'Child-only task', toolUses: [] }] }

@@ -278,6 +278,11 @@ export function isRouted(model: string | undefined): model is string {
   return (target !== null && Object.hasOwn(PROVIDERS, target.provider)) || remoteOf(loaded, model) !== undefined
 }
 
+/** Whether the conversation is a routed one: its main model is answered here. */
+async function routedConversation($: EngineInterface): Promise<boolean> {
+  try { return isRouted(await $.session.model()) } catch { return false }
+}
+
 /** Why a model this mod's configuration names cannot run, so it is never sent to Claude instead. */
 function claimedRefusal(model: string): string | undefined {
   const id: string | undefined = model
@@ -1375,7 +1380,10 @@ export const register: Register = on => {
     }
     if (e.tool !== 'WebSearch' && e.tool !== 'WebFetch') return next(e)
     // Where no mapping applies (a Claude or unrouted model, no helper, a provider not approved) Claude's own tool runs untouched.
+    // A loop whose model was not observed inside a routed conversation is refused visibly instead, so no part of a
+    // routed conversation silently reaches the Anthropic account.
     const model = e.agentId === undefined ? await $.session.model() : agentModels.get(e.agentId)
+    if (model === undefined && await routedConversation($)) return { deny: `${PLUGIN}: the model of this loop was not observed in a routed conversation, so ${e.tool} did not run and nothing was sent to the Anthropic account; retry after its next observed turn` }
     if (model === undefined || !isRouted(model) || !runtime.executable || runtime.error) return next(e)
     const remote = targetOf(model)?.remote
     if (remote && await approval($, remote)) return next(e)
@@ -1557,7 +1565,9 @@ export const register: Register = on => {
 
   on('session.compact', async ($, e, next) => {
     const model = e.agentId === undefined ? await $.session.model() : agentModels.get(e.agentId)
-    // Claude's own summarizer runs wherever no routed model is known for this loop.
+    // Claude's own summarizer runs wherever the loop is not a routed one. A loop whose model was not observed inside a
+    // routed conversation is refused visibly instead, so no part of that conversation silently reaches the Anthropic account.
+    if (model === undefined && await routedConversation($)) return { skip: `${PLUGIN}: the model of this loop was not observed in a routed conversation; compaction was not attempted and the transcript is retained. Its next observed turn establishes it.` }
     if (model === undefined || !isRouted(model)) return next(e)
     const who = e.agentId ?? 'main'
     const loop = e.agentId === undefined ? {} : { agentId: e.agentId }
