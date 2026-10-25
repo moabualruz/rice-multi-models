@@ -63,7 +63,7 @@ try {
   writeFileSync(join(fixture, '.claude.json'), JSON.stringify({ hasCompletedOnboarding: true }))
   const file = join(plugin, 'hooks/register.ts')
   let source = readFileSync(file, 'utf8')
-  source = source.replace('await loadProviders($)', `await loadProviders($); await $.store.set(${JSON.stringify('trust:' + fingerprint(parsed.config.providers.selected))}, true)`)
+  source = source.replace('interactiveSession = e.isInteractive\n    const started', `interactiveSession = e.isInteractive\n    await $.store.set(${JSON.stringify('trust:' + fingerprint(parsed.config.providers.selected))}, true)\n    const started`)
   const close = source.lastIndexOf('\n}'); assert.ok(close > 0)
   source = source.slice(0, close) + `
     on('state.get',{plugin:'rice-multi-models',key:'prefs'},()=>({value:{value:{effort:null,transport:'auto',helper:'once'},version:0}}))
