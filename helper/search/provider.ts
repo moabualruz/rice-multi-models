@@ -1,5 +1,5 @@
 import type { Target } from '../../hooks/config.ts'
-import type { WebSearch, StepEvent, StepWire } from '../../hooks/protocol.ts'
+import type { StepEvent, StepWire } from '../../hooks/protocol.ts'
 import { nativeSearchDecision } from '../../hooks/web-search-tier.ts'
 import { createKeys } from '../styx/auth.ts'
 import { runCommand } from '../core/subprocess.ts'
@@ -9,8 +9,8 @@ type Remote = Pick<Extract<Target, { kind: 'remote' }>, 'provider' | 'model' | '
 const keys = createKeys(runCommand, Date.now)
 
 /** A compatible inference API alone never establishes hosted search support. */
-export function providerSearch(target: string, remote: Remote | undefined, restrictions: WebSearch): 'hosted' | 'ollama' | undefined {
-  return nativeSearchDecision(target, remote, restrictions).method
+export function providerSearch(target: string, remote: Remote | undefined): 'hosted' | 'ollama' | undefined {
+  return nativeSearchDecision(target, remote).method
 }
 
 /** Ollama local inference never borrows a cloud key. Only this selected cloud account can search. */

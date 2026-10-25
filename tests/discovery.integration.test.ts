@@ -392,26 +392,26 @@ test('compaction is refused, visibly and with the transcript kept, when the engi
   const before = wires.length
   try {
     captureFails = true
-    const refused = await hook('session.compact')(host, { trigger: 'auto', messages: transcript }, async () => { nativeCalls++; return {} })
+    const refused = await hook('session.compact')(host, { trigger: 'auto', messages: transcript }, async (input: any) => { nativeCalls++; expect(input.messages.length).toBeLessThanOrEqual(1); return {} })
     expect(refused.messages).toBeUndefined()
     expect(refused.skip).toContain('fixture capture failure')
     expect(refused.skip).toContain('original transcript retained')
     expect(wires.length).toBe(before)
-    expect(nativeCalls).toBe(0)
+    expect(nativeCalls).toBe(1)
     // A failed capture is retried at the next compaction, then kept per Claude Code version.
     captureFails = false
     const used = captures
-    const first = await hook('session.compact')(host, { trigger: 'auto', messages: transcript }, async () => { nativeCalls++; return {} })
+    const first = await hook('session.compact')(host, { trigger: 'auto', messages: transcript }, async (input: any) => { nativeCalls++; expect(input.messages.length).toBeLessThanOrEqual(1); return {} })
     expect(first.messages[0].text).toContain('FIXTURE CONTINUED SESSION')
     expect(captures).toBe(used + 1)
     expect(store.get('native-compaction:2.1.296')).toEqual(fixtureTemplate)
-    await hook('session.compact')(host, { trigger: 'auto', messages: transcript }, async () => { nativeCalls++; return {} })
+    await hook('session.compact')(host, { trigger: 'auto', messages: transcript }, async (input: any) => { nativeCalls++; expect(input.messages.length).toBeLessThanOrEqual(1); return {} })
     expect(captures).toBe(used + 1)
-    expect(nativeCalls).toBe(0)
+    expect(nativeCalls).toBe(1)
   } finally { captureFails = false; host.session.model = sessionModel }
 })
 
-test('routed compaction uses its selected provider for every native trigger and retains recent handles', async () => {
+test('routed compaction uses its selected provider for every native trigger and returns only the summary message', async () => {
   const sessionModel = host.session.model
   host.session.model = async () => 'codex/gpt-6.1-sol'
   const transcript = [{ role: 'user', text: 'Original goal and constraints', toolUses: [], handle: 'old-user' }, { role: 'assistant', text: 'Verified pending work', toolUses: [], handle: 'old-assistant' }, { role: 'user', text: 'Continue now', toolUses: [], handle: 'recent-user' }]
@@ -422,7 +422,7 @@ test('routed compaction uses its selected provider for every native trigger and 
       const before = wires.length
       const result = await hook('session.compact')(host, { trigger, instructions: 'retain constraints', messages: transcript }, async () => { nativeCalls++; throw new Error('unsafe native fallback') })
       expect(result.messages[0].text).toContain('fixture response')
-      expect(result.messages[1]).toBe(transcript[2])
+      expect(result.messages).toHaveLength(1)
       expect(wires.length).toBe(before + 1)
       expect(wires.at(-1).req).toMatchObject({ target: 'codex/gpt-6.1-sol', tools: [], who: 'main' })
       // The request is the conversation as the engine holds it, then the engine's own prompt with the instructions in its slot.
@@ -449,7 +449,7 @@ test('the summary keeps only the summary block, in the engine\'s wording, and ci
     const main = await hook('session.compact')(host, { trigger: 'manual', messages: transcript }, async () => ({}))
     expect(main.messages[0].text).toBe('FIXTURE CONTINUED SESSION\n\nSummary:\n1. Primary Request: ship it\n\nRead the full transcript at: /fixture/session.jsonl\nResume directly.')
     expect(main.messages[0].text).not.toContain('private reasoning')
-    expect(main.messages[1]).toBe(transcript[2])
+    expect(main.messages).toHaveLength(1)
     const child = await step('general-purpose', 'codex/gpt-6.1-sol')
     const sub = await hook('session.compact')(host, { agentId: child.id, trigger: 'auto', messages: [{ role: 'user', text: 'Child task', toolUses: [] }] }, async () => ({}))
     expect(sub.messages[0].text).toBe('FIXTURE CONTINUED SESSION\n\nSummary:\n1. Primary Request: ship it\n\nResume directly.')
@@ -466,12 +466,12 @@ test('truncated or refused compaction never replaces history or falls back to Cl
   try {
     for (const reason of ['max_tokens', 'refusal', 'tool_use']) {
       completionStop = reason
-      const result = await hook('session.compact')(host, { trigger: 'auto', messages: transcript }, async () => { nativeCalls++; return {} })
+      const result = await hook('session.compact')(host, { trigger: 'auto', messages: transcript }, async (input: any) => { nativeCalls++; expect(input.messages.length).toBeLessThanOrEqual(1); return {} })
       expect(result.messages).toBeUndefined()
       expect(result.skip).toContain('original transcript retained')
       expect(transcript[0].handle).toBe('original')
     }
-    expect(nativeCalls).toBe(0)
+    expect(nativeCalls).toBe(3)
   } finally { completionStop = 'end_turn' }
 })
 
@@ -488,7 +488,7 @@ test('native Claude compaction passes the original request and result through', 
   } finally { host.session.model = sessionModel }
 })
 
-test('subagent compaction fails closed for unknown models and follows the last native or routed turn', async () => {
+test('subagent compaction refuses an unobserved loop visibly in a routed conversation and follows the last native or routed turn', async () => {
   const beforeWires = wires.length
   const unknownId = `unobserved-agent-${agents.length}`
   agents.push({ id: unknownId, type: 'general-purpose', description: 'unobserved after reload' })
@@ -496,7 +496,7 @@ test('subagent compaction fails closed for unknown models and follows the last n
   const native = { messages: [{ role: 'user', text: 'native summary', toolUses: [] }] }
   const next = async () => { nativeCalls++; return native }
   const unknown = await hook('session.compact')(host, { agentId: unknownId, trigger: 'auto', messages: [] }, next)
-  expect(unknown.skip).toContain('active model is unknown')
+  expect(unknown.skip).toContain('not observed in a routed conversation')
   expect(nativeCalls).toBe(0)
   expect(wires.length).toBe(beforeWires)
   const routed = await step('general-purpose', 'codex/gpt-6.1-sol')
@@ -763,15 +763,14 @@ test('a declared model whose config does not validate is refused instead of sent
   }
 })
 
-test('a failing title hook keeps a routed session on a local title instead of the host naming it', async () => {
+test('a failing title hook leaves the naming of a routed session to the host', async () => {
   const model = host.session.model
   host.session.model = async () => 'codex/gpt-6.1-sol'
   try {
     let calls = 0
     // The lower chain fails once, as a throwing hook would; the host then runs the catch with the rest of the chain.
     const result = await hook('classic.UserPromptSubmit')(host, { prompt: 'Fix the flaky picker test', source: 'user' }, async () => { if (calls++ === 0) throw new Error('lower hook failed'); return {} })
-    expect(typeof result.sessionTitle).toBe('string')
-    expect(result.sessionTitle.length).toBeGreaterThan(0)
+    expect(result.sessionTitle).toBeUndefined()
   } finally {
     host.session.model = model
   }

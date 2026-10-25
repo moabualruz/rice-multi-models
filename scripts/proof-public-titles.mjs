@@ -17,7 +17,6 @@ const native = process.env.RICE_CLAUDE_EXECUTABLE || 'claude'
 const interactive = process.argv.includes('--interactive')
 const prompt = 'Verify the owned session naming fixture and return only RICE_TITLE_MAIN_OK.'
 const generatedTitle = 'Owned selected provider title', manualTitle = 'Owner supplied manual title'
-const fallbackTitle = prompt.replace(/\s+/g, ' ').trim().slice(0, 80)
 const requests = [], runs = [], sourceHashes = {}
 let child, phase = 'setup', failure
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -99,8 +98,8 @@ try {
   const cases = interactive ? [{ name: 'interactive-generated', expected: generatedTitle, titleRequests: 1 }] : [
     { name: 'generated', expected: generatedTitle, titleRequests: 1 },
     { name: 'manual-title', expected: manualTitle, titleRequests: 0, manual: true },
-    { name: 'provider-failure', expected: fallbackTitle, titleRequests: 1 },
-    { name: 'nonessential-disabled', expected: fallbackTitle, titleRequests: 0, disabled: true },
+    { name: 'provider-failure', expected: undefined, titleRequests: 1, hostNames: true },
+    { name: 'nonessential-disabled', expected: undefined, titleRequests: 0, disabled: true, hostNames: true },
   ]
   for (const test of cases) {
     phase = test.name
@@ -135,12 +134,12 @@ try {
     if (!interactive) assert.equal(code, 0, phase + ': ' + (stdout + stderr).slice(-2000))
     else assert.equal(controlledStop, true, 'owned interactive session stops after saved main answer')
     assert.equal(saved.mainCompleted, true, phase + ' main routed turn is saved')
-    assert.equal(saved.title, test.expected, phase + ' actual persisted custom title')
+    assert.equal(saved.title, test.expected, phase + (test.hostNames ? ' Rice sets no title of its own; Claude names the session' : ' actual persisted custom title'))
     const titleRequests = observed.filter(row => row.selected && row.title)
     if (test.name === 'provider-failure') assert.ok(titleRequests.length >= 1, 'selected title provider was attempted')
     else assert.equal(titleRequests.length, test.titleRequests, phase + ' selected title requests')
     assert.ok(titleRequests.every(row => row.credentialFree && row.noTools && row.titlePromptOnly && row.maxOutputTokens === 128), 'title uses the exact selected account, submitted prompt and tool-free bounded request')
-    assert.equal(observed.filter(row => !row.selected && row.method === 'POST').length, 0, phase + ' no native inference fallback')
+    if (!test.hostNames) assert.equal(observed.filter(row => !row.selected && row.method === 'POST').length, 0, phase + ' no native inference fallback')
     console.log(JSON.stringify({ phase, passed: true, title: saved.title, selectedTitleRequests: titleRequests.length, nativePosts: 0 }))
   }
   console.log(JSON.stringify({ publicTitles: true, interactive, cases: runs.length, fixture, sourceHashes }))

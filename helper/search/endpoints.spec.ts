@@ -69,3 +69,50 @@ test('cancellation does not trigger another search service', async () => {
   ], request)).rejects.toThrow('owned stop')
   expect(calls).toBe(1)
 })
+
+test('domain lists map to Tavily include and exclude fields and omit them when absent', async () => {
+  const bodies: Record<string, unknown>[] = []
+  const request = (async (_input: URL | RequestInfo, init?: RequestInit) => { bodies.push(JSON.parse(String(init?.body))); return Response.json({ results: [] }) }) as typeof fetch
+  const tavily = { name: 'tavily', kind: 'tavily', url: 'https://tavily.example/search', priority: 1, auth: { env: 'OWNED_TAVILY' } } as const
+  const signal = new AbortController().signal, environment = { OWNED_TAVILY: 'owned-tavily' }
+  await endpointSearch(tavily, 'owned', signal, request, environment, { allowed: ['docs.example'], blocked: ['spam.example'] })
+  await endpointSearch(tavily, 'owned', signal, request, environment, { allowed: ['docs.example'] })
+  await endpointSearch(tavily, 'owned', signal, request, environment)
+  expect(bodies[0]).toMatchObject({ include_domains: ['docs.example'], exclude_domains: ['spam.example'] })
+  expect(bodies[1]).toMatchObject({ include_domains: ['docs.example'] }); expect('exclude_domains' in bodies[1]!).toBe(false)
+  expect('include_domains' in bodies[2]! || 'exclude_domains' in bodies[2]!).toBe(false)
+})
+
+test('a service without native domain fields is skipped when domains are set, so Claude searches instead', async () => {
+  const attempts: string[] = []
+  const request = (async (input: URL | RequestInfo) => { attempts.push(String(input)); return Response.json({ results: [] }) }) as typeof fetch
+  const signal = new AbortController().signal
+  const brave = { name: 'brave', kind: 'brave', url: 'https://brave.example/search', priority: 1 } as const
+  const searx = { name: 'searx', kind: 'searxng', url: 'https://searx.example/search', priority: 2 } as const
+  await expect(configuredSearch('owned', signal, [brave, searx], request, undefined, { blocked: ['spam.example'] })).rejects.toThrow('No configured search service is available.')
+  expect(attempts).toEqual([])
+  await configuredSearch('owned', signal, [brave, searx], request, undefined, {})
+  expect(attempts).toHaveLength(1)
+  await configuredSearch('owned', signal, [brave, searx], request, undefined, { allowed: [] })
+  expect(attempts).toHaveLength(2)
+})
+
+test('a configured service result is mapped whole and a long query is sent as given', async () => {
+  const hits = Array.from({ length: 12 }, (_, index) => ({ title: `T${index}`.padEnd(600, 'x'), url: `https://source.example/${index}`, content: 'c'.repeat(5000) }))
+  const queries: string[] = []
+  const request = (async (input: URL | RequestInfo) => { queries.push(new URL(String(input)).searchParams.get('q') ?? ''); return Response.json({ results: hits }) }) as typeof fetch
+  const long = 'q'.repeat(3000)
+  const { results } = await endpointSearch({ name: 'owned', kind: 'searxng', url: 'https://searx.example/search', priority: 1 }, long, new AbortController().signal, request)
+  expect(queries).toEqual([long])
+  expect(results).toHaveLength(12)
+  expect(results[0]).toEqual({ title: hits[0]!.title, url: 'https://source.example/0', content: hits[0]!.content })
+})
+
+test('extended mode maps to Tavily advanced depth and standard or absent mode stays basic', async () => {
+  const depths: unknown[] = []
+  const request = (async (_input: URL | RequestInfo, init?: RequestInit) => { depths.push(JSON.parse(String(init?.body)).search_depth); return Response.json({ results: [] }) }) as typeof fetch
+  const tavily = { name: 'tavily', kind: 'tavily', url: 'https://tavily.example/search', priority: 1, auth: { env: 'OWNED_TAVILY' } } as const
+  const signal = new AbortController().signal, environment = { OWNED_TAVILY: 'owned-tavily' }
+  for (const mapping of [{ mode: 'extended' as const }, { mode: 'standard' as const }, undefined]) await endpointSearch(tavily, 'owned', signal, request, environment, mapping)
+  expect(depths).toEqual(['advanced', 'basic', 'basic'])
+})

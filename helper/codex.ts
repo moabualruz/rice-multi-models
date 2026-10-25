@@ -66,10 +66,8 @@ export function messagesBody(req: StepRequest, model: string): MessagesRequest {
 export function responsesRequest(req: StepRequest, model: string, body: MessagesRequest): ResponsesRequest {
   const translated = toResponses(body, model)
   const search = req.native?.webSearch
-  // Mirror the official Codex subscription serializer, rather than assuming
-  // that public Platform-only search parameters are accepted by this backend.
-  if (search?.blockedDomains?.length) throw new Error('Codex search cannot enforce these search restrictions')
-  if (search?.maxUses !== undefined && (!Number.isSafeInteger(search.maxUses) || search.maxUses < 1 || search.maxUses > 20)) throw new Error('Codex search use limit must be an integer from 1 to 20')
+  // Mirror the official Codex subscription serializer, rather than assuming that public Platform-only
+  // search parameters are accepted by this backend: only the fields it has (allowed domains, location) are sent.
 
   return {
     ...translated,

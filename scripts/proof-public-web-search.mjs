@@ -1,4 +1,4 @@
-// The real public tool.call boundary, ordinary native Claude, and production search policy.
+// The real public tool.call boundary, ordinary native Claude, and production search mapping.
 // All providers and sources are owned stand-ins. No preload, account or installation is used.
 import assert from 'node:assert/strict'
 import { build } from 'esbuild'
@@ -31,7 +31,7 @@ const server = createServer(async (request, response) => {
   }
   const query = queries.find(value => raw.includes(value)) ?? null
   if (url.pathname === '/selected/v1/responses') {
-    observations.push({ stage: 'provider', query, model: body.model, searchTool: body.tools?.some(tool => tool.type === 'web_search'), credentialFree: !request.headers.authorization && !request.headers['x-api-key'], http: query === queries[0] ? 200 : 429 })
+    observations.push({ stage: 'provider', query, model: body.model, searchTool: body.tools?.some(tool => tool.type === 'web_search'), searchContextSize: body.tools?.find(tool => tool.type === 'web_search')?.search_context_size, credentialFree: !request.headers.authorization && !request.headers['x-api-key'], http: query === queries[0] ? 200 : 429 })
     if (query !== queries[0]) return json(response, { error: { message: 'Owned provider quota exhausted' } }, 429)
     const call = { id: 'ws_owned', type: 'web_search_call', status: 'completed', action: { type: 'search', queries: [query], sources: [{ type: 'url', url: providerSource.url }] } }
     const message = { id: 'msg_owned', type: 'message', content: [{ type: 'output_text', text: 'Owned provider search answer.', annotations: [{ type: 'url_citation', ...providerSource, start_index: 0, end_index: 10 }] }] }
@@ -90,13 +90,13 @@ try {
   writeFileSync(join(config, 'settings.json'), '{}'); writeFileSync(join(fixture, '.claude.json'), JSON.stringify({ hasCompletedOnboarding: true }))
   const hookFailure = join(fixture, 'hook-failure.json'), httpReceipt = join(fixture, 'public-native-http.json'), authorizationReceipt = join(fixture, 'authorization.json'), stageReceipt = join(fixture, 'search-stages.json')
   const hook = `import {runNativeSearch} from './native-fallback.mjs';export const register=on=>{const stages=[];on('tool.call',{tool:'WebSearch'},async($,e,next)=>{
-    const run=await $.process.run([${JSON.stringify(process.execPath)},${JSON.stringify(cli)}],{stdin:JSON.stringify({wire:${JSON.stringify(wire)},query:e.query,allowed_domains:e.allowed_domains,blocked_domains:e.blocked_domains}),timeoutMs:65000});
+    const run=await $.process.run([${JSON.stringify(process.execPath)},${JSON.stringify(cli)}],{stdin:JSON.stringify({wire:${JSON.stringify(wire)},query:e.query,allowed_domains:e.allowed_domains,blocked_domains:e.blocked_domains,mode:e.mode??'extended'}),timeoutMs:65000});
     if(run.exitCode!==0){await $.fs.write(${JSON.stringify(hookFailure)},JSON.stringify({phase:'helper-exit',exit:run.exitCode,error:run.stderr.match(/(?:Error|ERR_[A-Z_]+)[^\\n]{0,240}/g)?.slice(-3)}));throw new Error('Owned public search helper failed');}
-    const result=JSON.parse(run.stdout);if(result.kind==='answered'){stages.push({query:e.query,stage:result.stage});await $.fs.write(${JSON.stringify(stageReceipt)},JSON.stringify(stages));return{result:result.result};}
-    stages.push({query:e.query,stage:result.stage});await $.fs.write(${JSON.stringify(stageReceipt)},JSON.stringify(stages));let handle;return{result:await runNativeSearch(result.request,{authorize:async()=>{const a=await $.session.authorize();handle=a?.handle;await $.fs.write(${JSON.stringify(authorizationReceipt)},JSON.stringify({kind:a?.kind,handlePresent:!!handle}));return a;},fetch:async(url,init)=>{if(!handle||init.auth!==handle)throw new Error('Owned fallback handle mismatch');return $.http.fetch(url,init);}},next.signal)};
+    const result=JSON.parse(run.stdout);if(result.kind==='answered'){stages.push({query:e.query,stage:result.stage,modeDelivered:e.mode!==undefined});await $.fs.write(${JSON.stringify(stageReceipt)},JSON.stringify(stages));return{result:result.result};}
+    stages.push({query:e.query,stage:result.stage,modeDelivered:e.mode!==undefined});await $.fs.write(${JSON.stringify(stageReceipt)},JSON.stringify(stages));let handle;return{result:await runNativeSearch(result.request,{authorize:async()=>{const a=await $.session.authorize();handle=a?.handle;await $.fs.write(${JSON.stringify(authorizationReceipt)},JSON.stringify({kind:a?.kind,handlePresent:!!handle}));return a;},fetch:async(url,init)=>{if(!handle||init.auth!==handle)throw new Error('Owned fallback handle mismatch');return $.http.fetch(url,init);}},next.signal)};
   }).catch(async($,e,next)=>{if(!next.called){if(!await $.fs.exists(${JSON.stringify(hookFailure)}))await $.fs.write(${JSON.stringify(hookFailure)},JSON.stringify({phase:'hook-pre-dispatch',kind:next.error.kind,message:next.error.message.slice(0,240)}));return{deny:'Owned search fixture preparation failed'};}throw new Error('Owned search fixture continuation failed');});};`
   const caller = `export const register=on=>{on('turn.step',async function*($,e){const outcomes=[];
-    for(const query of ${JSON.stringify(queries)}){const result=await $.tool.call({tool:'WebSearch',query,allowed_domains:['docs.example']});outcomes.push({query,isError:result.isError===true,denied:!!result.deny,sourceUrls:result.result?.results?.flatMap(group=>typeof group==='string'?[]:group.content.map(source=>source.url))??[]});}
+    for(const [index,query] of ${JSON.stringify(queries)}.entries()){const result=await $.tool.call({tool:'WebSearch',query,...(index===1?{}:{allowed_domains:['docs.example']}),mode:'extended'});outcomes.push({query,isError:result.isError===true,denied:!!result.deny,sourceUrls:result.result?.results?.flatMap(group=>typeof group==='string'?[]:group.content.map(source=>source.url))??[]});}
     const answer='OWNED_PUBLIC_SEARCH '+JSON.stringify(outcomes);yield{kind:'text',index:0,text:answer};yield{kind:'stop',stopReason:'end_turn',usage:null};return{turnId:e.turnId,index:e.index,answer,toolUses:[],stopReason:'end_turn',usage:null};
   });};`
   const httpMock = `export const register=on=>{const rows=[];on('http.fetch',async($,e,next)=>{
@@ -138,13 +138,17 @@ try {
   assert.deepEqual(outcomes.map(outcome => outcome.sourceUrls), [[providerSource.url], [serviceSource.url], [nativeSource.url]], 'provider, configured service and public native fallback each return their own sources')
   assert.deepEqual(stages.map(row => row.stage), ['provider-native', 'configured-service', 'claude-native'], 'each registered public call records the stage that answered')
   assert.deepEqual(stages.map(row => row.query), queries)
+  // Whether this headless build hands the model's own mode to tool.call is recorded; the helper is given extended either way.
+  process.stdout.write(`${JSON.stringify({ modeDeliveredByClaude: stages.map(row => row.modeDelivered) })}\n`)
   assert.ok(outcomes.every(outcome => !outcome.isError && !outcome.denied), 'native tool accepts every public result')
   assert.equal(observations.filter(row => row.stage === 'provider').length, 3)
-  assert.equal(observations.filter(row => row.stage === 'configured').length, 2)
+  // The second query has no domain list and reaches the service. The third carries one, the searxng service has no field for it, so it is skipped and Claude's native search answers.
+  assert.equal(observations.filter(row => row.stage === 'configured').length, 1)
   assert.equal(observations.filter(row => row.stage === 'native').length, 0, 'external main model never reaches the original native SDK search')
   assert.deepEqual(authorization, { kind: 'api-key', handlePresent: true })
   assert.equal(nativeOperations.length, 2); assert.ok(nativeOperations.every(row => row.authHandlePresent))
-  assert.equal(nativeOperations[1].model, nativeModel.id); assert.equal(nativeOperations[1].query, queries[2]); assert.deepEqual(nativeOperations[1].allowedDomains, ['docs.example']); assert.equal(nativeOperations[1].maxUses, 8)
+  assert.equal(nativeOperations[1].model, nativeModel.id); assert.equal(nativeOperations[1].query, queries[2]); assert.deepEqual(nativeOperations[1].allowedDomains, ['docs.example']); assert.equal(nativeOperations[1].maxUses, undefined, 'Rice adds no search count bound')
+  assert.ok(observations.filter(row => row.stage === 'provider').every(row => row.searchContextSize === 'high'), 'the native mode reaches the provider request as its depth field')
 } finally {
   terminate(); await new Promise(resolve => server.close(resolve)); rmSync(fixture, { recursive: true, force: true })
 }

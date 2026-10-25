@@ -8,12 +8,13 @@ import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { waitForNativeProofCapacity } from './native-proof-load.mjs'
 import { captureNativeChild } from './proof-native-child.mjs'
+import { assertChildCompacted, assertChildNotCompacted, runChildCase } from './child-compaction-fixture.mjs'
 
 if (!(await waitForNativeProofCapacity())) process.exit(1)
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const fixture = mkdtempSync(join(tmpdir(), 'rice-public-compact-'))
-const plugin = join(fixture, 'plugin'), config = join(fixture, '.claude'), evidence = join(fixture, 'wires.json'), wireDirectory = join(fixture, 'wire-records'), lifecycle = join(fixture, 'lifecycle.json'), agentProjection = join(fixture, 'agent-projection.json')
+const plugin = join(fixture, 'plugin'), config = join(fixture, '.claude'), evidence = join(fixture, 'wires.json'), wireDirectory = join(fixture, 'wire-records')
 const native = process.env.RICE_CLAUDE_EXECUTABLE || 'claude'
 const wireRows = []
 const mergedWireFiles = new Set()
@@ -77,29 +78,6 @@ try {
     return {value:{code:0,signal:null}}
   })
 ` + source.slice(close)
-  const snapshotTap = 'const snapshot = await $.session.messages(e.agentId === undefined ? {} : { agentId: e.agentId })'
-  assert.ok(source.includes(snapshotTap), 'production public snapshot boundary exists')
-  source = source.replace(snapshotTap, `${snapshotTap}
-    if(e.instructions==='OWNED_AGENT_PROJECTION'){
-      const calls=rows=>rows.flatMap(row=>row.toolUses).filter(tool=>tool.tool_use_id==='toolu_owned_projection')
-      const eventCall=calls(e.messages)[0],publicCall=calls(snapshot)[0]
-      const strip=rows=>rows.map(({handle,toolUses,...row})=>({...row,toolUses:toolUses.map(({agentId,...tool})=>tool)}))
-      await $.fs.write(${JSON.stringify(agentProjection)},JSON.stringify({eventCount:e.messages.length,publicCount:snapshot.length,eventCalls:calls(e.messages).length,publicCalls:calls(snapshot).length,eventHasLookup:eventCall?.agentId!==undefined,publicHasLookup:typeof publicCall?.agentId==='string',validWithheldResult:eventCall?.isError===true&&eventCall.text.includes('Owned fixture: the Agent result is deliberately unavailable'),sameWithoutLookup:JSON.stringify(strip(e.messages))===JSON.stringify(strip(snapshot))}))
-    }`)
-  const receiptTap = 'if (saved) await publishReceipt($, row)'
-  assert.ok(source.includes(receiptTap), 'production receipt tap exists')
-  source = source.replace(receiptTap, `if (saved) {
-    await publishReceipt($, row)
-    const records=await $.fs.exists(${JSON.stringify(lifecycle)})?JSON.parse(await $.fs.read(${JSON.stringify(lifecycle)})):[]
-    records.push({session:await $.session.id(),entries:(await read($,receiptsAtom)).entries})
-    await $.fs.write(${JSON.stringify(lifecycle)},JSON.stringify(records))
-  }`)
-  const observeTap = 'const observed = await observedReceipt(row, active, session, model ?? (agentId === undefined ? await $.session.model() : agentModels.get(agentId)), now)'
-  assert.ok(source.includes(observeTap))
-  source = source.replace(observeTap, `const snapshots=await $.fs.exists(${JSON.stringify(lifecycle + '.observations')})?JSON.parse(await $.fs.read(${JSON.stringify(lifecycle + '.observations')})):[]
-    snapshots.push({status:row.status,expected:row.expected,active:active.slice(0,3)})
-    await $.fs.write(${JSON.stringify(lifecycle + '.observations')},JSON.stringify(snapshots.slice(-6)))
-    ${observeTap}`)
   writeFileSync(file, source)
   const env = Object.fromEntries(['PATH', 'PATHEXT', 'SystemRoot', 'SystemDrive', 'WINDIR', 'ComSpec', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'ProgramFiles', 'ProgramFiles(x86)', 'CLAUDE_CODE_GIT_BASH_PATH'].filter(name => process.env[name] !== undefined).map(name => [name, process.env[name]]))
   Object.assign(env, { HOME: fixture, USERPROFILE: fixture, CLAUDE_CONFIG_DIR: config, CODEX_HOME: join(fixture, '.codex'), ANTHROPIC_API_KEY: 'owned-no-network', ANTHROPIC_BASE_URL: 'http://127.0.0.1:1', DISABLE_AUTOUPDATER: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' })
@@ -181,10 +159,6 @@ try {
   }
   writeFileSync(manualFile, manualRows.map(row => JSON.stringify(row)).join('\n') + '\n')
   await run('manual-compact', manual, ['--resume', manual], '/compact Retain the publication approval gate')
-  const manualReceipts = JSON.parse(readFileSync(lifecycle, 'utf8')).flatMap(row => row.entries).filter(row => row.session === manual)
-  console.log(JSON.stringify({ manualCompactionReceipts: manualReceipts }))
-  assert.ok(manualReceipts.some(row => row.trigger === 'manual' && row.status === 'prepared'), 'mod receipt records preparation without claiming installation')
-  assert.ok(manualReceipts.some(row => row.usage?.input_tokens === 10000 && row.usage?.output_tokens === 20), 'actual provider usage is retained in separate mod accounting')
   const afterCompact = JSON.parse(readFileSync(evidence, 'utf8'))
   const summary = afterCompact.find(row => row.summary)
   assert.equal(summary?.target, 'codex/owned-public')
@@ -208,26 +182,17 @@ try {
   assert.ok(!resumed.includes('The conversation was compacted. Continue from this summary'), 'the old mod-made wrapper is gone')
   const inProcess = randomUUID()
   await run('in-process-manual', inProcess, ['--session-id', inProcess], ['Preserve the in-process publication approval.', '/compact Keep the approval gate', 'Continue without publishing.', '/compact Retain the same approval gate again', 'Continue after the second compaction.'])
-  const installed = JSON.parse(readFileSync(lifecycle, 'utf8')).flatMap(row => row.entries).filter(row => row.session === inProcess)
-  const installationObserved = installed.some(row => row.status === 'installed' && row.observedAt === 'persisted-history')
-  if (!installationObserved) console.log(JSON.stringify({ inProcessReceipts: installed, observations: JSON.parse(readFileSync(lifecycle + '.observations', 'utf8')) }))
-  assert.ok(installationObserved, 'a later native turn observes the actual installed summary, never the hook return alone')
-  assert.equal(new Set(installed.filter(row => row.status === 'prepared').map(row => row.id)).size, 2, 'both successive compactions prepare against the same public history scope')
-  assert.ok(!installed.some(row => row.status === 'aborted'), 'archived pre-boundary rows alone do not make the second compaction stale')
+  const sessionRows = id => readdirSync(join(config, 'projects'), { recursive: true }).filter(path => typeof path === 'string' && path.endsWith(id + '.jsonl')).flatMap(path => readFileSync(join(config, 'projects', path), 'utf8').trim().split('\n').map(line => JSON.parse(line)))
+  const inProcessRows = sessionRows(inProcess)
+  assert.equal(inProcessRows.filter(row => row.subtype === 'compact_boundary').length, 2, 'both successive compactions persist a native boundary, with no mod-side staleness check between them')
+  assert.equal(inProcessRows.filter(row => JSON.stringify(row).includes('OWNED_PRODUCT_SUMMARY')).length, 2, 'both mapped summaries are persisted in the transcript')
   const tracked = randomUUID()
   const trackedResult = await run('tracked-agent-compact', tracked, ['--session-id', tracked], ['OWNED_TRACKED_AGENT', '/compact OWNED_AGENT_PROJECTION'], 'Agent')
-  const projection = JSON.parse(readFileSync(agentProjection, 'utf8'))
-  assert.equal(projection.eventCount, projection.publicCount, 'same native conversation scope, not a history-bound fixture')
-  assert.ok(projection.eventCount < 4096, 'Agent regression stays below the documented public entry bound')
-  for (const field of ['publicHasLookup', 'validWithheldResult', 'sameWithoutLookup']) assert.equal(projection[field], true, field)
-  assert.equal(projection.eventHasLookup, false, 'the compact event has no runtime-only child lookup')
-  assert.equal(projection.eventCalls, 1)
-  assert.equal(projection.publicCalls, 1)
-  assert.ok(!/Not compacted|stale|discarded/.test(trackedResult.result ?? ''), 'tracked Agent lookup must not falsely reject compaction')
+  assert.ok(!/Not compacted|stale|discarded|changed before/.test(trackedResult.result ?? ''), 'tracked Agent lookup must not falsely reject compaction')
   const trackedPaths = readdirSync(join(config, 'projects'), { recursive: true }).filter(path => typeof path === 'string' && path.endsWith(tracked + '.jsonl'))
   const trackedRows = trackedPaths.flatMap(path => readFileSync(join(config, 'projects', path), 'utf8').trim().split('\n').map(line => JSON.parse(line)))
   assert.equal(trackedRows.filter(row => row.subtype === 'compact_boundary').length, 1, 'tracked Agent compaction actually persisted a native boundary')
-  console.log(JSON.stringify({ trackedAgentCompaction: true, projection }))
+  console.log(JSON.stringify({ trackedAgentCompaction: true }))
   env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = '1'
   const automatic = randomUUID()
   await run('auto-seed', automatic, ['--session-id', automatic], 'Preserve the approval gate. ' + 'OWNED_HISTORY '.repeat(2500))
@@ -239,6 +204,21 @@ try {
   assert.ok(wires.filter(row => row.summary).length >= 2)
   assert.ok(wires.every(row => row.target === 'codex/owned-public'), 'no native or other provider fallback')
   console.log(JSON.stringify({ publicCompaction: true, manualSavedAndResumed: true, automaticSaved: true, providerOwnedRequests: wires.length, summaryRequests: wires.filter(row => row.summary).length }))
+  // A routed subagent compacts automatically at Claude's own threshold for its own window. Per-model windows are seeded
+  // in the native settings before launch (parent 500000, child 100000, global ceiling 500000); the child's usage grows
+  // past the 67000 threshold and stays under the blocking limit.
+  const childCases = []
+  for (const [label, options] of [['child-foreground', {}], ['child-background', { background: true }], ['child-cache-heavy', { cache: true }], ['child-background-cache-heavy', { background: true, cache: true }]]) {
+    const result = await runChildCase({ label, native, ...options })
+    assertChildCompacted(result)
+    rmSync(result.fixture, { recursive: true, force: true })
+    childCases.push({ label, autoBoundaries: result.autoBoundaries, summaryTargets: result.summaryRequests.map(request => request.target), laterChildInputs: result.childRequests.filter(request => request.hasSummary).map(request => request.input) })
+  }
+  // Negative control: the same child with its window data arriving only after launch is not compacted.
+  const lateData = await runChildCase({ label: 'child-late-data', native, seeded: false })
+  assertChildNotCompacted(lateData)
+  rmSync(lateData.fixture, { recursive: true, force: true })
+  console.log(JSON.stringify({ childCompaction: childCases, lateDataControl: { autoBoundaries: lateData.autoBoundaries, effectiveWindows: lateData.window.effective } }))
   succeeded = true
 } finally {
   terminate(activeRun)

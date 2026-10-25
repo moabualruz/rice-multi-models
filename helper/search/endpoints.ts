@@ -60,16 +60,19 @@ export function searchRecords(value: unknown, kind: SearchEndpoint['kind']): Sea
       const url = new URL(row.url)
       if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return []
       const content = kind === 'brave' ? row.description : row.content
-      return [{ title: row.title.slice(0, 512), url: url.href, content: typeof content === 'string' ? content.slice(0, 4000) : '' }]
+      return [{ title: row.title, url: url.href, content: typeof content === 'string' ? content : '' }]
     } catch { return [] }
-  }).slice(0, 10)
+  })
   if (rows.length && !results.length) throw new SearchUnavailable('Search endpoint returned no valid source records.')
   return results
 }
 
+/** Domain lists and mode mapped from Claude's WebSearch input. */
+export type SearchMapping = { allowed?: string[]; blocked?: string[]; mode?: 'standard' | 'extended' }
+
 /** Each service gets only its own credential; redirects never receive a search key. */
-export async function endpointSearch(endpoint: SearchEndpoint, query: string, signal: AbortSignal, request: typeof fetch = fetch, environment: NodeJS.ProcessEnv = process.env): Promise<{ results: SearchResult[]; http: number }> {
-  if (!query.trim() || query.length > 2048) throw new SearchUnavailable('Invalid search query.')
+export async function endpointSearch(endpoint: SearchEndpoint, query: string, signal: AbortSignal, request: typeof fetch = fetch, environment: NodeJS.ProcessEnv = process.env, mapping?: SearchMapping): Promise<{ results: SearchResult[]; http: number }> {
+  if (!query.trim()) throw new SearchUnavailable('Invalid search query.')
   let key: string | undefined
   if (endpoint.auth) {
     if ('env' in endpoint.auth) key = environment[endpoint.auth.env]
@@ -86,7 +89,7 @@ export async function endpointSearch(endpoint: SearchEndpoint, query: string, si
   if (endpoint.kind === 'tavily') {
     headers['content-type'] = 'application/json'
     headers.authorization = `Bearer ${key}`
-    body = JSON.stringify({ query, search_depth: 'basic', max_results: 10, include_answer: false, include_raw_content: false })
+    body = JSON.stringify({ query, search_depth: mapping?.mode === 'extended' ? 'advanced' : 'basic', max_results: 10, include_answer: false, include_raw_content: false, ...(mapping?.allowed?.length ? { include_domains: mapping.allowed } : {}), ...(mapping?.blocked?.length ? { exclude_domains: mapping.blocked } : {}) })
   } else {
     url.searchParams.set('q', query)
     if (endpoint.kind === 'searxng') url.searchParams.set('format', 'json')
@@ -105,10 +108,13 @@ export async function endpointSearch(endpoint: SearchEndpoint, query: string, si
 }
 
 /** A valid empty result is success. Transport and quota failures advance to the next endpoint. */
-export async function configuredSearch(query: string, signal: AbortSignal, endpoints = searchEndpoints(), request: typeof fetch = fetch, observe?: (attempt: SearchAttempt) => void): Promise<SearchResult[]> {
+export async function configuredSearch(query: string, signal: AbortSignal, endpoints = searchEndpoints(), request: typeof fetch = fetch, observe?: (attempt: SearchAttempt) => void, mapping?: SearchMapping): Promise<SearchResult[]> {
+  const restricted = mapping?.allowed?.length || mapping?.blocked?.length
   for (const endpoint of endpoints) {
+    // Only Tavily has native domain fields. A service that cannot take the lists is skipped, so the call falls through to Claude's own WebSearch, which carries them.
+    if (restricted && endpoint.kind !== 'tavily') continue
     try {
-      const result = await endpointSearch(endpoint, query, signal, request)
+      const result = await endpointSearch(endpoint, query, signal, request, process.env, mapping)
       observe?.({ name: endpoint.name, status: 'success', http: result.http })
       return result.results
     } catch (error) {

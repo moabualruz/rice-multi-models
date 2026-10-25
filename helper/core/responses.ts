@@ -740,7 +740,7 @@ class ResponseStream {
     const safeguard_results = safeguardResults(
       this.options.safeguards,
       message.content,
-      this.options.safeguardProvider ?? 'openai',
+      this.options.safeguardProvider ?? 'unreviewed',
     );
     if (safeguard_results) {
       message.safeguard_results = safeguard_results;

@@ -44,7 +44,7 @@ const server = createServer(async (request, response) => {
   }
   if (path === '/selected/v1/responses') {
     const search = body?.tools?.some(tool => tool.type === 'web_search') === true
-    requests.push({ phase, method: request.method, path, model: body?.model, search, searchQueryMarkers: ['OWNED_REWRITTEN_SEARCH', 'OWNED_ONE_TIME_SEARCH', 'OWNED_ONE_TIME_DENIED', 'OWNED_MODEL_CHANGE_SEARCH'].filter(marker => raw.includes(marker)), rewrittenSearch: raw.includes('OWNED_REWRITTEN_SEARCH'), rewrittenFetch: raw.includes('OWNED_REWRITTEN_FETCH'), credentialFree: !request.headers.authorization && !request.headers['x-api-key'] })
+    requests.push({ phase, method: request.method, path, model: body?.model, search, searchQueryMarkers: ['OWNED_REWRITTEN_SEARCH', 'OWNED_ONE_TIME_SEARCH', 'OWNED_ONE_TIME_DENIED'].filter(marker => raw.includes(marker)), rewrittenSearch: raw.includes('OWNED_REWRITTEN_SEARCH'), rewrittenFetch: raw.includes('OWNED_REWRITTEN_FETCH'), credentialFree: !request.headers.authorization && !request.headers['x-api-key'] })
     return responseEvents(response, search ? 'Owned search answer.' : 'OWNED_SELECTED_EXTRACTION', search)
   }
   requests.push({ phase, method: request.method, path, native: path.startsWith('/native/'), ...(body ? { model: body.model, maxTokens: body.max_tokens, nativeNaming: JSON.stringify(body.system)?.includes('You are naming a coding session') === true, systemPrefix: JSON.stringify(body.system)?.slice(0, 500), messagePrefix: JSON.stringify(body.messages)?.slice(0, 800) } : {}) })
@@ -87,9 +87,7 @@ try {
   const registerFile = join(plugin, 'hooks/register.ts')
   let source = readFileSync(registerFile, 'utf8')
   source = source.replaceAll('await loadProviders($)', 'await loadProviders($); for (const provider of Object.values(loaded.config.providers)) await $.store.set(TRUST_PREFIX + fingerprint(provider), true)')
-  source = source.replace("  on('tool.call', async ($, e, next) => {", "  let proofModelAfterApproval;\n  on('tool.call', async ($, e, next) => {")
-  source = source.replace('const model = e.agentId === undefined ? await $.session.model() : agentModels.get(e.agentId)\n      if (model !== initialModel', 'const model = e.agentId === undefined ? (proofModelAfterApproval ?? await $.session.model()) : agentModels.get(e.agentId)\n      if (model !== initialModel')
-  source = source.replace('const gate = await webToolGate.finish(ticket, nativeResult, (question, options) => $.ui.ask(question, options), next.signal)', `const proofCase = JSON.parse(await $.fs.read(${JSON.stringify(phaseFile)})); const gate = await webToolGate.finish(ticket, nativeResult, async (question, options) => { if (proofCase.changeModelAfterApproval) proofModelAfterApproval = 'selected/changed'; return proofCase.askAnswer; }, proofCase.cancelBeforeApproval ? AbortSignal.abort() : next.signal)`)
+  source = source.replace('const gate = await webToolGate.finish(ticket, nativeResult, (question, options) => $.ui.ask(question, options), next.signal)', `const proofCase = JSON.parse(await $.fs.read(${JSON.stringify(phaseFile)})); const gate = await webToolGate.finish(ticket, nativeResult, async () => proofCase.askAnswer, proofCase.cancelBeforeApproval ? AbortSignal.abort() : next.signal)`)
   const close = source.lastIndexOf('\n}')
   assert.ok(close > 0)
   source = source.slice(0, close) + `
@@ -120,7 +118,6 @@ try {
     { name: 'search-allowed-rewritten', mode: 'default', call: { tool: 'WebSearch', query: 'OWNED_ORIGINAL_SEARCH' }, permissions: { allow: ['WebSearch'] }, rewrite: true, approved: true },
     { name: 'search-one-time-approved', mode: 'default', call: { tool: 'WebSearch', query: 'OWNED_ONE_TIME_SEARCH' }, permissions: { ask: ['WebSearch'] }, askAnswer: 'Allow once', approved: true },
     { name: 'search-one-time-denied', mode: 'default', call: { tool: 'WebSearch', query: 'OWNED_ONE_TIME_DENIED' }, permissions: { ask: ['WebSearch'] }, askAnswer: 'Deny', approved: false },
-    { name: 'search-model-changed-during-approval', mode: 'default', call: { tool: 'WebSearch', query: 'OWNED_MODEL_CHANGE_SEARCH' }, permissions: { ask: ['WebSearch'] }, askAnswer: 'Allow once', changeModelAfterApproval: true, approved: false },
     { name: 'search-cancelled-before-approval', mode: 'default', call: { tool: 'WebSearch', query: 'OWNED_CANCELLED_SEARCH' }, permissions: { ask: ['WebSearch'] }, cancelBeforeApproval: true, approved: false },
     { name: 'fetch-allowed-rewritten', mode: 'default', call: { tool: 'WebFetch', url: 'https://original.example/page', prompt: 'OWNED_ORIGINAL_FETCH' }, permissions: { allow: ['WebFetch(domain:93.184.216.34)'] }, rewrite: true, approved: true },
     { name: 'search-ask-headless', mode: 'default', call: { tool: 'WebSearch', query: 'OWNED_ASK_SEARCH' }, permissions: { ask: ['WebSearch'] }, approved: false },
