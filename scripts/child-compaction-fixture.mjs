@@ -9,6 +9,7 @@ import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSyn
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { captureNativeChild } from './proof-native-child.mjs'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const CHILD = 'codex/owned-child', PARENT = 'codex/owned-public'
@@ -104,15 +105,16 @@ export async function runChildCase({ label, native, seeded = true, background = 
   env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${anthropic.address().port}`
   const child = spawn(native, ['-p', '--model', PARENT, '--plugin-dir', plugin, '--setting-sources', 'user', '--permission-mode', 'bypassPermissions', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--tools', 'Agent,Read', '--debug-file', join(fixture, 'debug.log'), '--output-format', 'json', 'Start the owned compaction child, wait for it, then finish.'], { cwd: home, env, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] })
   console.log(JSON.stringify({ phase: 'child-compaction', label, ownedPid: child.pid, fixture, preload: false }))
-  let stdout = '', stderr = '', timedOut = false
-  child.stdout.on('data', bytes => stdout += bytes); child.stderr.on('data', bytes => stderr += bytes)
-  const timer = setTimeout(() => { timedOut = true; try { process.kill(-child.pid, 'SIGTERM') } catch { /* already gone */ } }, deadlineMs)
-  const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve) })
-  clearTimeout(timer); anthropic.close()
+  const { code, timedOut, stdout, stderr } = await captureNativeChild(child, deadlineMs, () => {
+    if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', timeout: 10_000, windowsHide: true })
+    else try { process.kill(-child.pid, 'SIGTERM') } catch { /* already gone */ }
+  })
+  anthropic.close()
   writeFileSync(join(fixture, 'stdout.json'), stdout); writeFileSync(join(fixture, 'stderr.txt'), stderr)
   const readJson = directory => readdirSync(directory).map(name => JSON.parse(readFileSync(join(directory, name), 'utf8')))
   const transcripts = readdirSync(join(config, 'projects'), { recursive: true }).filter(path => typeof path === 'string' && path.endsWith('.jsonl'))
-  const childFiles = transcripts.filter(path => path.includes('subagents/'))
+  const isChild = path => path.split(/[\\/]/).includes('subagents')
+  const childFiles = transcripts.filter(isChild)
   const rows = path => readFileSync(join(config, 'projects', path), 'utf8').trim().split('\n').map(line => JSON.parse(line))
   const childRows = childFiles.flatMap(rows)
   const debug = readFileSync(join(fixture, 'debug.log'), 'utf8').split('\n')
@@ -125,7 +127,7 @@ export async function runChildCase({ label, native, seeded = true, background = 
     childUsage: childRows.filter(row => row.type === 'assistant').map(row => ({ model: row.message.model, input: row.message.usage?.input_tokens, cacheRead: row.message.usage?.cache_read_input_tokens })),
     boundaries: boundaries.map(row => ({ trigger: row.compactMetadata?.trigger })),
     autoBoundaries: boundaries.filter(row => row.compactMetadata?.trigger === 'auto').length,
-    parentBoundaries: transcripts.filter(path => !path.includes('subagents/')).flatMap(rows).filter(row => row.subtype === 'compact_boundary').length,
+    parentBoundaries: transcripts.filter(path => !isChild(path)).flatMap(rows).filter(row => row.subtype === 'compact_boundary').length,
     summaryRequests: wireRows.filter(row => row.summary).map(row => ({ who: row.who === 'main' ? 'main' : 'child', target: row.target, messages: row.messages })),
     childRequests: wireRows.filter(row => row.who !== 'main' && !row.summary).map(row => ({ n: row.n, input: row.input, hasSummary: row.hasSummary })),
     window: {
