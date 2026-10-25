@@ -80,7 +80,7 @@ const provider = createServer(async (request, response) => {
     evaluator: serialized.includes('OWNED_EVALUATOR'), started: performance.now() }
   observations.push(entry)
   let content = 'Owned provider answer', calls
-  if (auxiliary) { await new Promise(resolve => setTimeout(resolve, 100)); content = 'OWNED_AUX_OK' }
+  if (auxiliary) { await new Promise(resolve => setTimeout(resolve, 600)); content = 'OWNED_AUX_OK' }
   else if (fork) content = 'OWNED_FORK_OK'
   else if (phase.startsWith('children') && body.model === 'main' && mainCalls++ === 0) calls = [
     { id: 'call_child_a', type: 'function', function: { name: 'Agent', arguments: JSON.stringify({ description: 'Owned child A', prompt: 'Return OWNED_CHILD_A without tools.', subagent_type: 'owned-a', name: 'owned-a-peer' }) } },
