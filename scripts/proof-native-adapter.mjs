@@ -247,7 +247,7 @@ try {
     assert.ok(fetchCall?.isError || fetchCall?.deny, 'unavailable final native WebFetch is terminal, never hidden direct retrieval')
     assert.ok(answer.calls.filter(call => call.tool !== 'WebFetch').every(call => !call.isError && !call.deny), 'other available built-in calls complete')
     assert.equal(observations.filter(event => event.phase === 'builtins' && event.kind === 'provider').length, 0, 'no selected extraction runs after the unavailable final native fetch')
-    assert.ok(!JSON.stringify(answer.calls.find(call => call.tool === 'WebSearch')).includes('unrelated.example'), 'native search domain filtering')
+    assert.ok(JSON.stringify(answer.calls.find(call => call.tool === 'WebSearch')).includes('unrelated.example'), 'the service result is mapped whole: domain lists are forwarded to the provider, never re-applied by the mod')
     assert.ok(observations.some(event => event.kind === 'retrieval'), 'native WebSearch retrieves')
     assert.ok(observations.filter(event => event.phase === 'builtins' && event.kind === 'provider').every(event => event.family === 'a' && event.model === 'main'), 'built-in inference uses its owner')
   }
