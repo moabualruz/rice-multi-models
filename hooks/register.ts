@@ -29,7 +29,7 @@ import { createMemory } from './memory'
 import { CATALOG_URL, kindCounts, liveIds, opencodeProvider, TIERS } from './opencode'
 import type { Tier } from './opencode'
 import { catalogueRows, nativeModelEnv, nativeModelSettings } from './picker'
-import { NATIVE_MODEL_LIMITATIONS, unknownMetadata } from './catalogue'
+import { NATIVE_MODEL_LIMITATIONS, RELAUNCH_NOTICE, unknownMetadata } from './catalogue'
 import type { ModelCatalogue } from './catalogue'
 import { runtimeConfig } from './catalogue-runtime'
 import type { PickerRow } from './picker'
@@ -1190,7 +1190,7 @@ async function runCommand($: EngineInterface, args: string): Promise<string> {
     await loadProviders($)
     await refreshCatalogue($)
     await syncPicker($, runtime, routedRows())
-    return `${loaded.errors.length > 0 ? `${loaded.path} does not validate; no declared provider routes:\n${loaded.errors.join('\n')}` : providerLines(loaded, await approvedSet($)).join('\n')}\n\n${await discoveryText($, 'models')}`
+    return `${loaded.errors.length > 0 ? `${loaded.path} does not validate; no declared provider routes:\n${loaded.errors.join('\n')}` : providerLines(loaded, await approvedSet($)).join('\n')}\n\n${await discoveryText($, 'models')}\n\n${RELAUNCH_NOTICE}`
   }
   if (first === 'approve') {
     const provider = value ? loaded.config?.providers[value] : undefined
