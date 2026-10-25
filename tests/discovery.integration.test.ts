@@ -449,7 +449,7 @@ test('the summary keeps only the summary block, in the engine\'s wording, and ci
     const main = await hook('session.compact')(host, { trigger: 'manual', messages: transcript }, async () => ({}))
     expect(main.messages[0].text).toBe('FIXTURE CONTINUED SESSION\n\nSummary:\n1. Primary Request: ship it\n\nRead the full transcript at: /fixture/session.jsonl\nResume directly.')
     expect(main.messages[0].text).not.toContain('private reasoning')
-    expect(main.messages[1]).toBe(transcript[2])
+    expect(main.messages).toHaveLength(1)
     const child = await step('general-purpose', 'codex/gpt-6.1-sol')
     const sub = await hook('session.compact')(host, { agentId: child.id, trigger: 'auto', messages: [{ role: 'user', text: 'Child task', toolUses: [] }] }, async () => ({}))
     expect(sub.messages[0].text).toBe('FIXTURE CONTINUED SESSION\n\nSummary:\n1. Primary Request: ship it\n\nResume directly.')
