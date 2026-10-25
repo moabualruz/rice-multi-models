@@ -108,10 +108,13 @@ try {
   validationChild.stdout.on('data', bytes => validationStdout += bytes)
   validationChild.stderr.on('data', bytes => validationStderr += bytes)
   const validationTimer = setTimeout(() => {
+    // Exit and pipe close are separate events: a child that already exited has not missed its deadline.
+    if (validationChild.exitCode !== null || validationChild.signalCode !== null) return
     validationExpired = true
     reportDeadline('plugin validate', validationStarted, validationStdout, validationStderr)
     validationChild.kill('SIGTERM')
   }, 10000)
+  validationChild.once('exit', () => clearTimeout(validationTimer))
   let validationCode
   try {
     validationCode = await new Promise((resolve, reject) => {
