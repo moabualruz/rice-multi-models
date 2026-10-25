@@ -71,6 +71,16 @@ test('WebSocket close 1000 before completion retries on a new connection', async
   expect(result.events.some(event => event.type === 'stop')).toBe(true)
 })
 
+test('repeated transient 1011 closes exhaust three attempts, report the count and emit no tool_use', async () => {
+  const result = await fake([{ events: [created], close: 1011 }], 'ws')
+  expect(result.calls).toBe(3)
+  expect(result.events.filter(event => event.type === 'tool_use')).toHaveLength(0)
+  const error = result.events.find(event => event.type === 'error')
+  if (error?.type !== 'error') throw new Error('missing error')
+  expect(error.text).toContain('close=1011')
+  expect(error.text).toContain('3 attempts')
+})
+
 test('a 60-minute WebSocket refusal retries once on a fresh pooled connection without duplicating tool_use', async () => {
   const tool = { type: 'function_call', call_id: 'call_once', name: 'echo', arguments: '{}' }
   const completed = [created,
