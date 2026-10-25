@@ -120,15 +120,15 @@ test('a text-only answer without search evidence and a malformed source list bot
 })
 
 test('domain lists reach the configured service and an unrestricted-only service hands the call to Claude with both lists', async () => {
-  const input = { query, allowed_domains: ['docs.example'], blocked_domains: ['spam.example'] }
+  const input = { query, allowed_domains: ['docs.example'], blocked_domains: ['spam.example'], mode: 'extended' as const }
   let seen: unknown
   const mapped = createToolSearch({ step: async function* () { yield { type: 'error', kind: 'request', text: 'unavailable' } }, endpoints: () => endpoints,
     configured: async (_asked, _signal, _selected, _request, _observe, domains) => { seen = domains; return [source] } })
   expect(await mapped({ wire: wire(), ...input }, signal())).toMatchObject({ kind: 'answered', stage: 'configured-service' })
-  expect(seen).toEqual({ allowed: ['docs.example'], blocked: ['spam.example'] })
+  expect(seen).toEqual({ allowed: ['docs.example'], blocked: ['spam.example'], mode: 'extended' })
   const requested: string[] = []
   const handed = createToolSearch({ step: async function* () { yield { type: 'error', kind: 'request', text: 'unavailable' } }, endpoints: () => endpoints,
     configured: (asked, abort, selected, _request, observe, domains) => configuredSearch(asked, abort, selected, (async (url: URL | RequestInfo) => { requested.push(String(url)); return Response.json({ results: [] }) }) as typeof fetch, observe, domains) })
-  expect(await handed({ wire: wire(), ...input }, signal())).toMatchObject({ kind: 'native-fallback', request: { query, allowed_domains: ['docs.example'], blocked_domains: ['spam.example'] } })
+  expect(await handed({ wire: wire(), ...input }, signal())).toMatchObject({ kind: 'native-fallback', request: { query, allowed_domains: ['docs.example'], blocked_domains: ['spam.example'], mode: 'extended' } })
   expect(requested).toEqual([])
 })

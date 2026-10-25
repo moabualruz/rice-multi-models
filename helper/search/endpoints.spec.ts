@@ -107,3 +107,12 @@ test('a configured service result is mapped whole and a long query is sent as gi
   expect(results).toHaveLength(12)
   expect(results[0]).toEqual({ title: hits[0]!.title, url: 'https://source.example/0', content: hits[0]!.content })
 })
+
+test('extended mode maps to Tavily advanced depth and standard or absent mode stays basic', async () => {
+  const depths: unknown[] = []
+  const request = (async (_input: URL | RequestInfo, init?: RequestInit) => { depths.push(JSON.parse(String(init?.body)).search_depth); return Response.json({ results: [] }) }) as typeof fetch
+  const tavily = { name: 'tavily', kind: 'tavily', url: 'https://tavily.example/search', priority: 1, auth: { env: 'OWNED_TAVILY' } } as const
+  const signal = new AbortController().signal, environment = { OWNED_TAVILY: 'owned-tavily' }
+  for (const mapping of [{ mode: 'extended' as const }, { mode: 'standard' as const }, undefined]) await endpointSearch(tavily, 'owned', signal, request, environment, mapping)
+  expect(depths).toEqual(['advanced', 'basic', 'basic'])
+})
