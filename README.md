@@ -500,10 +500,10 @@ says which. OpenCode's free Zen models answer only OpenCode itself.
    with the definitions the installed `claude` sends (the schema table generated
    from this build is the fallback), and the transcript is the engine's own. A step whose family cannot be resolved is refused
    visibly; it is never sent to Claude instead.
-3. `session.compact`, the WebSearch and WebFetch tools, `tool.check` (auto-mode
-   judgments), the title hook, Stop and SubagentStop prompt hooks and the plugin
-   `model.*` events are answered the same way for routed conversations. Native
-   permission rules and hooks always run first.
+3. `session.compact`, the WebSearch and WebFetch tools, the title hook, Stop and
+   SubagentStop prompt hooks and the plugin `model.*` events are answered the same
+   way for routed conversations. Claude Code decides every permission, auto mode
+   included; its native rules and hooks remain in control.
 4. At activation the mod starts the bundled Node session helper
    (`dist/helper.mjs serve`) on a private Unix socket (macOS, Linux, WSL) or named
    pipe (Windows), authenticated with a random token. It keeps one Codex WebSocket
