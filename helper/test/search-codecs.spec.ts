@@ -37,39 +37,31 @@ function model(kind: 'responses' | 'anthropic' | 'gemini' | 'openai' | 'bedrock'
 
 test('dedicated search constraints replace function tools and honor only proven provider restrictions', () => {
   const normal = JSON.stringify({ tools: [{ type: 'function', name: 'Read' }], parallel_tool_calls: true, toolConfig: {}, thinking: { type: 'enabled' }, text: { format: {} } })
-  const search = { allowedDomains: ['source.example'], location: { city: 'London' }, maxUses: 8 }
+  const search = { allowedDomains: ['source.example'], location: { city: 'London' }, mode: 'extended' as const }
   const publicResponse = JSON.parse(nativeConstraints(normal, model('responses'), { webSearch: search }))
-  expect(publicResponse.tools).toEqual([{ type: 'web_search', external_web_access: true, filters: { allowed_domains: ['source.example'] }, user_location: { city: 'London', type: 'approximate' } }])
+  expect(publicResponse.tools).toEqual([{ type: 'web_search', external_web_access: true, filters: { allowed_domains: ['source.example'] }, user_location: { city: 'London', type: 'approximate' }, search_context_size: 'high' }])
   expect(publicResponse.tool_choice).toEqual({ type: 'web_search' })
   expect(publicResponse.include).toContain('web_search_call.action.sources')
-  expect(publicResponse.max_tool_calls).toBe(8)
+  expect(publicResponse.max_tool_calls).toBeUndefined()
   expect(publicResponse.parallel_tool_calls).toBeUndefined()
   expect(publicResponse.text).toBeUndefined()
   const claude = JSON.parse(nativeConstraints(normal, model('anthropic'), { webSearch: search }))
-  expect(claude.tools).toEqual([{ type: 'web_search_20250305', name: 'web_search', max_uses: 8, allowed_domains: ['source.example'], user_location: { city: 'London', type: 'approximate' } }])
+  expect(claude.tools).toEqual([{ type: 'web_search_20250305', name: 'web_search', allowed_domains: ['source.example'], user_location: { city: 'London', type: 'approximate' } }])
   expect(claude.thinking).toBeUndefined()
   expect(JSON.parse(nativeConstraints(normal, model('gemini'), { webSearch: {} })).tools).toEqual([{ googleSearch: {} }])
-  expect(() => nativeConstraints(normal, model('gemini'), { webSearch: search })).toThrow('restrictions')
+  expect(JSON.parse(nativeConstraints(normal, model('gemini'), { webSearch: search })).tools).toEqual([{ googleSearch: {} }])
   for (const kind of ['openai', 'bedrock'] as const) expect(() => nativeConstraints(normal, model(kind), { webSearch: {} })).toThrow('no supported hosted search')
   expect(nativeConstraints(normal, model('responses'), undefined)).toBe(normal)
 })
 
-test('Codex search uses its subscription serializer and rejects unsupported public-only fields', () => {
+test('Codex search uses its subscription serializer and sends only the fields it has', () => {
   const request = responsesRequest(step, 'test-model', messagesBody(step, 'test-model'))
   expect(request.tools).toEqual([{ type: 'web_search', external_web_access: true }])
   expect(request.tool_choice).toBe('auto')
   expect(request.include).toEqual(['reasoning.encrypted_content'])
   expect(request.max_tool_calls).toBeUndefined()
-  const bounded = { ...step, native: { webSearch: { maxUses: 8 } } }
-  expect(responsesRequest(bounded, 'test-model', messagesBody(bounded, 'test-model')).max_tool_calls).toBeUndefined()
-  for (const webSearch of [{ blockedDomains: ['blocked.example'] }]) {
-    const restricted = { ...step, native: { webSearch } }
-    expect(() => responsesRequest(restricted, 'test-model', messagesBody(restricted, 'test-model'))).toThrow('restrictions')
-  }
-  for (const maxUses of [0, -1, 21, 1.5]) {
-    const invalid = { ...step, native: { webSearch: { maxUses } } }
-    expect(() => responsesRequest(invalid, 'test-model', messagesBody(invalid, 'test-model'))).toThrow('use limit')
-  }
+  const mapped = { ...step, native: { webSearch: { blockedDomains: ['blocked.example'], mode: 'extended' as const } } }
+  expect(responsesRequest(mapped, 'test-model', messagesBody(mapped, 'test-model')).tools).toEqual([{ type: 'web_search', external_web_access: true }])
   const ordinary = { ...step, native: undefined }
   expect(responsesRequest(ordinary, 'test-model', messagesBody(ordinary, 'test-model')).tools[0]).toHaveProperty('name', 'Read')
 })

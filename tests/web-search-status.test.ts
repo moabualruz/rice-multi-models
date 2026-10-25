@@ -15,8 +15,7 @@ test('doctor web-search metadata uses configured order and never returns endpoin
   const status = webSearchStatus('codex/selected', undefined, config, 'https://search.example/legacy')
   expect(status.selectedModel).toBe('codex/selected')
   expect(status.providerNative.recognized).toBe(true)
-  expect(status.providerNative.method).toBeUndefined()
-  expect(status.providerNative.constraints).toContain('Codex cannot enforce a maximum number of search uses before making its provider call.')
+  expect(status.providerNative.method).toBe('hosted')
   expect(status.configuredServices).toEqual([
     { order: 1, name: 'first', kind: 'searxng', priority: 1 },
     { order: 2, name: 'later', kind: 'brave', priority: 20 },
@@ -25,7 +24,6 @@ test('doctor web-search metadata uses configured order and never returns endpoin
   ])
   expect(status.claudeFallback).toMatchObject({ available: true })
   expect(status.fetchTierState.tiers.map(tier => tier.stage)).toEqual(['provider-native', 'configured-service', 'native-fallback'])
-  expect(status.fetchTierState.tiers[0]).toMatchObject({ eligible: false })
   expect(status.fetchConfiguration).toEqual({ available: true, error: null })
   const safe = JSON.stringify(status)
   for (const secretDetail of ['search.example', 'SEARCH_SECRET_NAME', '/safe/credential-helper']) expect(safe).not.toContain(secretDetail)
@@ -75,7 +73,6 @@ test('doctor status recognizes native contracts and names disabling constraints'
   }, { version: 1, endpoints: [] })
   expect(gemini.providerNative.recognized).toBe(true)
   expect(gemini.providerNative.method).toBeUndefined()
-  expect(gemini.providerNative.constraints).toContain('Gemini grounding cannot enforce a maximum number of search uses.')
 
   const custom = webSearchStatus('custom/main', {
     provider: { baseUrl: 'https://compatible.example/v1', auth: 'none' },

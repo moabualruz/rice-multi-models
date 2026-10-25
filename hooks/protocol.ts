@@ -15,7 +15,7 @@ export type RemoteTool = { name: string; description: string; schema: Record<str
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 export type Transport = 'auto' | 'ws' | 'sse'
-export type WebSearch = { allowedDomains?: string[]; blockedDomains?: string[]; maxUses?: number; location?: Record<string, unknown> }
+export type WebSearch = { allowedDomains?: string[]; blockedDomains?: string[]; mode?: 'standard' | 'extended'; location?: Record<string, unknown> }
 export type WebFetch = { url: string; maxUses: 1; maxContentTokens: number }
 export type SearchSource = { title: string; url: string; content?: string }
 /** `complete` certifies reported call accounting, separately from answer completion. */

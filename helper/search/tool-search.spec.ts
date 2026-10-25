@@ -62,34 +62,32 @@ test('unknown search capability skips inference and valid empty retrieval succee
   if (result.kind === 'answered') expect(result.result).toMatchObject({ query, results: [{ content: [] }], searchCount: 1 })
 })
 
-test('domain policy, safe source URLs, duplicates and result bounds apply before returning a tool result', async () => {
-  const search = createToolSearch({ step: async function* () { yield* completed([
-    { title: 'Unsafe', url: 'https://credential:secret@docs.example/guide' },
-    { title: 'Other domain', url: 'https://other.example/guide' }, source, source,
-    ...Array.from({ length: 20 }, (_, index) => ({ title: 'x'.repeat(700), url: `https://sub.docs.example/guide/${index}`, content: 'y'.repeat(5000) })),
-  ]) } })
+test('sources map onto the native result shape without Rice filtering, deduplicating or truncating them', async () => {
+  const many = Array.from({ length: 20 }, (_, index) => ({ title: 'x'.repeat(700), url: `https://sub.docs.example/guide/${index}`, content: 'y'.repeat(5000) }))
+  const search = createToolSearch({ step: async function* () { yield* completed([{ title: 'Other domain', url: 'https://other.example/guide' }, source, source, ...many]) } })
   const result = await search({ wire: wire(), query, allowed_domains: ['docs.example/guide'] }, signal())
   expect(result.kind).toBe('answered')
   if (result.kind === 'answered') {
     const rows = result.result.results.flatMap(group => typeof group === 'string' ? [] : group.content)
-    expect(rows).toHaveLength(10); expect(rows[0].url).toBe(source.url)
-    expect(rows.every(row => row.title.length <= 512 && (row.snippet?.length ?? 0) <= 4000)).toBe(true)
-    expect(JSON.stringify(result)).not.toContain('credential:secret'); expect(JSON.stringify(result)).not.toContain('other.example')
+    expect(rows).toHaveLength(23); expect(rows[0].url).toBe('https://other.example/guide')
+    expect(rows[3].title).toHaveLength(700); expect(rows[3].snippet).toHaveLength(5000)
+    expect(Object.keys(result.result).sort()).toEqual(['durationSeconds', 'query', 'results', 'searchCount'].filter(key => key in result.result).sort())
   }
+})
+
+test('the native input fields reach the provider request and the Claude fallback request unchanged', async () => {
+  const input = { query, allowed_domains: ['docs.example'], blocked_domains: ['other.example'], mode: 'extended' as const }
+  let seen: unknown
+  const search = createToolSearch({ step: async function* (request) { seen = request.req.native?.webSearch; yield* completed() } })
+  await search({ wire: wire(), ...input }, signal())
+  expect(seen).toEqual({ allowedDomains: ['docs.example'], blockedDomains: ['other.example'], mode: 'extended' })
+  const fallback = createToolSearch({ step: async function* () { yield { type: 'error', kind: 'request', text: 'unavailable' } }, configured: async () => { throw new Error('owned unavailable') } })
+  expect(await fallback({ wire: wire(), ...input }, signal())).toMatchObject({ kind: 'native-fallback', request: input })
 })
 
 test('provider failure plus unavailable configured services returns a safe original-tool fallback', async () => {
   const search = createToolSearch({ step: async function* () { yield { type: 'error', kind: 'request', text: 'Do not expose credentials or query' } }, endpoints: () => endpoints, configured: async () => { throw new Error('owned unavailable') } })
   expect(await search({ wire: wire(), query }, signal())).toEqual({ kind: 'native-fallback', stage: 'claude-native', reason: 'Selected-provider and configured web search are unavailable.', request: { query } })
-})
-
-test('invalid requests never invoke a provider or a configured service', async () => {
-  let calls = 0
-  const search = createToolSearch({ step: async function* () { calls++; yield* completed() }, configured: async () => { calls++; return [] } })
-  for (const extra of [{ query: '' }, { allowed_domains: ['https://invalid.example'] }, { allowed_domains: ['allowed.example'], blocked_domains: ['blocked.example'] }, { maxUses: 0 }]) {
-    await expect(search({ wire: wire(), query, ...extra }, signal())).rejects.toBeInstanceOf(TypeError)
-  }
-  expect(calls).toBe(0)
 })
 
 test('cancellation rejects after buffered output without invoking another search stage', async () => {
@@ -99,14 +97,12 @@ test('cancellation rejects after buffered output without invoking another search
   expect(configured).toBe(0)
 })
 
-test('Codex skips native search before spending a call when maxUses or blocked-domain filtering is requested', async () => {
-  for (const restriction of [{ maxUses: 8 }, { blocked_domains: ['blocked.example'] }]) {
-    let provider = 0, services = 0
-    const search = createToolSearch({ step: async function* () { provider++; yield* completed() }, endpoints: () => endpoints, configured: async (_query, _signal, priority) => { services++; expect(priority).toEqual(endpoints); return [] } })
-    const result = await search({ wire: { ...wire('codex/owned'), configText: '' }, query, ...restriction }, signal())
-    expect(result).toMatchObject({ kind: 'answered', stage: 'configured-service' })
-    expect(provider).toBe(0); expect(services).toBe(1)
-  }
+test('Codex searches with its own account whatever the request restricts; fields it lacks are not sent', async () => {
+  let provider = 0, services = 0
+  const search = createToolSearch({ step: async function* () { provider++; yield* completed() }, endpoints: () => endpoints, configured: async () => { services++; return [] } })
+  const result = await search({ wire: { ...wire('codex/owned'), configText: '' }, query, blocked_domains: ['blocked.example'], mode: 'standard' }, signal())
+  expect(result).toMatchObject({ kind: 'answered', stage: 'provider-native' })
+  expect(provider).toBe(1); expect(services).toBe(0)
 })
 
 test('a text-only answer without search evidence and a malformed source list both advance to retrieval', async () => {

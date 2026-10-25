@@ -3,7 +3,7 @@ import type { FetchTierConfigState } from './fetch-config'
 import { orderedSearchEndpoints } from './search-config'
 import type { SearchConfig } from './search-config'
 import type { Remote } from './providers'
-import { DEFAULT_WEB_SEARCH_MAX_USES, nativeSearchDecision } from './web-search-tier'
+import { nativeSearchDecision } from './web-search-tier'
 
 export type FetchTierState = FetchTierConfigState
 export type FetchConfigurationStatus = { available: boolean; error: string | null }
@@ -26,7 +26,7 @@ export function webSearchStatus(selectedModel: string, remote: Remote | undefine
   if (legacyUrl && !ordered.some(endpoint => endpoint.url === legacyUrl)) configuredServices.push({
     order: configuredServices.length + 1, name: 'legacy-environment', kind: 'searxng', priority: null,
   })
-  const providerNative = nativeSearchDecision(selectedModel, remote, { maxUses: DEFAULT_WEB_SEARCH_MAX_USES })
+  const providerNative = nativeSearchDecision(selectedModel, remote)
   return {
     selectedModel,
     providerNative,

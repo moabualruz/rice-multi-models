@@ -61,7 +61,6 @@ import type { SearchConfigurationResult, SearchEdit } from './search-config'
 import { fetchProviderProtocol, fetchTierConfigState } from './fetch-config'
 import type { FetchConfigMetadata } from './fetch-config'
 import { webSearchStatus } from './web-search-status'
-import { DEFAULT_WEB_SEARCH_MAX_USES } from './web-search-tier'
 import { runNativeSearch } from './native-search'
 import { NativeFetchUnavailable, runNativeFetch } from './native-fetch'
 import { runFinalNativeFetch } from './web-fetch-fallback'
@@ -1436,26 +1435,22 @@ export const register: Register = on => {
       return agentCall($, e, next)
     }
     if (e.tool !== 'WebSearch' && e.tool !== 'WebFetch') return next(e)
-    const initialModel = e.agentId === undefined ? await $.session.model() : agentModels.get(e.agentId)
-    if (initialModel === undefined) return { deny: `${PLUGIN}: web tool conversation model is unknown; retry after its next observed turn` }
-    if (!isRouted(initialModel)) return next(e)
+    // Where no mapping applies (no known or routed model, no helper, a provider not approved) Claude's own tool runs untouched.
+    const model = e.agentId === undefined ? await $.session.model() : agentModels.get(e.agentId)
+    if (model === undefined || !isRouted(model) || !runtime.executable || runtime.error) return next(e)
+    const remote = targetOf(model)?.remote
+    if (remote && await approval($, remote)) return next(e)
     const ticket = webToolGate.begin(e)
     try {
       const nativeResult = await next(e)
       const gate = await webToolGate.finish(ticket, nativeResult, (question, options) => $.ui.ask(question, options), next.signal)
       if (!gate.approved) return { deny: gate.reason ?? `${PLUGIN}: the native web tool did not produce an approved replacement; its result was not used` }
       next.signal.throwIfAborted()
-      const model = e.agentId === undefined ? await $.session.model() : agentModels.get(e.agentId)
-      if (model !== initialModel || !model || !isRouted(model)) return { deny: `${PLUGIN}: the conversation model changed during web-tool approval; retry the action` }
-      const remote = targetOf(model)?.remote
-      const refused = remote ? await approval($, remote) : undefined
-      if (refused) return { deny: refused }
-      if (!runtime.executable || runtime.error) return { deny: `${PLUGIN}: web tools need the Node helper; /rice-models setup repair` }
       const wire = await wireFor($, { target: model, system: '', tools: [], transcript: [], who: e.agentId ?? 'main', session: await $.session.id() })
       const mode = e.tool === 'WebSearch' ? 'tool-search' : 'web-fetch'
       const input = gate.input as Omit<PublicWebFetchInput, 'wire'> | PublicWebSearchInput
       const run = await $.process.run([runtime.executable, helperFile($.plugin.root), mode], {
-        stdin: JSON.stringify({ ...input, wire, ...(mode === 'tool-search' ? { maxUses: DEFAULT_WEB_SEARCH_MAX_USES } : {}) }), timeoutMs: 120_000,
+        stdin: JSON.stringify({ ...input, wire }), timeoutMs: 120_000,
       })
       next.signal.throwIfAborted()
       if (run.exitCode !== 0 || run.isStdoutTruncated) return { deny: `${PLUGIN}: ${e.tool} did not complete with the selected provider; inspect /rice-models doctor` }
