@@ -9800,7 +9800,7 @@ function searchRecords(value, kind) {
   if (rows.length && !results.length) throw new SearchUnavailable("Search endpoint returned no valid source records.");
   return results;
 }
-async function endpointSearch(endpoint3, query, signal, request2 = fetch, environment = process.env) {
+async function endpointSearch(endpoint3, query, signal, request2 = fetch, environment = process.env, domains) {
   if (!query.trim() || query.length > 2048) throw new SearchUnavailable("Invalid search query.");
   let key;
   if (endpoint3.auth) {
@@ -9818,7 +9818,7 @@ async function endpointSearch(endpoint3, query, signal, request2 = fetch, enviro
   if (endpoint3.kind === "tavily") {
     headers2["content-type"] = "application/json";
     headers2.authorization = `Bearer ${key}`;
-    body2 = JSON.stringify({ query, search_depth: "basic", max_results: 10, include_answer: false, include_raw_content: false });
+    body2 = JSON.stringify({ query, search_depth: "basic", max_results: 10, include_answer: false, include_raw_content: false, ...domains?.allowed ? { include_domains: domains.allowed } : {}, ...domains?.blocked ? { exclude_domains: domains.blocked } : {} });
   } else {
     url.searchParams.set("q", query);
     if (endpoint3.kind === "searxng") url.searchParams.set("format", "json");
@@ -9838,10 +9838,12 @@ async function endpointSearch(endpoint3, query, signal, request2 = fetch, enviro
   }
   return { results: searchRecords(await json(response), endpoint3.kind), http: status };
 }
-async function configuredSearch(query, signal, endpoints = searchEndpoints(), request2 = fetch, observe) {
+async function configuredSearch(query, signal, endpoints = searchEndpoints(), request2 = fetch, observe, domains) {
+  const restricted = domains?.allowed?.length || domains?.blocked?.length ? domains : void 0;
   for (const endpoint3 of endpoints) {
+    if (restricted && endpoint3.kind !== "tavily") continue;
     try {
-      const result = await endpointSearch(endpoint3, query, signal, request2);
+      const result = await endpointSearch(endpoint3, query, signal, request2, process.env, restricted);
       observe?.({ name: endpoint3.name, status: "success", http: result.http });
       return result.results;
     } catch (error) {
@@ -9944,7 +9946,7 @@ function createToolSearch(ports = {}) {
     }
     try {
       const attempt = AbortSignal.any([signal, AbortSignal.timeout(3e4)]);
-      const results = await io.configured(query, attempt, io.endpoints());
+      const results = await io.configured(query, attempt, io.endpoints(), void 0, void 0, { allowed: mapping.allowedDomains, blocked: mapping.blockedDomains });
       signal.throwIfAborted();
       return answer("configured-service", results, 1);
     } catch {

@@ -36,7 +36,7 @@ const search = createServer((request, response) => {
   const query = new URL(request.url, 'http://fixture').searchParams.get('q')
   observations.push({ phase, kind: 'retrieval', query })
   response.setHeader('content-type', 'application/json')
-  response.end(JSON.stringify({ results: [{ title: 'Owned primary source', url: 'https://code.claude.com/docs/en/plugins/mods', content: 'Owned search fixture source.' }, { title: 'Excluded', url: 'https://unrelated.example/page', content: 'Excluded by domain policy.' }] }))
+  response.end(JSON.stringify({ results: [{ title: 'Owned primary source', url: 'https://code.claude.com/docs/en/plugins/mods', content: 'Owned search fixture source.' }, { title: 'Excluded', url: 'https://unrelated.example/page', content: 'Returned by the service and kept whole.' }] }))
 })
 const provider = createServer(async (request, response) => {
   let text = ''; for await (const bytes of request) text += bytes
@@ -157,7 +157,7 @@ try {
     if (e.agentId === undefined && !proofBuiltinsDone && ownedPhase === 'builtins') {
       proofBuiltinsDone = true
       const calls = []
-      for (const input of [{ tool: 'Skill', skill: 'plugin-authoring' }, { tool: 'ToolSearch', query: 'Find the web search tool', max_results: 1 }, { tool: 'WebFetch', url: 'https://example.com', prompt: 'Give the page title only.' }, { tool: 'WebSearch', query: 'Claude Code native mod docs', allowed_domains: ['code.claude.com'] }]) {
+      for (const input of [{ tool: 'Skill', skill: 'plugin-authoring' }, { tool: 'ToolSearch', query: 'Find the web search tool', max_results: 1 }, { tool: 'WebFetch', url: 'https://example.com', prompt: 'Give the page title only.' }, { tool: 'WebSearch', query: 'Claude Code native mod docs' }]) {
         try {
           const answer = await $.tool.call(input)
           calls.push({ tool: input.tool, isError: answer.isError, deny: answer.deny, result: answer.result })
@@ -247,7 +247,7 @@ try {
     assert.ok(fetchCall?.isError || fetchCall?.deny, 'unavailable final native WebFetch is terminal, never hidden direct retrieval')
     assert.ok(answer.calls.filter(call => call.tool !== 'WebFetch').every(call => !call.isError && !call.deny), 'other available built-in calls complete')
     assert.equal(observations.filter(event => event.phase === 'builtins' && event.kind === 'provider').length, 0, 'no selected extraction runs after the unavailable final native fetch')
-    assert.ok(JSON.stringify(answer.calls.find(call => call.tool === 'WebSearch')).includes('unrelated.example'), 'the service result is mapped whole: domain lists are forwarded to the provider, never re-applied by the mod')
+    assert.ok(JSON.stringify(answer.calls.find(call => call.tool === 'WebSearch')).includes('unrelated.example'), 'the service result is mapped whole: the mod never filters or bounds what the service returns')
     assert.ok(observations.some(event => event.kind === 'retrieval'), 'native WebSearch retrieves')
     assert.ok(observations.filter(event => event.phase === 'builtins' && event.kind === 'provider').every(event => event.family === 'a' && event.model === 'main'), 'built-in inference uses its owner')
   }

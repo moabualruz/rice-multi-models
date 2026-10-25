@@ -297,7 +297,7 @@ fields and nothing is validated, bounded or truncated by the mod: no query or do
 policy, use count, source cap or snippet limit. A field a provider has no place for
 (Codex has no blocked-domain list, Gemini none of the filters) is not sent, and the
 request is not moved to another tier for it. `mode: extended` becomes the Responses
-tool's `search_context_size: high`. Results keep Claude's own result shape. A valid
+tool's `search_context_size: high`. Results keep Claude's own result shape. Saved search services take the domain lists only where they have fields for them: Tavily gets `include_domains` and `exclude_domains`, and Brave and SearXNG are skipped when either list is set, so Claude's native search carries both lists. A valid
 empty result is terminal and does not trigger another service. `/rice-models doctor` and
 `/rice-models status` show the selected model's native eligibility and reasons,
 configured services in priority order, and whether the Claude fallback can be

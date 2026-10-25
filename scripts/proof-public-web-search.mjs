@@ -96,7 +96,7 @@ try {
     stages.push({query:e.query,stage:result.stage,modeDelivered:e.mode!==undefined});await $.fs.write(${JSON.stringify(stageReceipt)},JSON.stringify(stages));let handle;return{result:await runNativeSearch(result.request,{authorize:async()=>{const a=await $.session.authorize();handle=a?.handle;await $.fs.write(${JSON.stringify(authorizationReceipt)},JSON.stringify({kind:a?.kind,handlePresent:!!handle}));return a;},fetch:async(url,init)=>{if(!handle||init.auth!==handle)throw new Error('Owned fallback handle mismatch');return $.http.fetch(url,init);}},next.signal)};
   }).catch(async($,e,next)=>{if(!next.called){if(!await $.fs.exists(${JSON.stringify(hookFailure)}))await $.fs.write(${JSON.stringify(hookFailure)},JSON.stringify({phase:'hook-pre-dispatch',kind:next.error.kind,message:next.error.message.slice(0,240)}));return{deny:'Owned search fixture preparation failed'};}throw new Error('Owned search fixture continuation failed');});};`
   const caller = `export const register=on=>{on('turn.step',async function*($,e){const outcomes=[];
-    for(const query of ${JSON.stringify(queries)}){const result=await $.tool.call({tool:'WebSearch',query,allowed_domains:['docs.example'],mode:'extended'});outcomes.push({query,isError:result.isError===true,denied:!!result.deny,sourceUrls:result.result?.results?.flatMap(group=>typeof group==='string'?[]:group.content.map(source=>source.url))??[]});}
+    for(const [index,query] of ${JSON.stringify(queries)}.entries()){const result=await $.tool.call({tool:'WebSearch',query,...(index===1?{}:{allowed_domains:['docs.example']}),mode:'extended'});outcomes.push({query,isError:result.isError===true,denied:!!result.deny,sourceUrls:result.result?.results?.flatMap(group=>typeof group==='string'?[]:group.content.map(source=>source.url))??[]});}
     const answer='OWNED_PUBLIC_SEARCH '+JSON.stringify(outcomes);yield{kind:'text',index:0,text:answer};yield{kind:'stop',stopReason:'end_turn',usage:null};return{turnId:e.turnId,index:e.index,answer,toolUses:[],stopReason:'end_turn',usage:null};
   });};`
   const httpMock = `export const register=on=>{const rows=[];on('http.fetch',async($,e,next)=>{
@@ -142,7 +142,8 @@ try {
   process.stdout.write(`${JSON.stringify({ modeDeliveredByClaude: stages.map(row => row.modeDelivered) })}\n`)
   assert.ok(outcomes.every(outcome => !outcome.isError && !outcome.denied), 'native tool accepts every public result')
   assert.equal(observations.filter(row => row.stage === 'provider').length, 3)
-  assert.equal(observations.filter(row => row.stage === 'configured').length, 2)
+  // The second query has no domain list and reaches the service. The third carries one, the searxng service has no field for it, so it is skipped and Claude's native search answers.
+  assert.equal(observations.filter(row => row.stage === 'configured').length, 1)
   assert.equal(observations.filter(row => row.stage === 'native').length, 0, 'external main model never reaches the original native SDK search')
   assert.deepEqual(authorization, { kind: 'api-key', handlePresent: true })
   assert.equal(nativeOperations.length, 2); assert.ok(nativeOperations.every(row => row.authHandlePresent))

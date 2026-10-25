@@ -67,7 +67,7 @@ export function createToolSearch(ports: Partial<Ports> = {}) {
     }
     try {
       const attempt = AbortSignal.any([signal, AbortSignal.timeout(30_000)])
-      const results = await io.configured(query, attempt, io.endpoints())
+      const results = await io.configured(query, attempt, io.endpoints(), undefined, undefined, { allowed: mapping.allowedDomains, blocked: mapping.blockedDomains })
       signal.throwIfAborted()
       return answer('configured-service', results, 1)
     } catch { signal.throwIfAborted() }
