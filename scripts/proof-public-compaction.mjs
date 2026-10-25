@@ -185,7 +185,7 @@ try {
   const sessionRows = id => readdirSync(join(config, 'projects'), { recursive: true }).filter(path => typeof path === 'string' && path.endsWith(id + '.jsonl')).flatMap(path => readFileSync(join(config, 'projects', path), 'utf8').trim().split('\n').map(line => JSON.parse(line)))
   const inProcessRows = sessionRows(inProcess)
   assert.equal(inProcessRows.filter(row => row.subtype === 'compact_boundary').length, 2, 'both successive compactions persist a native boundary, with no mod-side staleness check between them')
-  assert.equal(inProcessRows.filter(row => row.isCompactSummary).length, 2, 'both summaries are Claude\'s own summary rows')
+  assert.equal(inProcessRows.filter(row => JSON.stringify(row).includes('OWNED_PRODUCT_SUMMARY')).length, 2, 'both mapped summaries are persisted in the transcript')
   const tracked = randomUUID()
   const trackedResult = await run('tracked-agent-compact', tracked, ['--session-id', tracked], ['OWNED_TRACKED_AGENT', '/compact OWNED_AGENT_PROJECTION'], 'Agent')
   assert.ok(!/Not compacted|stale|discarded|changed before/.test(trackedResult.result ?? ''), 'tracked Agent lookup must not falsely reject compaction')
