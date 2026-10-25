@@ -1,12 +1,11 @@
-// Copied unchanged from greenpolo/cc-multi-cli-plugin plugins/multi-core/src/gateway/safeguards.ts at 3dcb057
+// Adapted from greenpolo/cc-multi-cli-plugin plugins/multi-core/src/gateway/safeguards.ts at 3dcb057: changed to one honest unavailable verdict for every provider without a reviewer
 // (Apache-2.0, Copyright 2026 greenpolo; see LICENSES/cc-multi-cli-plugin.Apache-2.0.txt and its NOTICE).
 import type { ResponseContentBlock } from './messages.ts';
 import { isRecord } from './record.ts';
 
 type ToolVerdict =
   | { type: 'unavailable'; reason: 'error' }
-  | { type: 'evaluated'; outcome: 'not_flagged' }
-  | { type: 'evaluated'; outcome: 'flagged'; explanation: string };
+  | { type: 'evaluated'; outcome: 'not_flagged' };
 
 export type SafeguardResults = [
   {
@@ -15,29 +14,16 @@ export type SafeguardResults = [
   },
 ];
 
-export type SafeguardProvider = 'openai' | 'zen' | 'native';
+/**
+ * Who answers the review: a provider without a reviewer reports every call as unavailable, which Claude treats as
+ * "no server verdict" and settles with its own local classifier; `native` is a restored Claude run.
+ */
+export type SafeguardProvider = 'unreviewed' | 'native';
 
-const zenUnreviewedModes = new Set([
-  'default',
-  'acceptEdits',
-  'auto',
-  'dontAsk',
-  'bypassPermissions',
-]);
-
-/** A malformed request cannot authorize a synthetic verdict. */
-export function dangerousToolMode(safeguards: unknown): string | undefined {
-  if (!Array.isArray(safeguards) || !safeguards.every(isRecord)) {
-    return undefined;
-  }
-  const entry = safeguards.find((item) => item.type === 'dangerous_tool_use');
-  if (!entry) {
-    return undefined;
-  }
-  const context = entry.classifier_context;
-  return isRecord(context) && typeof context.permission_mode === 'string'
-    ? context.permission_mode
-    : '';
+/** Whether the request asked for a dangerous_tool_use review. A malformed request asks for nothing. */
+export function requestsDangerousToolReview(safeguards: unknown): boolean {
+  return Array.isArray(safeguards) && safeguards.every(isRecord)
+    && safeguards.some((item) => item.type === 'dangerous_tool_use');
 }
 
 export function safeguardResults(
@@ -45,8 +31,7 @@ export function safeguardResults(
   content: readonly ResponseContentBlock[],
   provider: SafeguardProvider,
 ): SafeguardResults | undefined {
-  const mode = dangerousToolMode(safeguards);
-  return buildResults(mode !== undefined, mode, content, provider);
+  return buildResults(requestsDangerousToolReview(safeguards), content, provider);
 }
 
 /** Restored native runs retain whether the original request asked for results. */
@@ -54,32 +39,20 @@ export function restoredNativeSafeguardResults(
   requested: boolean,
   content: readonly ResponseContentBlock[],
 ): SafeguardResults | undefined {
-  return buildResults(requested, undefined, content, 'native');
+  return buildResults(requested, content, 'native');
 }
 
 function buildResults(
   requested: boolean,
-  mode: string | undefined,
   content: readonly ResponseContentBlock[],
   provider: SafeguardProvider,
 ): SafeguardResults | undefined {
   if (!requested) {
     return undefined;
   }
-  let verdict: ToolVerdict = { type: 'evaluated', outcome: 'not_flagged' };
-  if (provider === 'openai') {
-    verdict = { type: 'unavailable', reason: 'error' };
-  } else if (provider === 'zen' && !zenUnreviewedModes.has(mode ?? '')) {
-    const explanation =
-      mode === 'plan'
-        ? 'Plan mode: Zen has no reviewer, so actions that need review are refused.'
-        : 'Zen permission mode is unavailable or unknown, so actions that need review are refused.';
-    verdict = {
-      type: 'evaluated',
-      outcome: 'flagged',
-      explanation,
-    };
-  }
+  const verdict: ToolVerdict = provider === 'native'
+    ? { type: 'evaluated', outcome: 'not_flagged' }
+    : { type: 'unavailable', reason: 'error' };
   const entries: Array<readonly [string, ToolVerdict]> = [];
   for (const block of content) {
     if (block.type === 'tool_use') {
