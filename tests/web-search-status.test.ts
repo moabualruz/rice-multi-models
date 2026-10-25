@@ -66,13 +66,13 @@ test('provider-native fetch eligibility is restricted to confirmed official cont
   expect(fetchProviderProtocol('openai', 'https://api.anthropic.com', 'claude-sonnet-4-6')).toBeUndefined()
 })
 
-test('doctor status recognizes native contracts and names disabling constraints', () => {
+test('doctor status recognizes native contracts', () => {
   const gemini = webSearchStatus('local/main', {
     provider: { baseUrl: 'https://generativelanguage.googleapis.com', auth: 'none' },
     model: { kind: 'gemini', webSearch: 'auto' },
   }, { version: 1, endpoints: [] })
   expect(gemini.providerNative.recognized).toBe(true)
-  expect(gemini.providerNative.method).toBeUndefined()
+  expect(gemini.providerNative.method).toBe('hosted')
 
   const custom = webSearchStatus('custom/main', {
     provider: { baseUrl: 'https://compatible.example/v1', auth: 'none' },

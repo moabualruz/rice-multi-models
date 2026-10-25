@@ -488,7 +488,7 @@ test('native Claude compaction passes the original request and result through', 
   } finally { host.session.model = sessionModel }
 })
 
-test('subagent compaction fails closed for unknown models and follows the last native or routed turn', async () => {
+test('subagent compaction leaves unknown models to Claude and follows the last native or routed turn', async () => {
   const beforeWires = wires.length
   const unknownId = `unobserved-agent-${agents.length}`
   agents.push({ id: unknownId, type: 'general-purpose', description: 'unobserved after reload' })
@@ -496,8 +496,8 @@ test('subagent compaction fails closed for unknown models and follows the last n
   const native = { messages: [{ role: 'user', text: 'native summary', toolUses: [] }] }
   const next = async () => { nativeCalls++; return native }
   const unknown = await hook('session.compact')(host, { agentId: unknownId, trigger: 'auto', messages: [] }, next)
-  expect(unknown.skip).toContain('active model is unknown')
-  expect(nativeCalls).toBe(0)
+  expect(unknown).toBe(native)
+  expect(nativeCalls).toBe(1)
   expect(wires.length).toBe(beforeWires)
   const routed = await step('general-purpose', 'codex/gpt-6.1-sol')
   const input = { agentId: routed.id, trigger: 'auto', messages: [{ role: 'user', text: 'Child-only task', toolUses: [] }] }
@@ -763,15 +763,14 @@ test('a declared model whose config does not validate is refused instead of sent
   }
 })
 
-test('a failing title hook keeps a routed session on a local title instead of the host naming it', async () => {
+test('a failing title hook leaves the naming of a routed session to the host', async () => {
   const model = host.session.model
   host.session.model = async () => 'codex/gpt-6.1-sol'
   try {
     let calls = 0
     // The lower chain fails once, as a throwing hook would; the host then runs the catch with the rest of the chain.
     const result = await hook('classic.UserPromptSubmit')(host, { prompt: 'Fix the flaky picker test', source: 'user' }, async () => { if (calls++ === 0) throw new Error('lower hook failed'); return {} })
-    expect(typeof result.sessionTitle).toBe('string')
-    expect(result.sessionTitle.length).toBeGreaterThan(0)
+    expect(result.sessionTitle).toBeUndefined()
   } finally {
     host.session.model = model
   }

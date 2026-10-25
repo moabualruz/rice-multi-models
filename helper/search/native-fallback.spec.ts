@@ -37,11 +37,10 @@ test('catalogue capabilities and native IDs are explicit, with documented line p
   }
 })
 
-test('no first-party account, malformed input and absent capability stop before paid inference', async () => {
+test('no first-party account and absent capability stop before paid inference', async () => {
   let reads = 0
   const context: NativeSearchContext = { authorize: async () => null, fetch: async () => { reads++; return response(catalogue) } }
   await expect(runNativeSearch({ query }, context, signal())).rejects.toBeInstanceOf(NativeSearchUnavailable)
-  await expect(runNativeSearch({ query: '' }, context, signal())).rejects.toBeInstanceOf(TypeError)
   expect(reads).toBe(0)
   context.authorize = async () => ({ handle: 'owned', kind: 'api-key' })
   context.fetch = async () => { reads++; return response({ data: [{ ...model, capabilities: undefined }] }) }

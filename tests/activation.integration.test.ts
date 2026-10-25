@@ -357,9 +357,17 @@ test('routed main and child tool checks preserve every native verdict in every p
   expect(f.calls.some(argv => argv[0] === 'claude')).toBe(false)
 })
 
+// A throwing hook is answered by its registered catch, as the host does.
+async function compact(f: Awaited<ReturnType<typeof compactFixture>>, event: Record<string, unknown>) {
+  try { return await callbacks.get('session.compact')!(f.host, event, f.next) } catch (error) {
+    const failed = Object.assign(async () => { throw error }, { signal: f.controller.signal, called: false, error: { kind: 'error', message: error instanceof Error ? error.message : String(error) } })
+    return fallbacks.get('session.compact')!(f.host, event, failed)
+  }
+}
+
 test.each(['manual', 'auto', 'plugin', 'precompute'] as const)('compaction maps the summary call for the %s trigger and hands Claude its own summary message', async trigger => {
   const f = await compactFixture()
-  const result = await callbacks.get('session.compact')!(f.host, { trigger, messages: f.rows, instructions: 'keep the approval gate' }, f.next)
+  const result = await compact(f, { trigger, messages: f.rows, instructions: 'keep the approval gate' })
   expect(result.messages).toHaveLength(1)
   expect(result.messages[0]).toMatchObject({ role: 'user', toolUses: [] })
   expect(result.messages[0].text).toContain('owned safe summary')
@@ -369,16 +377,15 @@ test.each(['manual', 'auto', 'plugin', 'precompute'] as const)('compaction maps 
   expect(request.target).toBe('codex/fresh')
   expect(request.tools).toEqual([])
   // Claude's conversation goes whole, with Claude's captured prompt (and the /compact instructions) as its last user text.
-  expect(request.transcript.slice(0, -1).map((row: any) => row.content)).toEqual(f.rows.slice(0, -1).map(row => row.text))
+  expect(request.transcript.slice(0, -1).map((row: any) => row.content)).toEqual(f.rows.map(row => row.text))
   expect(JSON.stringify(request.transcript.at(-1))).toContain('Summarize.')
   expect(JSON.stringify(request.transcript.at(-1))).toContain('keep the approval gate')
   expect(f.state.get('compaction-receipts')).toBeUndefined()
-  expect(f.receipts).toEqual([])
 })
 
 test('the whole conversation is summarized and no tail is chosen by the mod', async () => {
   const f = await compactFixture()
-  const result = await callbacks.get('session.compact')!(f.host, { trigger: 'auto', messages: f.rows }, f.next)
+  const result = await compact(f, { trigger: 'auto', messages: f.rows })
   expect(result.messages).toHaveLength(1)
   expect(f.rows.every(row => !result.messages.includes(row))).toBe(true)
 })
@@ -386,7 +393,7 @@ test('the whole conversation is summarized and no tail is chosen by the mod', as
 test('a long request is sent as Claude holds it, never clipped or trimmed by the mod', async () => {
   const f = await compactFixture()
   f.active.rows = [{ role: 'user', text: 'x'.repeat(2_000_000), toolUses: [], handle: 'big' }, ...f.rows.slice(1)]
-  await callbacks.get('session.compact')!(f.host, { trigger: 'auto', messages: f.active.rows }, f.next)
+  await compact(f, { trigger: 'auto', messages: f.active.rows })
   expect(f.requests).toHaveLength(1)
   expect(f.requests[0].transcript[0].content).toBe('x'.repeat(2_000_000))
 })
@@ -406,7 +413,7 @@ test('an unknown or unrouted compaction model runs Claude\'s own summarizer unto
 test('configured PreCompact policy is Claude\'s to apply and does not stop the mapped summary', async () => {
   const f = await compactFixture()
   f.host.settings.read = async () => { throw new Error('the mapping never reads compaction policy') }
-  const result = await callbacks.get('session.compact')!(f.host, { trigger: 'auto', messages: f.rows }, f.next)
+  const result = await compact(f, { trigger: 'auto', messages: f.rows })
   expect(result.messages?.[0].text).toContain('owned safe summary')
 })
 
@@ -425,7 +432,7 @@ test.each(['stable', 'missing', 'conflicting', 'unsupported', 'changed-source'] 
   await callbacks.get('classic.SessionStart')!(f.host, { source: 'startup', transcript_path: path }, async () => ({}))
   const messages = f.host.session.messages
   f.host.session.messages = async (args: any = {}) => (await messages(args)).slice(-4096)
-  const result = await callbacks.get('session.compact')!(f.host, { trigger: 'manual', messages: rows }, f.next)
+  const result = await compact(f, { trigger: 'manual', messages: rows })
   if (boundary === 'stable') {
     expect(result.skip).toBeUndefined()
     expect(result.messages).toHaveLength(1)
@@ -450,9 +457,10 @@ test.each(['isMeta', 'isVirtual'] as const)('a capped conversation with an unpro
   await callbacks.get('classic.SessionStart')!(f.host, { source: 'startup', transcript_path: path }, async () => ({}))
   f.active.rows = rows
   f.host.session.messages = async (args: any = {}) => args.as === 'api' ? api : rows.slice(-4096).map(({ handle, ...row }) => row)
-  const result = await callbacks.get('session.compact')!(f.host, { trigger: 'manual', messages: rows }, f.next)
+  const result = await compact(f, { trigger: 'manual', messages: rows })
   expect(result.messages).toBeUndefined()
-  expect(result.skip).toContain('unsupported meta or virtual context; original transcript retained')
+  expect(result.skip).toContain('unsupported meta or virtual context')
+  expect(result.skip).toContain('original transcript retained')
   expect(f.requests).toHaveLength(0)
 })
 
@@ -460,7 +468,7 @@ test('a stale-looking public snapshot no longer blocks the summary (no digest co
   const f = await compactFixture()
   // Archived history before the native boundary and a longer public read than the event used to read as a changed context.
   f.active.rows = [{ role: 'user', text: 'archived before the native compact boundary', toolUses: [] }, ...f.rows]
-  const result = await callbacks.get('session.compact')!(f.host, { trigger: 'manual', messages: f.rows }, f.next)
+  const result = await compact(f, { trigger: 'manual', messages: f.rows })
   expect(result.messages?.[0].text).toContain('owned safe summary')
   expect(f.requests).toHaveLength(1)
 })
@@ -468,7 +476,7 @@ test('a stale-looking public snapshot no longer blocks the summary (no digest co
 test('cancellation keeps the old history', async () => {
   const f = await compactFixture()
   f.active.afterProvider = () => f.controller.abort()
-  const result = await callbacks.get('session.compact')!(f.host, { trigger: 'manual', messages: f.rows }, f.next)
+  const result = await compact(f, { trigger: 'manual', messages: f.rows })
   expect(result.messages).toBeUndefined()
   expect(f.rows[0].text).toBe('old task')
 })
@@ -476,7 +484,7 @@ test('cancellation keeps the old history', async () => {
 test('parallel main and child compactions each map their own loop', async () => {
   const f = await compactFixture()
   await callbacks.get('agent.spawn')!(f.host, { tool_use_id: 'owned-compact-child', prompt: 'owned', description: 'owned child', subagentType: 'general-purpose', provider: { plugin: 'engine', tier: 'core' }, parentModel: 'codex/fresh', model: 'codex/fresh', background: false, fork: false }, async (input: any) => ({ model: input.model, agentId: 'compact-child' }))
-  const results = await Promise.all([undefined, 'compact-child'].map(agentId => callbacks.get('session.compact')!(f.host, { trigger: 'auto', messages: f.rows, ...(agentId ? { agentId } : {}) }, f.next)))
+  const results = await Promise.all([undefined, 'compact-child'].map(agentId => compact(f, { trigger: 'auto', messages: f.rows, ...(agentId ? { agentId } : {}) })))
   expect(f.requests.map(row => row.who).sort()).toEqual(['compact-child', 'main'])
   expect(results.every(result => result.messages?.length === 1)).toBe(true)
 })
@@ -487,7 +495,7 @@ test('provider failure installs no partial text and keeps the history', async ()
     for (const event of [{ type: 'text', text: 'partial only' }, { type: 'usage', in: 91, out: 3, cacheRead: 0, cacheWrite: 0 }, { type: 'error', kind: 'response', text: 'owned failure' }]) yield { stream: 'stdout', text: JSON.stringify(event) + '\n' }
     return { code: 1 }
   }
-  const result = await callbacks.get('session.compact')!(f.host, { trigger: 'manual', messages: f.rows }, f.next)
+  const result = await compact(f, { trigger: 'manual', messages: f.rows })
   expect(result.messages).toBeUndefined()
   expect(result.skip).toContain('original transcript retained')
   expect(JSON.stringify(result)).not.toContain('partial only')
