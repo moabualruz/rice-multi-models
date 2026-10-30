@@ -55,6 +55,9 @@ async function atomicWrite(file: string, data: unknown): Promise<void> {
   } finally { await rm(temp, { force: true }).catch(() => {}) }
 }
 
+/** How long a writer waits for the lock: inside the 10 s the hook gives the whole helper, so a busy lock is reported by name. */
+export const LOCK_WAIT_MS = 7_000
+
 /** The loopback port that is this config directory's picker lock, in the dynamic range. */
 export function pickerLockPort(configDir: string): number {
   return 49152 + createHash('sha256').update(path.resolve(configDir)).digest().readUInt32BE(0) % 16384
@@ -66,7 +69,7 @@ export function pickerLockPort(configDir: string): number {
  */
 async function acquire(configDir: string): Promise<Server> {
   const port = pickerLockPort(configDir)
-  const deadline = Date.now() + 10_000
+  const deadline = Date.now() + LOCK_WAIT_MS
   for (;;) {
     const server = createServer(socket => socket.destroy())
     try {

@@ -8771,12 +8771,13 @@ async function atomicWrite(file, data) {
     });
   }
 }
+var LOCK_WAIT_MS = 7e3;
 function pickerLockPort(configDir) {
   return 49152 + createHash5("sha256").update(path4.resolve(configDir)).digest().readUInt32BE(0) % 16384;
 }
 async function acquire(configDir) {
   const port = pickerLockPort(configDir);
-  const deadline = Date.now() + 1e4;
+  const deadline = Date.now() + LOCK_WAIT_MS;
   for (; ; ) {
     const server = createServer2((socket) => socket.destroy());
     try {

@@ -6,7 +6,7 @@ import path from 'node:path'
 import { pickerLockPort, syncPicker } from '../helper/picker-settings'
 import { setupInfo, setupCodex } from '../helper/setup-info'
 import { opencodeEntries, opencodeKey } from '../helper/opencode-auth'
-import { absoluteExecutable, commandText, detectRuntime, setupSummary, startupNotice } from '../hooks/setup'
+import { absoluteExecutable, commandText, detectRuntime, setupSummary, startupNotice, syncPicker as wrapperSyncPicker, type RunPort, type Runtime } from '../hooks/setup'
 import { parseConfig } from '../hooks/config'
 import { unknownMetadata, type ModelCatalogue } from '../hooks/catalogue'
 import { nativeModelEnv, nativeModelSettings } from '../hooks/picker'
@@ -261,6 +261,30 @@ test('a sync waits while another writer holds the lock and runs once it lets go'
   expect(await pending).toMatchObject({ ok: true, count: rows.length })
   expect(Date.now() - started).toBeGreaterThanOrEqual(300)
 }))
+
+test('a lock another program keeps is reported by name through the hook, before the hook stops the helper', async () => temporary(async configDir => {
+  const holder = createServer()
+  const port = pickerLockPort(configDir)
+  await new Promise<void>(resolve => holder.listen({ host: '127.0.0.1', port, exclusive: true }, resolve))
+  try {
+    const node = Bun.which('node')
+    expect(node).toBeTruthy()
+    const run: RunPort = async (argv, options) => {
+      const child = Bun.spawn([...argv], { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' })
+      child.stdin.write(options?.stdin ?? '')
+      child.stdin.end()
+      const timer = setTimeout(() => child.kill('SIGKILL'), options?.timeoutMs ?? 10_000)
+      const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+      clearTimeout(timer)
+      return { exitCode, stdout, stderr }
+    }
+    const runtime = { executable: node!, info: { configDir } } as unknown as Runtime
+    const result = await wrapperSyncPicker({ helper: path.resolve('dist/helper.mjs'), run }, runtime, rows)
+    expect(result.ok).toBe(false)
+    expect(result.error).toContain(`127.0.0.1:${port}`)
+    expect(await readdir(configDir)).not.toContain('settings.json')
+  } finally { await new Promise(resolve => holder.close(resolve)) }
+}), 15_000)
 
 test('malformed settings or ownership records are never overwritten', async () => temporary(async configDir => {
   const file = path.join(configDir, 'settings.json')
