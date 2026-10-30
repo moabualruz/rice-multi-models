@@ -63,6 +63,9 @@ staleness digests or PreCompact policy skip remain. A provider without a safegua
 newly written model data takes effect at the next Claude launch. New proofs cover a routed subagent's automatic
 compaction (foreground, background, cache-heavy, plus a late-data control) and record whether a child's compaction
 attempt fired, was skipped or failed.
+Release 0.17.6 keeps the `/model` picker when discovery fails: a provider that did not answer keeps the rows and
+model data last written for it instead of having them removed, and a picker lock left by a process that died is
+reclaimed after a minute instead of blocking every later sync.
 Earlier owner/model, capacity, streaming, failure and fork repairs remain.
 The mod registers no MCP tools and needs no launcher, proxy or gateway.
 
