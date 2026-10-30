@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { mkdtemp, mkdir, readFile, writeFile, rm, readdir, symlink, chmod } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, writeFile, rm, readdir, symlink, chmod, utimes } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { syncPicker } from '../helper/picker-settings'
@@ -181,6 +181,32 @@ test('concurrent picker sessions serialize rereads and never duplicate or trunca
   expect(settings.unrelated).toBe(17)
   expect(settings.modelPicker.options.map((row: any) => row.model)).toEqual(['codex/personal', ...rows.map(row => row.model)])
   expect((await readdir(configDir)).some(name => name.endsWith('.tmp') || name.endsWith('.lock'))).toBe(false)
+}))
+
+test('a failed discovery leaves the rows it wrote, while a provider without rows does not hold the sync back', async () => temporary(async configDir => {
+  const file = path.join(configDir, 'settings.json')
+  await syncPicker({ configDir, rows, modelSettings: { 'codex/gpt-6.1-sol': { autoCompactWindow: 400000 } } })
+  const written = await readFile(file, 'utf8')
+  for (const unavailable of [['codex'], ['runtime'], ['configured']]) {
+    const result = await syncPicker({ configDir, rows: [], unavailable })
+    expect(result).toMatchObject({ ok: false, changed: false })
+    expect(result.error).toContain('/rice-models refresh')
+    expect(await readFile(file, 'utf8')).toBe(written)
+  }
+  expect(await syncPicker({ configDir, rows, unavailable: ['bedrock'] })).toMatchObject({ ok: true })
+  expect(await syncPicker({ configDir, rows: rows.slice(1), unavailable: ['bedrock'] })).toMatchObject({ ok: true, changed: true })
+  expect(JSON.parse(await readFile(file, 'utf8')).modelPicker.options.map((row: any) => row.model)).toEqual(['local/qwen'])
+}))
+
+test('a lock left by a writer that died is reclaimed instead of blocking every later sync', async () => temporary(async configDir => {
+  const lock = path.join(configDir, '.rice-multi-models-picker.lock')
+  await mkdir(lock)
+  const old = new Date(Date.now() - 120_000)
+  await utimes(lock, old, old)
+  const started = Date.now()
+  expect(await syncPicker({ configDir, rows })).toMatchObject({ ok: true, count: rows.length })
+  expect(Date.now() - started).toBeLessThan(5_000)
+  expect((await readdir(configDir)).some(name => name.includes('.lock'))).toBe(false)
 }))
 
 test('malformed settings or ownership records are never overwritten', async () => temporary(async configDir => {

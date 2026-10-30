@@ -1,8 +1,9 @@
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 
-export type PickerSyncInput = { configDir: string; rows: { model: string; label: string; description?: string }[]; modelSettings?: Record<string, Record<string, unknown>>; env?: Record<string, string> }
+/** `unavailable` names the providers whose discovery failed this time; `runtime` and `configured` stand for all of them. */
+export type PickerSyncInput = { configDir: string; rows: { model: string; label: string; description?: string }[]; modelSettings?: Record<string, Record<string, unknown>>; env?: Record<string, string>; unavailable?: string[] }
 export type PickerSyncResult = { ok: boolean; changed: boolean; count: number; path: string; preserved?: number; error?: string }
 type Json = Record<string, unknown>
 type Ownership = { version: 1; rows: Json[]; edited: string[]; modelSettings?: Record<string, Json>; env?: Record<string, string> }
@@ -40,6 +41,8 @@ async function readJson(file: string, absent: Json): Promise<Json> {
 /** Windows reports a directory pending deletion, or a file another process holds open, with these codes. */
 const TRANSIENT = new Set(['EPERM', 'EACCES', 'EBUSY'])
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+/** A writer holds the lock for milliseconds and its caller kills it after 10 s, so an older lock was left by a process that died. */
+const STALE_LOCK_MS = 60_000
 
 async function atomicWrite(file: string, data: unknown): Promise<void> {
   const temp = `${file}.${randomUUID()}.tmp`
@@ -70,6 +73,13 @@ export async function syncPicker(input: PickerSyncInput): Promise<PickerSyncResu
       try { await mkdir(lock); locked = true; break } catch (error) {
         const code = (error as NodeJS.ErrnoException).code ?? ''
         if (code !== 'EEXIST' && !(process.platform === 'win32' && TRANSIENT.has(code))) throw error
+        const held = await stat(lock).then(info => Date.now() - info.mtimeMs, () => 0)
+        if (held > STALE_LOCK_MS) {
+          // Move it aside first, so of two sessions reclaiming the same lock only one removes it.
+          const aside = `${lock}.${randomUUID()}.stale`
+          if (await rename(lock, aside).then(() => true, () => false)) await rm(aside, { recursive: true, force: true }).catch(() => {})
+          continue
+        }
         if (Date.now() >= deadline) throw new Error('Picker sync lock is busy; retry /rice-models setup repair. If no session is running, remove the stale .rice-multi-models-picker.lock directory')
         await pause(25)
       }
@@ -78,6 +88,11 @@ export async function syncPicker(input: PickerSyncInput): Promise<PickerSyncResu
     const ownedJson = await readJson(record, { version: 1, rows: [], edited: [] })
     if (ownedJson.version !== 1 || !Array.isArray(ownedJson.rows) || ownedJson.rows.some(row => !object(row) || typeof row.model !== 'string') || !Array.isArray(ownedJson.edited) || ownedJson.edited.some(id => typeof id !== 'string')) throw new Error('Picker ownership record is malformed; nothing was overwritten')
     const ownership = ownedJson as unknown as Ownership
+    // A failed discovery is no news about the models: rows of a provider that did not answer stay as last written.
+    const failed = new Set(Array.isArray(input.unavailable) ? input.unavailable.filter(id => typeof id === 'string') : [])
+    const all = failed.has('runtime') || failed.has('configured')
+    const kept = ownership.rows.map(row => row.model as string).filter(id => all || [...failed].some(provider => id.startsWith(`${provider}/`)))
+    if (kept.length) return { ok: false, changed: false, count: 0, path: file, error: `Model discovery did not answer for ${[...failed].sort().join(', ')}, so the picker rows and model data were left as last written; /rice-models refresh retries discovery.` }
     if (settings.modelPicker !== undefined && !object(settings.modelPicker)) throw new Error('settings.json modelPicker is malformed; nothing was overwritten')
     const picker = (settings.modelPicker ?? {}) as Json
     if (picker.options !== undefined && !Array.isArray(picker.options)) throw new Error('settings.json modelPicker.options is malformed; nothing was overwritten')

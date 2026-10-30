@@ -8722,7 +8722,7 @@ async function setupCodex(env = process.env) {
 }
 
 // helper/picker-settings.ts
-import { mkdir as mkdir3, readFile as readFile3, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir as mkdir3, readFile as readFile3, rename, rm, stat, writeFile } from "node:fs/promises";
 import path4 from "node:path";
 import { randomUUID } from "node:crypto";
 var NATIVE_SETTING_KEYS = ["autoCompactWindow", "maxEffortLevel"];
@@ -8751,6 +8751,7 @@ async function readJson(file, absent) {
 }
 var TRANSIENT2 = /* @__PURE__ */ new Set(["EPERM", "EACCES", "EBUSY"]);
 var pause = (ms) => new Promise((resolve3) => setTimeout(resolve3, ms));
+var STALE_LOCK_MS = 6e4;
 async function atomicWrite(file, data) {
   const temp = `${file}.${randomUUID()}.tmp`;
   try {
@@ -8789,6 +8790,13 @@ async function syncPicker(input) {
       } catch (error) {
         const code2 = error.code ?? "";
         if (code2 !== "EEXIST" && !(process.platform === "win32" && TRANSIENT2.has(code2))) throw error;
+        const held = await stat(lock).then((info) => Date.now() - info.mtimeMs, () => 0);
+        if (held > STALE_LOCK_MS) {
+          const aside = `${lock}.${randomUUID()}.stale`;
+          if (await rename(lock, aside).then(() => true, () => false)) await rm(aside, { recursive: true, force: true }).catch(() => {
+          });
+          continue;
+        }
         if (Date.now() >= deadline) throw new Error("Picker sync lock is busy; retry /rice-models setup repair. If no session is running, remove the stale .rice-multi-models-picker.lock directory");
         await pause(25);
       }
@@ -8797,6 +8805,10 @@ async function syncPicker(input) {
     const ownedJson = await readJson(record4, { version: 1, rows: [], edited: [] });
     if (ownedJson.version !== 1 || !Array.isArray(ownedJson.rows) || ownedJson.rows.some((row) => !object2(row) || typeof row.model !== "string") || !Array.isArray(ownedJson.edited) || ownedJson.edited.some((id2) => typeof id2 !== "string")) throw new Error("Picker ownership record is malformed; nothing was overwritten");
     const ownership = ownedJson;
+    const failed = new Set(Array.isArray(input.unavailable) ? input.unavailable.filter((id2) => typeof id2 === "string") : []);
+    const all = failed.has("runtime") || failed.has("configured");
+    const kept = ownership.rows.map((row) => row.model).filter((id2) => all || [...failed].some((provider2) => id2.startsWith(`${provider2}/`)));
+    if (kept.length) return { ok: false, changed: false, count: 0, path: file, error: `Model discovery did not answer for ${[...failed].sort().join(", ")}, so the picker rows and model data were left as last written; /rice-models refresh retries discovery.` };
     if (settings.modelPicker !== void 0 && !object2(settings.modelPicker)) throw new Error("settings.json modelPicker is malformed; nothing was overwritten");
     const picker = settings.modelPicker ?? {};
     if (picker.options !== void 0 && !Array.isArray(picker.options)) throw new Error("settings.json modelPicker.options is malformed; nothing was overwritten");
