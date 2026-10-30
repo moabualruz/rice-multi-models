@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { mkdtemp, mkdir, readFile, writeFile, rm, readdir, symlink, chmod, utimes } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, writeFile, rm, readdir, rename, symlink, chmod, utimes } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { syncPicker } from '../helper/picker-settings'
@@ -212,19 +212,53 @@ test('a failed discovery keeps the model data it wrote for a provider whose row 
   expect(await readFile(file, 'utf8')).toBe(written)
 }))
 
-test('a lock left by a writer that died is reclaimed once, however many sessions find it', async () => temporary(async configDir => {
+test('a failed discovery keeps the model data it wrote for an alias of that provider', async () => temporary(async configDir => {
+  const file = path.join(configDir, 'settings.json')
+  const aliases = { steady: 'opencode/claude-sonnet-4-6' }
+  const modelSettings = { steady: { autoCompactWindow: 300000 } }
+  await syncPicker({ configDir, rows: [{ model: 'steady', label: 'Steady' }], modelSettings, aliases })
+  const settings = JSON.parse(await readFile(file, 'utf8'))
+  settings.modelPicker.options[0].label = 'My Steady'
+  await writeFile(file, JSON.stringify(settings))
+  await syncPicker({ configDir, rows: [{ model: 'steady', label: 'Steady' }], modelSettings, aliases })
+  const written = await readFile(file, 'utf8')
+  expect(JSON.parse(written).modelSettings.steady).toEqual({ autoCompactWindow: 300000 })
+  expect(await syncPicker({ configDir, rows: [], unavailable: ['opencode'], aliases })).toMatchObject({ ok: false, changed: false })
+  expect(await readFile(file, 'utf8')).toBe(written)
+}))
+
+for (const [kind, owner] of [['an empty lock from 0.17.5', undefined], ['a lock that names its writer', 'writer-that-died']] as const) {
+  test(`${kind} left by a writer that died is reclaimed once, however many sessions find it`, async () => temporary(async configDir => {
+    const lock = path.join(configDir, '.rice-multi-models-picker.lock')
+    await mkdir(lock)
+    if (owner) await writeFile(path.join(lock, 'owner'), owner)
+    const old = new Date(Date.now() - 120_000)
+    await utimes(lock, old, old)
+    const started = Date.now()
+    const results = await Promise.all(Array.from({ length: 12 }, () => syncPicker({ configDir, rows })))
+    expect(results.every(result => result.ok)).toBe(true)
+    expect(Date.now() - started).toBeLessThan(5_000)
+    const settings = JSON.parse(await readFile(path.join(configDir, 'settings.json'), 'utf8'))
+    expect(settings.modelPicker.options.map((row: any) => row.model)).toEqual(rows.map(row => row.model))
+    expect(JSON.parse(await readFile(path.join(configDir, '.rice-multi-models-picker.json'), 'utf8')).rows.map((row: any) => row.model)).toEqual(rows.map(row => row.model))
+    const left = await readdir(configDir)
+    // A reclaimed lock stays, moved aside, until no reclaimer can still be acting on it; an empty one may instead
+    // be replaced in place, as a rename onto an empty directory does outside Windows.
+    expect(left.filter(name => name.includes('.lock.dead-')).length).toBeLessThanOrEqual(1)
+    if (owner) expect(left.filter(name => name.includes('.lock.dead-'))).toEqual([`.rice-multi-models-picker.lock.dead-${owner}`])
+    expect(left.some(name => name.endsWith('.lock') || name.endsWith('.new') || name.endsWith('.tmp'))).toBe(false)
+  }))
+}
+
+test('a lock moved aside by one reclaimer is never moved again onto a live lock', async () => temporary(async configDir => {
   const lock = path.join(configDir, '.rice-multi-models-picker.lock')
+  await mkdir(`${lock}.dead-writer-that-died`)
+  await writeFile(path.join(`${lock}.dead-writer-that-died`, 'owner'), 'writer-that-died')
   await mkdir(lock)
-  const old = new Date(Date.now() - 120_000)
-  await utimes(lock, old, old)
-  const started = Date.now()
-  const results = await Promise.all(Array.from({ length: 12 }, () => syncPicker({ configDir, rows })))
-  expect(results.every(result => result.ok)).toBe(true)
-  expect(Date.now() - started).toBeLessThan(5_000)
-  const settings = JSON.parse(await readFile(path.join(configDir, 'settings.json'), 'utf8'))
-  expect(settings.modelPicker.options.map((row: any) => row.model)).toEqual(rows.map(row => row.model))
-  expect(JSON.parse(await readFile(path.join(configDir, '.rice-multi-models-picker.json'), 'utf8')).rows.map((row: any) => row.model)).toEqual(rows.map(row => row.model))
-  expect((await readdir(configDir)).some(name => name.includes('.lock') || name.endsWith('.tmp'))).toBe(false)
+  await writeFile(path.join(lock, 'owner'), 'live-writer')
+  // A late reclaimer's rename of whatever now holds the lock onto the reclaimed name must fail.
+  expect(await rename(lock, `${lock}.dead-writer-that-died`).then(() => true, () => false)).toBe(false)
+  expect(await readFile(path.join(lock, 'owner'), 'utf8')).toBe('live-writer')
 }))
 
 test('malformed settings or ownership records are never overwritten', async () => temporary(async configDir => {
