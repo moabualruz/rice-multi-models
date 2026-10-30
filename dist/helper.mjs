@@ -3752,12 +3752,12 @@ async function continuationLock(configDir, lifetime) {
     }
   }
   const held = await handle.stat();
-  let release = () => {
+  let release2 = () => {
   };
   const ended = new Promise((resolve3) => {
-    release = resolve3;
+    release2 = resolve3;
   });
-  const stop2 = () => release();
+  const stop2 = () => release2();
   for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.once(signal, stop2);
   lifetime?.addEventListener("abort", stop2, { once: true });
   const keepAlive = setInterval(() => {
@@ -6754,7 +6754,7 @@ async function* codexStep(req, model2, signal, options = {}) {
     return stream;
   };
   const task = (async () => {
-    let release;
+    let release2;
     let attempts = 0;
     try {
       const limit = options.maxInFlight ?? codexStepLimit(options.env);
@@ -6762,7 +6762,7 @@ async function* codexStep(req, model2, signal, options = {}) {
       onAuth(auth2);
       signal.throwIfAborted();
       const accountKey = createHash4("sha256").update(auth2["chatgpt-account-id"]).digest("hex");
-      release = await codexAccounts.acquire(accountKey, limit, signal);
+      release2 = await codexAccounts.acquire(accountKey, limit, signal);
       for (let attempt = 1; attempt <= OVERLOAD_MAX_ATTEMPTS; attempt++) {
         attempts = attempt;
         attemptSocket = void 0;
@@ -6845,7 +6845,7 @@ async function* codexStep(req, model2, signal, options = {}) {
       });
       queue.push({ type: "error", kind: "request", text: finalText(failure, attempts), ...signal.aborted ? { aborted: true } : {} });
     } finally {
-      release?.();
+      release2?.();
       queue.close();
     }
   })();
@@ -8295,21 +8295,21 @@ async function post(r, signal) {
   const total = setTimeout(() => cutBy({ kind: "total", detail: String(r.totalS) }), Math.min(r.totalS * 1e3, MAX_TIMEOUT_MS));
   let stall;
   const arm = () => (clearTimeout(stall), stall = setTimeout(() => cutBy({ kind: "stall", detail: String(r.stallS) }), r.stallS * 1e3));
-  const release = () => (clearTimeout(stall), clearTimeout(total));
+  const release2 = () => (clearTimeout(stall), clearTimeout(total));
   arm();
   let res;
   try {
     res = await postStream(r.url, r.headers, r.body, AbortSignal.any([signal, ac.signal]));
   } catch (err) {
-    release();
+    release2();
     return { cut: why ?? { kind: "reset", detail: String(err) } };
   }
   if (res.status >= 300 && res.status < 400) {
-    release();
+    release2();
     res.cancel();
     return { cut: { kind: "redirect", detail: String(res.status) } };
   }
-  const cancel = () => (release(), res.cancel(), ac.abort());
+  const cancel = () => (release2(), res.cancel(), ac.abort());
   async function* body2() {
     try {
       arm();
@@ -8752,6 +8752,50 @@ async function readJson(file, absent) {
 var TRANSIENT2 = /* @__PURE__ */ new Set(["EPERM", "EACCES", "EBUSY"]);
 var pause = (ms) => new Promise((resolve3) => setTimeout(resolve3, ms));
 var STALE_LOCK_MS = 6e4;
+var age = (target) => stat(target).then((info) => ({ ino: info.ino, age: Date.now() - info.mtimeMs }), () => void 0);
+async function acquire(lock) {
+  const token = randomUUID();
+  const deadline = Date.now() + 1e4;
+  for (; ; ) {
+    try {
+      await mkdir3(lock);
+      await writeFile(path4.join(lock, "owner"), token, { flag: "wx", mode: 384 });
+      return token;
+    } catch (error) {
+      const code2 = error.code ?? "";
+      if (code2 !== "EEXIST" && !(process.platform === "win32" && TRANSIENT2.has(code2))) throw error;
+    }
+    const seen = await age(lock);
+    if (seen && seen.age > STALE_LOCK_MS) {
+      const gate = `${lock}.reclaim`;
+      if (await mkdir3(gate).then(() => true, () => false)) {
+        try {
+          const now = await age(lock);
+          if (now && now.ino === seen.ino && now.age > STALE_LOCK_MS) {
+            const aside = `${lock}.${randomUUID()}.stale`;
+            await rename(lock, aside);
+            await rm(aside, { recursive: true, force: true }).catch(() => {
+            });
+          }
+        } finally {
+          await rm(gate, { recursive: true, force: true }).catch(() => {
+          });
+        }
+        continue;
+      }
+      const gateAge = await age(gate);
+      if (gateAge && gateAge.age > STALE_LOCK_MS) await rm(gate, { recursive: true, force: true }).catch(() => {
+      });
+    }
+    if (Date.now() >= deadline) throw new Error("Picker sync lock is busy; retry /rice-models setup repair. If no session is running, remove the stale .rice-multi-models-picker.lock directory");
+    await pause(25);
+  }
+}
+async function release(lock, token) {
+  const owner = await readFile3(path4.join(lock, "owner"), "utf8").catch(() => void 0);
+  if (owner === token) await rm(lock, { recursive: true, force: true }).catch(() => {
+  });
+}
 async function atomicWrite(file, data) {
   const temp = `${file}.${randomUUID()}.tmp`;
   try {
@@ -8778,37 +8822,19 @@ async function syncPicker(input) {
   const file = path4.join(input.configDir, "settings.json");
   const record4 = path4.join(input.configDir, ".rice-multi-models-picker.json");
   const lock = path4.join(input.configDir, ".rice-multi-models-picker.lock");
-  let locked = false;
+  let token;
   try {
     await mkdir3(input.configDir, { recursive: true });
-    const deadline = Date.now() + 1e4;
-    do {
-      try {
-        await mkdir3(lock);
-        locked = true;
-        break;
-      } catch (error) {
-        const code2 = error.code ?? "";
-        if (code2 !== "EEXIST" && !(process.platform === "win32" && TRANSIENT2.has(code2))) throw error;
-        const held = await stat(lock).then((info) => Date.now() - info.mtimeMs, () => 0);
-        if (held > STALE_LOCK_MS) {
-          const aside = `${lock}.${randomUUID()}.stale`;
-          if (await rename(lock, aside).then(() => true, () => false)) await rm(aside, { recursive: true, force: true }).catch(() => {
-          });
-          continue;
-        }
-        if (Date.now() >= deadline) throw new Error("Picker sync lock is busy; retry /rice-models setup repair. If no session is running, remove the stale .rice-multi-models-picker.lock directory");
-        await pause(25);
-      }
-    } while (!locked);
+    token = await acquire(lock);
     const settings = await readJson(file, {});
     const ownedJson = await readJson(record4, { version: 1, rows: [], edited: [] });
     if (ownedJson.version !== 1 || !Array.isArray(ownedJson.rows) || ownedJson.rows.some((row) => !object2(row) || typeof row.model !== "string") || !Array.isArray(ownedJson.edited) || ownedJson.edited.some((id2) => typeof id2 !== "string")) throw new Error("Picker ownership record is malformed; nothing was overwritten");
     const ownership = ownedJson;
     const failed = new Set(Array.isArray(input.unavailable) ? input.unavailable.filter((id2) => typeof id2 === "string") : []);
     const all = failed.has("runtime") || failed.has("configured");
-    const kept = ownership.rows.map((row) => row.model).filter((id2) => all || [...failed].some((provider2) => id2.startsWith(`${provider2}/`)));
-    if (kept.length) return { ok: false, changed: false, count: 0, path: file, error: `Model discovery did not answer for ${[...failed].sort().join(", ")}, so the picker rows and model data were left as last written; /rice-models refresh retries discovery.` };
+    const ownedIds = [...ownership.rows.map((row) => row.model), ...Object.keys(object2(ownership.modelSettings) ? ownership.modelSettings : {})];
+    const kept = ownedIds.filter((id2) => all || [...failed].some((provider2) => id2.startsWith(`${provider2}/`)));
+    if (kept.length || all && object2(ownership.env) && Object.keys(ownership.env).length) return { ok: false, changed: false, count: 0, path: file, error: `Model discovery did not answer for ${[...failed].sort().join(", ")}, so the picker rows and model data were left as last written; /rice-models refresh retries discovery.` };
     if (settings.modelPicker !== void 0 && !object2(settings.modelPicker)) throw new Error("settings.json modelPicker is malformed; nothing was overwritten");
     const picker = settings.modelPicker ?? {};
     if (picker.options !== void 0 && !Array.isArray(picker.options)) throw new Error("settings.json modelPicker.options is malformed; nothing was overwritten");
@@ -8901,8 +8927,7 @@ async function syncPicker(input) {
   } catch (error) {
     return { ok: false, changed: false, count: 0, path: file, error: error instanceof Error ? error.message : "Picker synchronization failed" };
   } finally {
-    if (locked) await rm(lock, { recursive: true, force: true }).catch(() => {
-    });
+    if (token) await release(lock, token);
   }
 }
 

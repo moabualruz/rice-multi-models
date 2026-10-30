@@ -198,15 +198,33 @@ test('a failed discovery leaves the rows it wrote, while a provider without rows
   expect(JSON.parse(await readFile(file, 'utf8')).modelPicker.options.map((row: any) => row.model)).toEqual(['local/qwen'])
 }))
 
-test('a lock left by a writer that died is reclaimed instead of blocking every later sync', async () => temporary(async configDir => {
+test('a failed discovery keeps the model data it wrote for a provider whose row the person edited', async () => temporary(async configDir => {
+  const file = path.join(configDir, 'settings.json')
+  const modelSettings = { 'codex/gpt-6.1-sol': { autoCompactWindow: 400000 } }
+  await syncPicker({ configDir, rows, modelSettings })
+  const settings = JSON.parse(await readFile(file, 'utf8'))
+  settings.modelPicker.options[0].label = 'My Sol'
+  await writeFile(file, JSON.stringify(settings))
+  await syncPicker({ configDir, rows, modelSettings })
+  const written = await readFile(file, 'utf8')
+  expect(JSON.parse(written).modelSettings['codex/gpt-6.1-sol']).toEqual({ autoCompactWindow: 400000 })
+  expect(await syncPicker({ configDir, rows: rows.slice(1), unavailable: ['codex'] })).toMatchObject({ ok: false, changed: false })
+  expect(await readFile(file, 'utf8')).toBe(written)
+}))
+
+test('a lock left by a writer that died is reclaimed once, however many sessions find it', async () => temporary(async configDir => {
   const lock = path.join(configDir, '.rice-multi-models-picker.lock')
   await mkdir(lock)
   const old = new Date(Date.now() - 120_000)
   await utimes(lock, old, old)
   const started = Date.now()
-  expect(await syncPicker({ configDir, rows })).toMatchObject({ ok: true, count: rows.length })
+  const results = await Promise.all(Array.from({ length: 12 }, () => syncPicker({ configDir, rows })))
+  expect(results.every(result => result.ok)).toBe(true)
   expect(Date.now() - started).toBeLessThan(5_000)
-  expect((await readdir(configDir)).some(name => name.includes('.lock'))).toBe(false)
+  const settings = JSON.parse(await readFile(path.join(configDir, 'settings.json'), 'utf8'))
+  expect(settings.modelPicker.options.map((row: any) => row.model)).toEqual(rows.map(row => row.model))
+  expect(JSON.parse(await readFile(path.join(configDir, '.rice-multi-models-picker.json'), 'utf8')).rows.map((row: any) => row.model)).toEqual(rows.map(row => row.model))
+  expect((await readdir(configDir)).some(name => name.includes('.lock') || name.endsWith('.tmp'))).toBe(false)
 }))
 
 test('malformed settings or ownership records are never overwritten', async () => temporary(async configDir => {

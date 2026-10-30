@@ -43,6 +43,50 @@ const TRANSIENT = new Set(['EPERM', 'EACCES', 'EBUSY'])
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 /** A writer holds the lock for milliseconds and its caller kills it after 10 s, so an older lock was left by a process that died. */
 const STALE_LOCK_MS = 60_000
+const age = (target: string) => stat(target).then(info => ({ ino: info.ino, age: Date.now() - info.mtimeMs }), () => undefined)
+
+/** Takes the picker lock, a directory holding this writer's token; a lock left by a writer that died is reclaimed. */
+async function acquire(lock: string): Promise<string> {
+  const token = randomUUID()
+  const deadline = Date.now() + 10_000
+  for (;;) {
+    try {
+      await mkdir(lock)
+      await writeFile(path.join(lock, 'owner'), token, { flag: 'wx', mode: 0o600 })
+      return token
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code ?? ''
+      if (code !== 'EEXIST' && !(process.platform === 'win32' && TRANSIENT.has(code))) throw error
+    }
+    const seen = await age(lock)
+    if (seen && seen.age > STALE_LOCK_MS) {
+      // Reclaimers take turns through a second lock, and each moves aside only the very lock it judged stale,
+      // so a lock a live writer has just taken is never reclaimed on an earlier observation.
+      const gate = `${lock}.reclaim`
+      if (await mkdir(gate).then(() => true, () => false)) {
+        try {
+          const now = await age(lock)
+          if (now && now.ino === seen.ino && now.age > STALE_LOCK_MS) {
+            const aside = `${lock}.${randomUUID()}.stale`
+            await rename(lock, aside)
+            await rm(aside, { recursive: true, force: true }).catch(() => {})
+          }
+        } finally { await rm(gate, { recursive: true, force: true }).catch(() => {}) }
+        continue
+      }
+      const gateAge = await age(gate)
+      if (gateAge && gateAge.age > STALE_LOCK_MS) await rm(gate, { recursive: true, force: true }).catch(() => {})
+    }
+    if (Date.now() >= deadline) throw new Error('Picker sync lock is busy; retry /rice-models setup repair. If no session is running, remove the stale .rice-multi-models-picker.lock directory')
+    await pause(25)
+  }
+}
+
+/** Removes the lock only while it is still this writer's. */
+async function release(lock: string, token: string): Promise<void> {
+  const owner = await readFile(path.join(lock, 'owner'), 'utf8').catch(() => undefined)
+  if (owner === token) await rm(lock, { recursive: true, force: true }).catch(() => {})
+}
 
 async function atomicWrite(file: string, data: unknown): Promise<void> {
   const temp = `${file}.${randomUUID()}.tmp`
@@ -65,34 +109,21 @@ export async function syncPicker(input: PickerSyncInput): Promise<PickerSyncResu
   const file = path.join(input.configDir, 'settings.json')
   const record = path.join(input.configDir, '.rice-multi-models-picker.json')
   const lock = path.join(input.configDir, '.rice-multi-models-picker.lock')
-  let locked = false
+  let token: string | undefined
   try {
     await mkdir(input.configDir, { recursive: true })
-    const deadline = Date.now() + 10_000
-    do {
-      try { await mkdir(lock); locked = true; break } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code ?? ''
-        if (code !== 'EEXIST' && !(process.platform === 'win32' && TRANSIENT.has(code))) throw error
-        const held = await stat(lock).then(info => Date.now() - info.mtimeMs, () => 0)
-        if (held > STALE_LOCK_MS) {
-          // Move it aside first, so of two sessions reclaiming the same lock only one removes it.
-          const aside = `${lock}.${randomUUID()}.stale`
-          if (await rename(lock, aside).then(() => true, () => false)) await rm(aside, { recursive: true, force: true }).catch(() => {})
-          continue
-        }
-        if (Date.now() >= deadline) throw new Error('Picker sync lock is busy; retry /rice-models setup repair. If no session is running, remove the stale .rice-multi-models-picker.lock directory')
-        await pause(25)
-      }
-    } while (!locked)
+    token = await acquire(lock)
     const settings = await readJson(file, {})
     const ownedJson = await readJson(record, { version: 1, rows: [], edited: [] })
     if (ownedJson.version !== 1 || !Array.isArray(ownedJson.rows) || ownedJson.rows.some(row => !object(row) || typeof row.model !== 'string') || !Array.isArray(ownedJson.edited) || ownedJson.edited.some(id => typeof id !== 'string')) throw new Error('Picker ownership record is malformed; nothing was overwritten')
     const ownership = ownedJson as unknown as Ownership
-    // A failed discovery is no news about the models: rows of a provider that did not answer stay as last written.
+    // A failed discovery is no news about the models: the rows and model data this mod wrote for a provider that
+    // did not answer stay as last written, whether or not the person has since edited the row.
     const failed = new Set(Array.isArray(input.unavailable) ? input.unavailable.filter(id => typeof id === 'string') : [])
     const all = failed.has('runtime') || failed.has('configured')
-    const kept = ownership.rows.map(row => row.model as string).filter(id => all || [...failed].some(provider => id.startsWith(`${provider}/`)))
-    if (kept.length) return { ok: false, changed: false, count: 0, path: file, error: `Model discovery did not answer for ${[...failed].sort().join(', ')}, so the picker rows and model data were left as last written; /rice-models refresh retries discovery.` }
+    const ownedIds = [...ownership.rows.map(row => row.model as string), ...Object.keys(object(ownership.modelSettings) ? ownership.modelSettings : {})]
+    const kept = ownedIds.filter(id => all || [...failed].some(provider => id.startsWith(`${provider}/`)))
+    if (kept.length || all && object(ownership.env) && Object.keys(ownership.env).length) return { ok: false, changed: false, count: 0, path: file, error: `Model discovery did not answer for ${[...failed].sort().join(', ')}, so the picker rows and model data were left as last written; /rice-models refresh retries discovery.` }
     if (settings.modelPicker !== undefined && !object(settings.modelPicker)) throw new Error('settings.json modelPicker is malformed; nothing was overwritten')
     const picker = (settings.modelPicker ?? {}) as Json
     if (picker.options !== undefined && !Array.isArray(picker.options)) throw new Error('settings.json modelPicker.options is malformed; nothing was overwritten')
@@ -189,5 +220,5 @@ export async function syncPicker(input: PickerSyncInput): Promise<PickerSyncResu
     return { ok: true, changed, count: added.length, path: file, preserved: retained.length }
   } catch (error) {
     return { ok: false, changed: false, count: 0, path: file, error: error instanceof Error ? error.message : 'Picker synchronization failed' }
-  } finally { if (locked) await rm(lock, { recursive: true, force: true }).catch(() => {}) }
+  } finally { if (token) await release(lock, token) }
 }
