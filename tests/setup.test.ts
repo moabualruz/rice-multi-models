@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { mkdtemp, mkdir, readFile, writeFile, rm, readdir, symlink, chmod } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, writeFile, rm, readdir, symlink, chmod, realpath } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -238,7 +238,7 @@ test('a failed discovery keeps the env it wrote even when it owns no row or mode
 }))
 
 test('a lock whose holder was killed never blocks a later sync', async () => temporary(async configDir => {
-  const port = pickerLockPort(configDir)
+  const port = await pickerLockPort(configDir)
   const holder = Bun.spawn([process.execPath, '-e', `require('node:net').createServer().listen({ host: '127.0.0.1', port: ${port}, exclusive: true }, () => console.log('held'))`], { stdout: 'pipe' })
   const reader = holder.stdout.getReader()
   expect(new TextDecoder().decode((await reader.read()).value)).toContain('held')
@@ -252,7 +252,8 @@ test('a lock whose holder was killed never blocks a later sync', async () => tem
 
 test('a sync waits while another writer holds the lock and runs once it lets go', async () => temporary(async configDir => {
   const holder = createServer()
-  await new Promise<void>(resolve => holder.listen({ host: '127.0.0.1', port: pickerLockPort(configDir), exclusive: true }, resolve))
+  const port = await pickerLockPort(configDir)
+  await new Promise<void>(resolve => holder.listen({ host: '127.0.0.1', port, exclusive: true }, resolve))
   const started = Date.now()
   const pending = syncPicker({ configDir, rows })
   await new Promise(resolve => setTimeout(resolve, 300))
@@ -264,7 +265,7 @@ test('a sync waits while another writer holds the lock and runs once it lets go'
 
 test('a lock another program keeps is reported by name through the hook, before the hook stops the helper', async () => temporary(async configDir => {
   const holder = createServer()
-  const port = pickerLockPort(configDir)
+  const port = await pickerLockPort(configDir)
   await new Promise<void>(resolve => holder.listen({ host: '127.0.0.1', port, exclusive: true }, resolve))
   try {
     const node = Bun.which('node')
@@ -285,6 +286,32 @@ test('a lock another program keeps is reported by name through the hook, before 
     expect(await readdir(configDir)).not.toContain('settings.json')
   } finally { await new Promise(resolve => holder.close(resolve)) }
 }), 15_000)
+
+test('sessions reaching the config directory by a symlink and by its real path share one lock', async () => temporary(async dir => {
+  if (process.platform === 'win32') return
+  const real = path.join(dir, 'real')
+  const linked = path.join(dir, 'linked')
+  await mkdir(real)
+  await symlink(real, linked, 'dir')
+  expect(await pickerLockPort(linked)).toBe(await pickerLockPort(real))
+  await writeFile(path.join(real, 'settings.json'), JSON.stringify({ modelPicker: { options: [{ model: 'codex/personal', label: 'Personal' }] } }))
+  const results = await Promise.all(Array.from({ length: 16 }, (_, index) => syncPicker({ configDir: index % 2 ? linked : real, rows })))
+  expect(results.every(result => result.ok)).toBe(true)
+  const settings = JSON.parse(await readFile(path.join(real, 'settings.json'), 'utf8'))
+  expect(settings.modelPicker.options.map((row: any) => row.model)).toEqual(['codex/personal', ...rows.map(row => row.model)])
+  expect(JSON.parse(await readFile(path.join(real, '.rice-multi-models-picker.json'), 'utf8')).rows.map((row: any) => row.model)).toEqual(rows.map(row => row.model))
+  expect(await realpath(linked)).toBe(await realpath(real))
+}))
+
+test('a failed discovery on the first sync after an upgrade from before 0.6 keeps the generated rows', async () => temporary(async configDir => {
+  const file = path.join(configDir, 'settings.json')
+  const legacy = { model: 'codex/gpt-5.5', label: 'gpt-5.5 (Codex)', description: 'ChatGPT subscription via rice-multi-models', behavesAs: 'claude-sonnet-4-6' }
+  await writeFile(file, JSON.stringify({ modelPicker: { options: [legacy] } }))
+  const written = await readFile(file, 'utf8')
+  expect(await syncPicker({ configDir, rows: [], unavailable: ['codex', 'runtime'] })).toMatchObject({ ok: false, changed: false })
+  expect(await readFile(file, 'utf8')).toBe(written)
+  expect(await readdir(configDir)).not.toContain('.rice-multi-models-picker.json')
+}))
 
 test('malformed settings or ownership records are never overwritten', async () => temporary(async configDir => {
   const file = path.join(configDir, 'settings.json')

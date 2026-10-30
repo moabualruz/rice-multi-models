@@ -8722,7 +8722,7 @@ async function setupCodex(env = process.env) {
 }
 
 // helper/picker-settings.ts
-import { mkdir as mkdir3, readFile as readFile3, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir as mkdir3, readFile as readFile3, realpath as realpath4, rename, rm, writeFile } from "node:fs/promises";
 import { createServer as createServer2 } from "node:net";
 import path4 from "node:path";
 import { createHash as createHash5, randomUUID } from "node:crypto";
@@ -8772,11 +8772,11 @@ async function atomicWrite(file, data) {
   }
 }
 var LOCK_WAIT_MS = 7e3;
-function pickerLockPort(configDir) {
-  return 49152 + createHash5("sha256").update(path4.resolve(configDir)).digest().readUInt32BE(0) % 16384;
+async function pickerLockPort(configDir) {
+  return 49152 + createHash5("sha256").update(await realpath4(configDir)).digest().readUInt32BE(0) % 16384;
 }
 async function acquire(configDir) {
-  const port = pickerLockPort(configDir);
+  const port = await pickerLockPort(configDir);
   const deadline = Date.now() + LOCK_WAIT_MS;
   for (; ; ) {
     const server = createServer2((socket) => socket.destroy());
@@ -8807,12 +8807,6 @@ async function syncPicker(input) {
     const ownedJson = await readJson(record4, { version: 1, rows: [], edited: [] });
     if (ownedJson.version !== 1 || !Array.isArray(ownedJson.rows) || ownedJson.rows.some((row) => !object2(row) || typeof row.model !== "string") || !Array.isArray(ownedJson.edited) || ownedJson.edited.some((id2) => typeof id2 !== "string")) throw new Error("Picker ownership record is malformed; nothing was overwritten");
     const ownership = ownedJson;
-    const failed = new Set(Array.isArray(input.unavailable) ? input.unavailable.filter((id2) => typeof id2 === "string") : []);
-    const all = failed.has("runtime") || failed.has("configured");
-    const ownedIds = [...ownership.rows.map((row) => row.model), ...Object.keys(object2(ownership.modelSettings) ? ownership.modelSettings : {})];
-    const aliases = object2(input.aliases) ? input.aliases : {};
-    const kept = ownedIds.filter((id2) => all || [...failed].some((provider2) => [id2, aliases[id2]].some((target) => typeof target === "string" && target.startsWith(`${provider2}/`))));
-    if (kept.length || all && object2(ownership.env) && Object.keys(ownership.env).length) return { ok: false, changed: false, count: 0, path: file, error: `Model discovery did not answer for ${[...failed].sort().join(", ")}, so the picker rows and model data were left as last written; /rice-models refresh retries discovery.` };
     if (settings.modelPicker !== void 0 && !object2(settings.modelPicker)) throw new Error("settings.json modelPicker is malformed; nothing was overwritten");
     const picker = settings.modelPicker ?? {};
     if (picker.options !== void 0 && !Array.isArray(picker.options)) throw new Error("settings.json modelPicker.options is malformed; nothing was overwritten");
@@ -8822,6 +8816,12 @@ async function syncPicker(input) {
     for (const row of options) {
       if (legacyGenerated(row) && !old.has(row.model) && !edited.has(row.model)) old.set(row.model, row);
     }
+    const failed = new Set(Array.isArray(input.unavailable) ? input.unavailable.filter((id2) => typeof id2 === "string") : []);
+    const all = failed.has("runtime") || failed.has("configured");
+    const ownedIds = [...old.keys(), ...Object.keys(object2(ownership.modelSettings) ? ownership.modelSettings : {})];
+    const aliases = object2(input.aliases) ? input.aliases : {};
+    const kept = ownedIds.filter((id2) => all || [...failed].some((provider2) => [id2, aliases[id2]].some((target) => typeof target === "string" && target.startsWith(`${provider2}/`))));
+    if (kept.length || all && object2(ownership.env) && Object.keys(ownership.env).length) return { ok: false, changed: false, count: 0, path: file, error: `Model discovery did not answer for ${[...failed].sort().join(", ")}, so the picker rows and model data were left as last written; /rice-models refresh retries discovery.` };
     const retained = [];
     for (const row of options) {
       const id2 = object2(row) && typeof row.model === "string" ? row.model : void 0;

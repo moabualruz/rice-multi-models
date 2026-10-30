@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { createServer, type Server } from 'node:net'
 import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
@@ -58,9 +58,9 @@ async function atomicWrite(file: string, data: unknown): Promise<void> {
 /** How long a writer waits for the lock: inside the 10 s the hook gives the whole helper, so a busy lock is reported by name. */
 export const LOCK_WAIT_MS = 7_000
 
-/** The loopback port that is this config directory's picker lock, in the dynamic range. */
-export function pickerLockPort(configDir: string): number {
-  return 49152 + createHash('sha256').update(path.resolve(configDir)).digest().readUInt32BE(0) % 16384
+/** The loopback port that is this config directory's picker lock, in the dynamic range: one port per physical directory, however it is reached. */
+export async function pickerLockPort(configDir: string): Promise<number> {
+  return 49152 + createHash('sha256').update(await realpath(configDir)).digest().readUInt32BE(0) % 16384
 }
 
 /**
@@ -68,7 +68,7 @@ export function pickerLockPort(configDir: string): number {
  * frees it the moment the holder exits, crashes or is killed, so a lock is never left behind and never reclaimed.
  */
 async function acquire(configDir: string): Promise<Server> {
-  const port = pickerLockPort(configDir)
+  const port = await pickerLockPort(configDir)
   const deadline = Date.now() + LOCK_WAIT_MS
   for (;;) {
     const server = createServer(socket => socket.destroy())
@@ -101,14 +101,6 @@ export async function syncPicker(input: PickerSyncInput): Promise<PickerSyncResu
     const ownedJson = await readJson(record, { version: 1, rows: [], edited: [] })
     if (ownedJson.version !== 1 || !Array.isArray(ownedJson.rows) || ownedJson.rows.some(row => !object(row) || typeof row.model !== 'string') || !Array.isArray(ownedJson.edited) || ownedJson.edited.some(id => typeof id !== 'string')) throw new Error('Picker ownership record is malformed; nothing was overwritten')
     const ownership = ownedJson as unknown as Ownership
-    // A failed discovery is no news about the models: the rows and model data this mod wrote for a provider that
-    // did not answer stay as last written, whether or not the person has since edited the row.
-    const failed = new Set(Array.isArray(input.unavailable) ? input.unavailable.filter(id => typeof id === 'string') : [])
-    const all = failed.has('runtime') || failed.has('configured')
-    const ownedIds = [...ownership.rows.map(row => row.model as string), ...Object.keys(object(ownership.modelSettings) ? ownership.modelSettings : {})]
-    const aliases = object(input.aliases) ? input.aliases : {}
-    const kept = ownedIds.filter(id => all || [...failed].some(provider => [id, aliases[id]].some(target => typeof target === 'string' && target.startsWith(`${provider}/`))))
-    if (kept.length || all && object(ownership.env) && Object.keys(ownership.env).length) return { ok: false, changed: false, count: 0, path: file, error: `Model discovery did not answer for ${[...failed].sort().join(', ')}, so the picker rows and model data were left as last written; /rice-models refresh retries discovery.` }
     if (settings.modelPicker !== undefined && !object(settings.modelPicker)) throw new Error('settings.json modelPicker is malformed; nothing was overwritten')
     const picker = (settings.modelPicker ?? {}) as Json
     if (picker.options !== undefined && !Array.isArray(picker.options)) throw new Error('settings.json modelPicker.options is malformed; nothing was overwritten')
@@ -118,6 +110,14 @@ export async function syncPicker(input: PickerSyncInput): Promise<PickerSyncResu
     for (const row of options) {
       if (legacyGenerated(row) && !old.has(row.model as string) && !edited.has(row.model as string)) old.set(row.model as string, row)
     }
+    // A failed discovery is no news about the models: the rows and model data this mod wrote for a provider that
+    // did not answer stay as last written, whether or not the person has since edited the row, including generated rows from before 0.6 adopted above.
+    const failed = new Set(Array.isArray(input.unavailable) ? input.unavailable.filter(id => typeof id === 'string') : [])
+    const all = failed.has('runtime') || failed.has('configured')
+    const ownedIds = [...old.keys(), ...Object.keys(object(ownership.modelSettings) ? ownership.modelSettings : {})]
+    const aliases = object(input.aliases) ? input.aliases : {}
+    const kept = ownedIds.filter(id => all || [...failed].some(provider => [id, aliases[id]].some(target => typeof target === 'string' && target.startsWith(`${provider}/`))))
+    if (kept.length || all && object(ownership.env) && Object.keys(ownership.env).length) return { ok: false, changed: false, count: 0, path: file, error: `Model discovery did not answer for ${[...failed].sort().join(', ')}, so the picker rows and model data were left as last written; /rice-models refresh retries discovery.` }
     const retained: unknown[] = []
     for (const row of options) {
       const id = object(row) && typeof row.model === 'string' ? row.model : undefined
