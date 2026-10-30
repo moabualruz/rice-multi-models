@@ -73,7 +73,7 @@ import { createEvaluatorSources, registerEvaluatorSources } from './evaluator-so
 
 const PLUGIN = 'rice-multi-models'
 /** Who the requests to declared providers say they come from (OpenCode Go asks each client to name itself). */
-const USER_AGENT = 'rice-multi-models/0.17.5 (claude-code)'
+const USER_AGENT = 'rice-multi-models/0.17.6 (claude-code)'
 const PROVIDERS: Readonly<Record<string, string>> = { codex: 'OpenAI Codex (ChatGPT subscription)' }
 const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 const prefsAtom = atom({ plugin: 'rice-multi-models', key: 'prefs' } as const, { effort: null, transport: 'auto', helper: 'session' })
@@ -255,7 +255,10 @@ async function detectRuntime($: EngineInterface): Promise<Runtime> {
 /** The picker rows, per-model settings and env block of the current catalogue, for Claude's next launch. */
 function publishModelData(port: PickerPort, current: Runtime, rows: PickerRow[]): Promise<PickerResult> {
   publishedCatalogue = catalogue
-  return synchronizePicker(port, current, rows, nativeModelSettings(catalogue, aliasTargets()), nativeModelEnv(catalogue, aliasTargets()))
+  const unavailable = catalogue.providers.filter(entry => entry.status === 'unavailable').map(entry => entry.provider)
+  // No provider answered and at least one failed: nothing was discovered at all, which the helper treats like a runtime failure.
+  if (unavailable.length && !catalogue.providers.some(entry => entry.status === 'fresh')) unavailable.push('runtime')
+  return synchronizePicker(port, current, rows, nativeModelSettings(catalogue, aliasTargets()), nativeModelEnv(catalogue, aliasTargets()), unavailable, aliasTargets())
 }
 
 async function syncPicker($: EngineInterface, current: Runtime, rows: PickerRow[]): Promise<PickerResult> {

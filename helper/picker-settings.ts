@@ -1,8 +1,10 @@
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import { createServer, type Server } from 'node:net'
 import path from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 
-export type PickerSyncInput = { configDir: string; rows: { model: string; label: string; description?: string }[]; modelSettings?: Record<string, Record<string, unknown>>; env?: Record<string, string> }
+/** `unavailable` names the providers whose discovery failed this time (`runtime` and `configured` stand for all of them); `aliases` maps each configured alias to the `provider/model` it names. */
+export type PickerSyncInput = { configDir: string; rows: { model: string; label: string; description?: string }[]; modelSettings?: Record<string, Record<string, unknown>>; env?: Record<string, string>; unavailable?: string[]; aliases?: Record<string, string> }
 export type PickerSyncResult = { ok: boolean; changed: boolean; count: number; path: string; preserved?: number; error?: string }
 type Json = Record<string, unknown>
 type Ownership = { version: 1; rows: Json[]; edited: string[]; modelSettings?: Record<string, Json>; env?: Record<string, string> }
@@ -40,7 +42,6 @@ async function readJson(file: string, absent: Json): Promise<Json> {
 /** Windows reports a directory pending deletion, or a file another process holds open, with these codes. */
 const TRANSIENT = new Set(['EPERM', 'EACCES', 'EBUSY'])
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
-
 async function atomicWrite(file: string, data: unknown): Promise<void> {
   const temp = `${file}.${randomUUID()}.tmp`
   try {
@@ -54,6 +55,37 @@ async function atomicWrite(file: string, data: unknown): Promise<void> {
   } finally { await rm(temp, { force: true }).catch(() => {}) }
 }
 
+/** How long a writer waits for the lock: inside the 10 s the hook gives the whole helper, so a busy lock is reported by name. */
+export const LOCK_WAIT_MS = 7_000
+
+/** The loopback port that is this config directory's picker lock, in the dynamic range: one port per physical directory, however it is reached. */
+export async function pickerLockPort(configDir: string): Promise<number> {
+  return 49152 + createHash('sha256').update(await realpath(configDir)).digest().readUInt32BE(0) % 16384
+}
+
+/**
+ * Takes the picker lock by listening on its loopback port: one process holds it at a time, and the operating system
+ * frees it the moment the holder exits, crashes or is killed, so a lock is never left behind and never reclaimed.
+ */
+async function acquire(configDir: string): Promise<Server> {
+  const port = await pickerLockPort(configDir)
+  const deadline = Date.now() + LOCK_WAIT_MS
+  for (;;) {
+    const server = createServer(socket => socket.destroy())
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject)
+        server.listen({ host: '127.0.0.1', port, exclusive: true }, () => resolve())
+      })
+      return server
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EADDRINUSE') throw new Error(`The picker lock (127.0.0.1:${port}) could not be taken: ${(error as NodeJS.ErrnoException).code ?? 'unknown error'}; nothing was overwritten`)
+      if (Date.now() >= deadline) throw new Error(`Picker sync lock is busy: another session is writing the picker, or another program holds 127.0.0.1:${port}; retry /rice-models setup repair`)
+      await pause(25)
+    }
+  }
+}
+
 /** Serializes startup writers, rereads under the lock, and owns only exact rows it wrote. */
 export async function syncPicker(input: PickerSyncInput): Promise<PickerSyncResult> {
   if (!input || typeof input.configDir !== 'string' || !path.isAbsolute(input.configDir) || !Array.isArray(input.rows) || input.rows.some(row => !object(row) || typeof row.model !== 'string' || typeof row.label !== 'string')) {
@@ -61,19 +93,10 @@ export async function syncPicker(input: PickerSyncInput): Promise<PickerSyncResu
   }
   const file = path.join(input.configDir, 'settings.json')
   const record = path.join(input.configDir, '.rice-multi-models-picker.json')
-  const lock = path.join(input.configDir, '.rice-multi-models-picker.lock')
-  let locked = false
+  let lock: Server | undefined
   try {
     await mkdir(input.configDir, { recursive: true })
-    const deadline = Date.now() + 10_000
-    do {
-      try { await mkdir(lock); locked = true; break } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code ?? ''
-        if (code !== 'EEXIST' && !(process.platform === 'win32' && TRANSIENT.has(code))) throw error
-        if (Date.now() >= deadline) throw new Error('Picker sync lock is busy; retry /rice-models setup repair. If no session is running, remove the stale .rice-multi-models-picker.lock directory')
-        await pause(25)
-      }
-    } while (!locked)
+    lock = await acquire(input.configDir)
     const settings = await readJson(file, {})
     const ownedJson = await readJson(record, { version: 1, rows: [], edited: [] })
     if (ownedJson.version !== 1 || !Array.isArray(ownedJson.rows) || ownedJson.rows.some(row => !object(row) || typeof row.model !== 'string') || !Array.isArray(ownedJson.edited) || ownedJson.edited.some(id => typeof id !== 'string')) throw new Error('Picker ownership record is malformed; nothing was overwritten')
@@ -87,6 +110,14 @@ export async function syncPicker(input: PickerSyncInput): Promise<PickerSyncResu
     for (const row of options) {
       if (legacyGenerated(row) && !old.has(row.model as string) && !edited.has(row.model as string)) old.set(row.model as string, row)
     }
+    // A failed discovery is no news about the models: the rows and model data this mod wrote for a provider that
+    // did not answer stay as last written, whether or not the person has since edited the row, including generated rows from before 0.6 adopted above.
+    const failed = new Set(Array.isArray(input.unavailable) ? input.unavailable.filter(id => typeof id === 'string') : [])
+    const all = failed.has('runtime') || failed.has('configured')
+    const ownedIds = [...old.keys(), ...Object.keys(object(ownership.modelSettings) ? ownership.modelSettings : {})]
+    const aliases = object(input.aliases) ? input.aliases : {}
+    const kept = ownedIds.filter(id => all || [...failed].some(provider => [id, aliases[id]].some(target => typeof target === 'string' && target.startsWith(`${provider}/`))))
+    if (kept.length || all && object(ownership.env) && Object.keys(ownership.env).length) return { ok: false, changed: false, count: 0, path: file, error: `Model discovery did not answer for ${[...failed].sort().join(', ')}, so the picker rows and model data were left as last written; /rice-models refresh retries discovery.` }
     const retained: unknown[] = []
     for (const row of options) {
       const id = object(row) && typeof row.model === 'string' ? row.model : undefined
@@ -174,5 +205,5 @@ export async function syncPicker(input: PickerSyncInput): Promise<PickerSyncResu
     return { ok: true, changed, count: added.length, path: file, preserved: retained.length }
   } catch (error) {
     return { ok: false, changed: false, count: 0, path: file, error: error instanceof Error ? error.message : 'Picker synchronization failed' }
-  } finally { if (locked) await rm(lock, { recursive: true, force: true }).catch(() => {}) }
+  } finally { if (lock) await new Promise(resolve => lock!.close(resolve)) }
 }

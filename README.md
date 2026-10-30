@@ -63,6 +63,11 @@ staleness digests or PreCompact policy skip remain. A provider without a safegua
 newly written model data takes effect at the next Claude launch. New proofs cover a routed subagent's automatic
 compaction (foreground, background, cache-heavy, plus a late-data control) and record whether a child's compaction
 attempt fired, was skipped or failed.
+Release 0.17.6 keeps the `/model` picker when discovery fails: a provider that did not answer keeps the rows and
+model data last written for it instead of having them removed. The picker lock is now a loopback port
+(127.0.0.1, derived from the config directory) that the operating system frees when its holder exits or crashes, so a
+session that dies mid-sync no longer blocks every later sync; another program holding that exact port makes the sync
+report the lock busy.
 Earlier owner/model, capacity, streaming, failure and fork repairs remain.
 The mod registers no MCP tools and needs no launcher, proxy or gateway.
 

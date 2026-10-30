@@ -2270,7 +2270,7 @@ var require_websocket = __commonJS({
     var http = __require("http");
     var net = __require("net");
     var tls = __require("tls");
-    var { randomBytes: randomBytes2, createHash: createHash5 } = __require("crypto");
+    var { randomBytes: randomBytes2, createHash: createHash6 } = __require("crypto");
     var { Duplex, Readable: Readable3 } = __require("stream");
     var { URL: URL2 } = __require("url");
     var PerMessageDeflate2 = require_permessage_deflate();
@@ -2951,7 +2951,7 @@ var require_websocket = __commonJS({
           abortHandshake(websocket, socket, "Invalid Upgrade header");
           return;
         }
-        const digest = createHash5("sha1").update(key + GUID).digest("base64");
+        const digest = createHash6("sha1").update(key + GUID).digest("base64");
         if (res.headers["sec-websocket-accept"] !== digest) {
           abortHandshake(websocket, socket, "Invalid Sec-WebSocket-Accept header");
           return;
@@ -3320,7 +3320,7 @@ var require_websocket_server = __commonJS({
     var EventEmitter = __require("events");
     var http = __require("http");
     var { Duplex } = __require("stream");
-    var { createHash: createHash5 } = __require("crypto");
+    var { createHash: createHash6 } = __require("crypto");
     var extension2 = require_extension();
     var PerMessageDeflate2 = require_permessage_deflate();
     var subprotocol2 = require_subprotocol();
@@ -3627,7 +3627,7 @@ var require_websocket_server = __commonJS({
           );
         }
         if (this._state > RUNNING) return abortHandshake(socket, 503);
-        const digest = createHash5("sha1").update(key + GUID).digest("base64");
+        const digest = createHash6("sha1").update(key + GUID).digest("base64");
         const headers2 = [
           "HTTP/1.1 101 Switching Protocols",
           "Upgrade: websocket",
@@ -8722,9 +8722,10 @@ async function setupCodex(env = process.env) {
 }
 
 // helper/picker-settings.ts
-import { mkdir as mkdir3, readFile as readFile3, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir as mkdir3, readFile as readFile3, realpath as realpath4, rename, rm, writeFile } from "node:fs/promises";
+import { createServer as createServer2 } from "node:net";
 import path4 from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash as createHash5, randomUUID } from "node:crypto";
 var NATIVE_SETTING_KEYS = ["autoCompactWindow", "maxEffortLevel"];
 var NATIVE_ENV_KEYS = ["CLAUDE_CODE_MAX_CONTEXT_TOKENS", "CLAUDE_CODE_MODEL_CAPABILITIES"];
 var object2 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -8770,29 +8771,38 @@ async function atomicWrite(file, data) {
     });
   }
 }
+var LOCK_WAIT_MS = 7e3;
+async function pickerLockPort(configDir) {
+  return 49152 + createHash5("sha256").update(await realpath4(configDir)).digest().readUInt32BE(0) % 16384;
+}
+async function acquire(configDir) {
+  const port = await pickerLockPort(configDir);
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  for (; ; ) {
+    const server = createServer2((socket) => socket.destroy());
+    try {
+      await new Promise((resolve3, reject) => {
+        server.once("error", reject);
+        server.listen({ host: "127.0.0.1", port, exclusive: true }, () => resolve3());
+      });
+      return server;
+    } catch (error) {
+      if (error.code !== "EADDRINUSE") throw new Error(`The picker lock (127.0.0.1:${port}) could not be taken: ${error.code ?? "unknown error"}; nothing was overwritten`);
+      if (Date.now() >= deadline) throw new Error(`Picker sync lock is busy: another session is writing the picker, or another program holds 127.0.0.1:${port}; retry /rice-models setup repair`);
+      await pause(25);
+    }
+  }
+}
 async function syncPicker(input) {
   if (!input || typeof input.configDir !== "string" || !path4.isAbsolute(input.configDir) || !Array.isArray(input.rows) || input.rows.some((row) => !object2(row) || typeof row.model !== "string" || typeof row.label !== "string")) {
     return { ok: false, changed: false, count: 0, path: "", error: "sync-picker requires an absolute configDir and valid rows" };
   }
   const file = path4.join(input.configDir, "settings.json");
   const record4 = path4.join(input.configDir, ".rice-multi-models-picker.json");
-  const lock = path4.join(input.configDir, ".rice-multi-models-picker.lock");
-  let locked = false;
+  let lock;
   try {
     await mkdir3(input.configDir, { recursive: true });
-    const deadline = Date.now() + 1e4;
-    do {
-      try {
-        await mkdir3(lock);
-        locked = true;
-        break;
-      } catch (error) {
-        const code2 = error.code ?? "";
-        if (code2 !== "EEXIST" && !(process.platform === "win32" && TRANSIENT2.has(code2))) throw error;
-        if (Date.now() >= deadline) throw new Error("Picker sync lock is busy; retry /rice-models setup repair. If no session is running, remove the stale .rice-multi-models-picker.lock directory");
-        await pause(25);
-      }
-    } while (!locked);
+    lock = await acquire(input.configDir);
     const settings = await readJson(file, {});
     const ownedJson = await readJson(record4, { version: 1, rows: [], edited: [] });
     if (ownedJson.version !== 1 || !Array.isArray(ownedJson.rows) || ownedJson.rows.some((row) => !object2(row) || typeof row.model !== "string") || !Array.isArray(ownedJson.edited) || ownedJson.edited.some((id2) => typeof id2 !== "string")) throw new Error("Picker ownership record is malformed; nothing was overwritten");
@@ -8806,6 +8816,12 @@ async function syncPicker(input) {
     for (const row of options) {
       if (legacyGenerated(row) && !old.has(row.model) && !edited.has(row.model)) old.set(row.model, row);
     }
+    const failed = new Set(Array.isArray(input.unavailable) ? input.unavailable.filter((id2) => typeof id2 === "string") : []);
+    const all = failed.has("runtime") || failed.has("configured");
+    const ownedIds = [...old.keys(), ...Object.keys(object2(ownership.modelSettings) ? ownership.modelSettings : {})];
+    const aliases = object2(input.aliases) ? input.aliases : {};
+    const kept = ownedIds.filter((id2) => all || [...failed].some((provider2) => [id2, aliases[id2]].some((target) => typeof target === "string" && target.startsWith(`${provider2}/`))));
+    if (kept.length || all && object2(ownership.env) && Object.keys(ownership.env).length) return { ok: false, changed: false, count: 0, path: file, error: `Model discovery did not answer for ${[...failed].sort().join(", ")}, so the picker rows and model data were left as last written; /rice-models refresh retries discovery.` };
     const retained = [];
     for (const row of options) {
       const id2 = object2(row) && typeof row.model === "string" ? row.model : void 0;
@@ -8889,8 +8905,7 @@ async function syncPicker(input) {
   } catch (error) {
     return { ok: false, changed: false, count: 0, path: file, error: error instanceof Error ? error.message : "Picker synchronization failed" };
   } finally {
-    if (locked) await rm(lock, { recursive: true, force: true }).catch(() => {
-    });
+    if (lock) await new Promise((resolve3) => lock.close(resolve3));
   }
 }
 
@@ -10406,7 +10421,7 @@ function deriveTemplate(capture) {
 
 // helper/native-run.ts
 import { spawn as spawn4 } from "node:child_process";
-import { createServer as createServer2 } from "node:http";
+import { createServer as createServer3 } from "node:http";
 import { mkdir as mkdir5, mkdtemp, readdir, readFile as readFile5, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
 import { tmpdir as tmpdir2 } from "node:os";
 import path6 from "node:path";
@@ -10511,7 +10526,7 @@ async function runNative(options) {
       });
     }
   };
-  const server = createServer2(async (request2, response) => {
+  const server = createServer3(async (request2, response) => {
     try {
       const raw = await body(request2);
       if (request2.url?.startsWith("/v1/messages/count_tokens")) {
