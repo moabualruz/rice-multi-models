@@ -2270,7 +2270,7 @@ var require_websocket = __commonJS({
     var http = __require("http");
     var net = __require("net");
     var tls = __require("tls");
-    var { randomBytes: randomBytes2, createHash: createHash5 } = __require("crypto");
+    var { randomBytes: randomBytes2, createHash: createHash6 } = __require("crypto");
     var { Duplex, Readable: Readable3 } = __require("stream");
     var { URL: URL2 } = __require("url");
     var PerMessageDeflate2 = require_permessage_deflate();
@@ -2951,7 +2951,7 @@ var require_websocket = __commonJS({
           abortHandshake(websocket, socket, "Invalid Upgrade header");
           return;
         }
-        const digest = createHash5("sha1").update(key + GUID).digest("base64");
+        const digest = createHash6("sha1").update(key + GUID).digest("base64");
         if (res.headers["sec-websocket-accept"] !== digest) {
           abortHandshake(websocket, socket, "Invalid Sec-WebSocket-Accept header");
           return;
@@ -3320,7 +3320,7 @@ var require_websocket_server = __commonJS({
     var EventEmitter = __require("events");
     var http = __require("http");
     var { Duplex } = __require("stream");
-    var { createHash: createHash5 } = __require("crypto");
+    var { createHash: createHash6 } = __require("crypto");
     var extension2 = require_extension();
     var PerMessageDeflate2 = require_permessage_deflate();
     var subprotocol2 = require_subprotocol();
@@ -3627,7 +3627,7 @@ var require_websocket_server = __commonJS({
           );
         }
         if (this._state > RUNNING) return abortHandshake(socket, 503);
-        const digest = createHash5("sha1").update(key + GUID).digest("base64");
+        const digest = createHash6("sha1").update(key + GUID).digest("base64");
         const headers2 = [
           "HTTP/1.1 101 Switching Protocols",
           "Upgrade: websocket",
@@ -3752,12 +3752,12 @@ async function continuationLock(configDir, lifetime) {
     }
   }
   const held = await handle.stat();
-  let release2 = () => {
+  let release = () => {
   };
   const ended = new Promise((resolve3) => {
-    release2 = resolve3;
+    release = resolve3;
   });
-  const stop2 = () => release2();
+  const stop2 = () => release();
   for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.once(signal, stop2);
   lifetime?.addEventListener("abort", stop2, { once: true });
   const keepAlive = setInterval(() => {
@@ -6754,7 +6754,7 @@ async function* codexStep(req, model2, signal, options = {}) {
     return stream;
   };
   const task = (async () => {
-    let release2;
+    let release;
     let attempts = 0;
     try {
       const limit = options.maxInFlight ?? codexStepLimit(options.env);
@@ -6762,7 +6762,7 @@ async function* codexStep(req, model2, signal, options = {}) {
       onAuth(auth2);
       signal.throwIfAborted();
       const accountKey = createHash4("sha256").update(auth2["chatgpt-account-id"]).digest("hex");
-      release2 = await codexAccounts.acquire(accountKey, limit, signal);
+      release = await codexAccounts.acquire(accountKey, limit, signal);
       for (let attempt = 1; attempt <= OVERLOAD_MAX_ATTEMPTS; attempt++) {
         attempts = attempt;
         attemptSocket = void 0;
@@ -6845,7 +6845,7 @@ async function* codexStep(req, model2, signal, options = {}) {
       });
       queue.push({ type: "error", kind: "request", text: finalText(failure, attempts), ...signal.aborted ? { aborted: true } : {} });
     } finally {
-      release2?.();
+      release?.();
       queue.close();
     }
   })();
@@ -7902,10 +7902,10 @@ var bytesOf = (blocks2) => blocks2.reduce((n, { block: b }) => n + (b.type === "
 function thinkingStore() {
   const turns = recent((t) => bytesOf(t.blocks), THINKING_MAX_BYTES);
   return {
-    seal: (owner2, calls, blocks2) => calls.forEach((c) => turns.set(c, { owner: owner2, blocks: blocks2 })),
-    sealed: (owner2) => (minted) => {
+    seal: (owner, calls, blocks2) => calls.forEach((c) => turns.set(c, { owner, blocks: blocks2 })),
+    sealed: (owner) => (minted) => {
       const hit = turns.get(minted);
-      return hit?.owner === owner2 ? hit.blocks : void 0;
+      return hit?.owner === owner ? hit.blocks : void 0;
     }
   };
 }
@@ -8185,8 +8185,8 @@ function createStepper(env) {
       thinking.seal(scope, record4.calls.map((call) => call.id), record4.blocks);
     }
     if (req.continuation) yield { type: "continuation_status", status: m.kind === "openai" ? "no-extra-required" : restored.length ? "restored" : "no-compatible-state" };
-    const owner2 = req.continuation ? scope : conversationKey;
-    const sealed = req.continuation ? (id2) => restored.find((record4) => record4.calls.some((call) => call.id === id2))?.blocks : thinking.sealed(owner2);
+    const owner = req.continuation ? scope : conversationKey;
+    const sealed = req.continuation ? (id2) => restored.find((record4) => record4.calls.some((call) => call.id === id2))?.blocks : thinking.sealed(owner);
     let enc;
     try {
       enc = codec.encode({ system: req.system, messages: normalize(req.transcript, m.vision, ids.of(req.continuation ? scope : p.id), sealed), tools: req.tools, ...req.effort === void 0 ? {} : { effort: req.effort }, cacheKey: conversationKey, ...req.continuation ? { durableContinuation: true } : {} }, p, m);
@@ -8242,7 +8242,7 @@ function createStepper(env) {
     const end = asm.end(p, cut === void 0 ? void 0 : cutText(p, cut));
     const { calls, blocks: blocks2 } = asm.turn();
     if (end.finish !== "error" && calls.length > 0) {
-      thinking.seal(owner2, calls, blocks2);
+      thinking.seal(owner, calls, blocks2);
       if (blocks2.length > 0) notes += ` thinking=${blocks2.length}`;
     }
     if (req.continuation && end.finish !== "error" && end.events.some((event) => event.type === "stop" && event.reason === "tool_use")) {
@@ -8295,21 +8295,21 @@ async function post(r, signal) {
   const total = setTimeout(() => cutBy({ kind: "total", detail: String(r.totalS) }), Math.min(r.totalS * 1e3, MAX_TIMEOUT_MS));
   let stall;
   const arm = () => (clearTimeout(stall), stall = setTimeout(() => cutBy({ kind: "stall", detail: String(r.stallS) }), r.stallS * 1e3));
-  const release2 = () => (clearTimeout(stall), clearTimeout(total));
+  const release = () => (clearTimeout(stall), clearTimeout(total));
   arm();
   let res;
   try {
     res = await postStream(r.url, r.headers, r.body, AbortSignal.any([signal, ac.signal]));
   } catch (err) {
-    release2();
+    release();
     return { cut: why ?? { kind: "reset", detail: String(err) } };
   }
   if (res.status >= 300 && res.status < 400) {
-    release2();
+    release();
     res.cancel();
     return { cut: { kind: "redirect", detail: String(res.status) } };
   }
-  const cancel = () => (release2(), res.cancel(), ac.abort());
+  const cancel = () => (release(), res.cancel(), ac.abort());
   async function* body2() {
     try {
       arm();
@@ -8722,9 +8722,10 @@ async function setupCodex(env = process.env) {
 }
 
 // helper/picker-settings.ts
-import { mkdir as mkdir3, readdir, readFile as readFile3, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir as mkdir3, readFile as readFile3, rename, rm, writeFile } from "node:fs/promises";
+import { createServer as createServer2 } from "node:net";
 import path4 from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash as createHash5, randomUUID } from "node:crypto";
 var NATIVE_SETTING_KEYS = ["autoCompactWindow", "maxEffortLevel"];
 var NATIVE_ENV_KEYS = ["CLAUDE_CODE_MAX_CONTEXT_TOKENS", "CLAUDE_CODE_MODEL_CAPABILITIES"];
 var object2 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -8751,7 +8752,6 @@ async function readJson(file, absent) {
 }
 var TRANSIENT2 = /* @__PURE__ */ new Set(["EPERM", "EACCES", "EBUSY"]);
 var pause = (ms) => new Promise((resolve3) => setTimeout(resolve3, ms));
-var STALE_LOCK_MS = 6e4;
 async function atomicWrite(file, data) {
   const temp = `${file}.${randomUUID()}.tmp`;
   try {
@@ -8771,51 +8771,26 @@ async function atomicWrite(file, data) {
     });
   }
 }
-var owner = (dir) => readFile3(path4.join(dir, "owner"), "utf8").catch(() => void 0);
-async function acquire(lock) {
-  const token = randomUUID();
-  const fresh = `${lock}.${token}.new`;
-  await mkdir3(fresh);
-  await writeFile(path4.join(fresh, "owner"), token, { flag: "wx", mode: 384 });
+function pickerLockPort(configDir) {
+  return 49152 + createHash5("sha256").update(path4.resolve(configDir)).digest().readUInt32BE(0) % 16384;
+}
+async function acquire(configDir) {
+  const port = pickerLockPort(configDir);
   const deadline = Date.now() + 1e4;
-  try {
-    for (; ; ) {
-      if (await rename(fresh, lock).then(() => true, () => false)) return token;
-      const before = await owner(lock);
-      const held = await stat(lock).then((info) => info, () => void 0);
-      if (!held) continue;
-      if (Date.now() - held.mtimeMs > STALE_LOCK_MS) {
-        let stale = before;
-        if (stale === void 0) {
-          const claim = `legacy-${held.ino}-${randomUUID()}`;
-          if (await writeFile(path4.join(lock, "owner"), claim, { flag: "wx", mode: 384 }).then(() => true, () => false)) stale = claim;
-        }
-        if (stale !== void 0 && await owner(lock) === stale) {
-          const dead = `${lock}.dead-${stale}`;
-          if (await rename(lock, dead).then(() => true, () => false)) await writeFile(path4.join(dead, "reclaimed"), "").catch(() => {
-          });
-        }
-        continue;
-      }
-      if (Date.now() >= deadline) throw new Error("Picker sync lock is busy; retry /rice-models setup repair. If no session is running, remove the stale .rice-multi-models-picker.lock directory");
+  for (; ; ) {
+    const server = createServer2((socket) => socket.destroy());
+    try {
+      await new Promise((resolve3, reject) => {
+        server.once("error", reject);
+        server.listen({ host: "127.0.0.1", port, exclusive: true }, () => resolve3());
+      });
+      return server;
+    } catch (error) {
+      if (error.code !== "EADDRINUSE") throw new Error(`The picker lock (127.0.0.1:${port}) could not be taken: ${error.code ?? "unknown error"}; nothing was overwritten`);
+      if (Date.now() >= deadline) throw new Error(`Picker sync lock is busy: another session is writing the picker, or another program holds 127.0.0.1:${port}; retry /rice-models setup repair`);
       await pause(25);
     }
-  } finally {
-    await rm(fresh, { recursive: true, force: true }).catch(() => {
-    });
   }
-}
-async function release(lock, token) {
-  const dir = path4.dirname(lock);
-  const base = path4.basename(lock);
-  for (const name of await readdir(dir).catch(() => [])) {
-    if (!name.startsWith(`${base}.dead-`)) continue;
-    const info = await stat(path4.join(dir, name)).catch(() => void 0);
-    if (info && Date.now() - info.mtimeMs > STALE_LOCK_MS) await rm(path4.join(dir, name), { recursive: true, force: true }).catch(() => {
-    });
-  }
-  if (await owner(lock) === token) await rm(lock, { recursive: true, force: true }).catch(() => {
-  });
 }
 async function syncPicker(input) {
   if (!input || typeof input.configDir !== "string" || !path4.isAbsolute(input.configDir) || !Array.isArray(input.rows) || input.rows.some((row) => !object2(row) || typeof row.model !== "string" || typeof row.label !== "string")) {
@@ -8823,11 +8798,10 @@ async function syncPicker(input) {
   }
   const file = path4.join(input.configDir, "settings.json");
   const record4 = path4.join(input.configDir, ".rice-multi-models-picker.json");
-  const lock = path4.join(input.configDir, ".rice-multi-models-picker.lock");
-  let token;
+  let lock;
   try {
     await mkdir3(input.configDir, { recursive: true });
-    token = await acquire(lock);
+    lock = await acquire(input.configDir);
     const settings = await readJson(file, {});
     const ownedJson = await readJson(record4, { version: 1, rows: [], edited: [] });
     if (ownedJson.version !== 1 || !Array.isArray(ownedJson.rows) || ownedJson.rows.some((row) => !object2(row) || typeof row.model !== "string") || !Array.isArray(ownedJson.edited) || ownedJson.edited.some((id2) => typeof id2 !== "string")) throw new Error("Picker ownership record is malformed; nothing was overwritten");
@@ -8930,7 +8904,7 @@ async function syncPicker(input) {
   } catch (error) {
     return { ok: false, changed: false, count: 0, path: file, error: error instanceof Error ? error.message : "Picker synchronization failed" };
   } finally {
-    if (token) await release(lock, token);
+    if (lock) await new Promise((resolve3) => lock.close(resolve3));
   }
 }
 
@@ -10446,8 +10420,8 @@ function deriveTemplate(capture) {
 
 // helper/native-run.ts
 import { spawn as spawn4 } from "node:child_process";
-import { createServer as createServer2 } from "node:http";
-import { mkdir as mkdir5, mkdtemp, readdir as readdir2, readFile as readFile5, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
+import { createServer as createServer3 } from "node:http";
+import { mkdir as mkdir5, mkdtemp, readdir, readFile as readFile5, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
 import { tmpdir as tmpdir2 } from "node:os";
 import path6 from "node:path";
 var RUN_LIMIT_MS = 9e4;
@@ -10516,7 +10490,7 @@ async function version(env, cwd, signal) {
 async function transcriptRows(projects) {
   let files;
   try {
-    files = (await readdir2(projects, { recursive: true })).filter((name) => typeof name === "string" && name.endsWith(".jsonl")).sort();
+    files = (await readdir(projects, { recursive: true })).filter((name) => typeof name === "string" && name.endsWith(".jsonl")).sort();
   } catch {
     return [];
   }
@@ -10551,7 +10525,7 @@ async function runNative(options) {
       });
     }
   };
-  const server = createServer2(async (request2, response) => {
+  const server = createServer3(async (request2, response) => {
     try {
       const raw = await body(request2);
       if (request2.url?.startsWith("/v1/messages/count_tokens")) {

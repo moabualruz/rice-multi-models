@@ -64,8 +64,10 @@ newly written model data takes effect at the next Claude launch. New proofs cove
 compaction (foreground, background, cache-heavy, plus a late-data control) and record whether a child's compaction
 attempt fired, was skipped or failed.
 Release 0.17.6 keeps the `/model` picker when discovery fails: a provider that did not answer keeps the rows and
-model data last written for it instead of having them removed, and a picker lock left by a process that died is
-reclaimed after a minute instead of blocking every later sync.
+model data last written for it instead of having them removed. The picker lock is now a loopback port
+(127.0.0.1, derived from the config directory) that the operating system frees when its holder exits or crashes, so a
+session that dies mid-sync no longer blocks every later sync; another program holding that exact port makes the sync
+report the lock busy.
 Earlier owner/model, capacity, streaming, failure and fork repairs remain.
 The mod registers no MCP tools and needs no launcher, proxy or gateway.
 

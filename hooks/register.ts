@@ -256,6 +256,8 @@ async function detectRuntime($: EngineInterface): Promise<Runtime> {
 function publishModelData(port: PickerPort, current: Runtime, rows: PickerRow[]): Promise<PickerResult> {
   publishedCatalogue = catalogue
   const unavailable = catalogue.providers.filter(entry => entry.status === 'unavailable').map(entry => entry.provider)
+  // No provider answered and at least one failed: nothing was discovered at all, which the helper treats like a runtime failure.
+  if (unavailable.length && !catalogue.providers.some(entry => entry.status === 'fresh')) unavailable.push('runtime')
   return synchronizePicker(port, current, rows, nativeModelSettings(catalogue, aliasTargets()), nativeModelEnv(catalogue, aliasTargets()), unavailable, aliasTargets())
 }
 
